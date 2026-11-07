@@ -9,6 +9,7 @@ import { createVorkRenderer, vorkInstalled } from './src/vork.mts';
 import { createDirector } from './src/director.mts';
 import { createClaudeProposer } from './src/proposer.mts';
 import { createHttp } from './src/http.mts';
+import { setupLogging, shutdownLogging, log, errFields } from './src/log.mts';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -42,9 +43,20 @@ export async function main(argv: string[]) {
     }
   }
   process.on('exit', () => { try { if (Number(fs.readFileSync(LOCK, 'utf8')) === process.pid) fs.rmSync(LOCK); } catch {} });
+  // Logging starts once this process owns RUNS: a second Director must not write to the first one's log.
+  // The console.error calls above stay: they run before logging exists and are meant for people.
+  setupLogging({ dir: RUNS });
+  const L = log('main');
+  // A monitor only observes: Node still prints the error and exits with code 1.
+  process.on('uncaughtExceptionMonitor', (e, origin) => L.fatal('director.fatal', 'Director crashed', { origin, ...errFields(e) }));
+  process.on('exit', shutdownLogging);
 
   const vork = vorkInstalled();
-  if (!vork) { console.error('vork not found on PATH. Install it first: https://github.com/voyager-so/vork'); process.exit(1); }
+  if (!vork) {
+    console.error('vork not found on PATH. Install it first: https://github.com/voyager-so/vork');
+    L.fatal('director.fatal', 'vork not found on PATH', { origin: 'vork', errorType: 'VorkNotFound' });
+    process.exit(1);
+  }
   const { help: VORK_HELP, version: VORK_VERSION } = vork;
 
   if (PROJECT) {
@@ -69,8 +81,13 @@ export async function main(argv: string[]) {
   }
   const SERVER_FILE = path.join(RUNS, 'server.json');
   fs.writeFileSync(SERVER_FILE, JSON.stringify({ url: `http://127.0.0.1:${web.port}`, pid: process.pid, agentToken: web.agentToken, project: PROJECT, mode: MODE, started: new Date().toISOString() }, null, 2), { mode: 0o600 });
-  const cleanup = () => { try { const s = JSON.parse(fs.readFileSync(SERVER_FILE, 'utf8')) as { pid?: number }; if (s.pid === process.pid) fs.rmSync(SERVER_FILE); } catch {} process.exit(0); };
-  process.on('SIGINT', cleanup); process.on('SIGTERM', cleanup);
+  L.info('director.start', 'Director started', { mode: MODE, port: web.port, vorkVersion: VORK_VERSION, pid: process.pid });
+  const cleanup = (signal: NodeJS.Signals) => {
+    try { const s = JSON.parse(fs.readFileSync(SERVER_FILE, 'utf8')) as { pid?: number }; if (s.pid === process.pid) fs.rmSync(SERVER_FILE); } catch {}
+    L.info('director.stop', 'Director stopped', { signal });
+    shutdownLogging(); process.exit(0);
+  };
+  process.on('SIGINT', cleanup); process.on('SIGTERM', cleanup); process.on('SIGHUP', cleanup);
   process.on('SIGUSR1', () => { web.rotatePair(); web.openPairing(); });
   web.openPairing();
   console.log(`Render Director on http://127.0.0.1:${web.port}  mode=${MODE}${PROJECT ? `  project=${PROJECT}` : ''}  (${VORK_VERSION}${MODE === 'standalone' ? `, built-in agent: claude ${MODEL}` : ''})`);

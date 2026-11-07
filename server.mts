@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { policyCheck, diffScenes, resolveInside, reportFromAudit } from './src/policy.mts';
 import type { SceneNode, Scene, PolicyResult, AuditEvent } from './src/policy.mts';
 import { main } from './main.mts';
+import { log, errFields, shutdownLogging } from './src/log.mts';
 // Kept importable from here: test/integration.mts and older callers import them from server.mts.
 export { policyCheck, diffScenes, resolveInside, reportFromAudit } from './src/policy.mts';
 
@@ -82,4 +83,7 @@ if (argv[0] === '--report') {
 if (argv[0] && argv[0].startsWith('--') && !['--project', '--port'].includes(argv[0])) {
   console.error('usage: node server.mts [--project DIR] [--port N] | --selftest | --report DIR'); process.exit(2);
 }
-if (process.env.RENDER_DIRECTOR_IMPORT) { /* imported by tests for the pure helpers only */ } else { await main(argv); }
+if (process.env.RENDER_DIRECTOR_IMPORT) { /* imported by tests for the pure helpers only */ } else {
+  // The exit code and the stack Node prints stay as they were; the event is written first (a no-op before setupLogging).
+  await main(argv).catch((e) => { log('main').fatal('director.fatal', 'Director failed to start', { origin: 'main', ...errFields(e) }); shutdownLogging(); throw e; });
+}

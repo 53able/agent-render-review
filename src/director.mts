@@ -10,6 +10,7 @@ import {
 } from './policy.mts';
 import type { Profile, Scene, PolicyResult, Config, RenderInfo, AgentOutput, Proposal, VersionStatus, Version, AgentEvent, AgentEventBody, DirectorState, PagePreviewOk } from './policy.mts';
 import type { Renderer } from './vork.mts';
+import { log, errFields } from './log.mts';
 
 export type RenderResult =
   | { ok: true; info: RenderInfo; cancelled?: undefined; code?: undefined; timedOut?: undefined; log?: undefined }
@@ -62,6 +63,7 @@ export type Director = ReturnType<typeof createDirector>;
 
 export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter, proposer, clock = Date.now }: DirectorOptions) {
   const MODE: 'ade' | 'standalone' = PROJECT ? 'ade' : 'standalone';
+  const L = log('director');
 
   // project config
   const CONFIG_FILE = path.join(RUNS, 'config.json');
@@ -69,7 +71,8 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   const readConfig = (): Config => {
     if (!PROJECT || !fs.existsSync(CONFIG_FILE)) return { ...DEFAULT_CONFIG };
     try { return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) }; }
-    catch (e: any) { console.error(`ignoring invalid ${CONFIG_FILE}: ${e.message}`); return { ...DEFAULT_CONFIG }; }
+    // No message: a JSON parse error quotes the file's text.
+    catch (e) { L.warn('config.invalid', 'Ignoring an invalid config.json', { file: CONFIG_FILE, errorType: errFields(e, { message: false }).errorType }); return { ...DEFAULT_CONFIG }; }
   };
 
   // ---------- state ----------
