@@ -40,7 +40,16 @@ async function director() {
   fs.mkdirSync(path.dirname(SERVER_FILE), { recursive: true });
   const LOG = path.join(PROJECT, '.vork', 'server.log');
   // Not through a symlink put in place of the log: the child's output would be appended to the file it points to.
-  const out = fs.openSync(LOG, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
+  // O_NONBLOCK: a FIFO put there would otherwise block open, and with it this process (src/log.mts does the same).
+  const out = fs.openSync(LOG, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 0o600);
+  // Checked on the open file: a hard link (or anything but a plain file) put in place of the log would share its data
+  // with another file. Our own name of it is removed, which leaves that file as it was; the next call starts a new log.
+  const st = fs.fstatSync(out);
+  if (!st.isFile() || st.nlink !== 1) {
+    fs.closeSync(out);
+    try { fs.unlinkSync(LOG); } catch {}
+    throw new Error(`Director was not started: ${LOG} was not a plain file with one link, so it was removed. Call the tool again.`);
+  }
   const child = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--project', PROJECT], { detached: true, stdio: ['ignore', out, out] });
   fs.closeSync(out);
   const ended: { code: number | null; signal: NodeJS.Signals | null }[] = [];

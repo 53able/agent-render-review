@@ -38,11 +38,16 @@ export async function main(argv: string[]) {
   // file systems of macOS and Windows the comparison ignores case. After mkdir RUNS exists and is checked again on its
   // real path, which also catches a folder swapped for a symlink in between.
   const fold = (p: string) => (process.platform === 'darwin' || process.platform === 'win32' ? p.toLowerCase() : p);
-  const insidePublic = (runsReal: string) => { const r = fold(runsReal), pub = fold(realish(PUBLIC)); return r === pub || r.startsWith(pub + path.sep); };
-  const refuseRuns = () => { console.error(`refusing to start: the runs folder ${RUNS} is inside ${PUBLIC}, which is served without a session`); process.exit(2); };
-  if (insidePublic(realish(RUNS))) refuseRuns();
+  // dist.tmp becomes dist at the next build, and dist.old is dist between the two renames (scripts/swap-dist.mts).
+  const SERVED = [PUBLIC, path.join(ROOT, 'dist.tmp'), path.join(ROOT, 'dist.old')];
+  const servedBy = (runsReal: string) => SERVED.find((d) => { const r = fold(runsReal), pub = fold(realish(d)); return r === pub || r.startsWith(pub + path.sep); });
+  const checkRuns = (runsReal: string) => {
+    const d = servedBy(runsReal); if (!d) return;
+    console.error(`refusing to start: the runs folder ${RUNS} is inside ${d}, which is served without a session`); process.exit(2);
+  };
+  checkRuns(realish(RUNS));
   fs.mkdirSync(RUNS, { recursive: true });
-  if (insidePublic(fs.realpathSync.native(RUNS))) refuseRuns();
+  checkRuns(fs.realpathSync.native(RUNS));
   const LOCK = path.join(RUNS, 'lock');
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { return e.code === 'EPERM'; } };
   for (;;) {

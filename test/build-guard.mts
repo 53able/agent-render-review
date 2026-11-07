@@ -177,8 +177,32 @@ await check('mcp.mts does not read or write another file through server.log (sym
   const p2 = path.join(tmp, 'proj-hardlog'); fs.mkdirSync(path.join(p2, '.vork'), { recursive: true });
   fs.linkSync(secret, path.join(p2, '.vork', 'server.log'));
   const r2 = (await mcpCall(p2, env)).result;
-  assert.equal(r2.isError, true, textOf(r2)); assert.match(textOf(r2), /exit 1/);
+  assert.equal(r2.isError, true, textOf(r2)); assert.match(textOf(r2), /not a plain file with one link/);
   assert.doesNotMatch(textOf(r2), new RegExp(SECRET));
+});
+
+await check('mcp.mts: server.log as a hard link is removed and the other file is not appended to', async () => {
+  realDist();
+  const other = path.join(tmp, 'other.txt'); fs.writeFileSync(other, 'other\n');
+  const p = path.join(tmp, 'proj-hardlog2'); fs.mkdirSync(path.join(p, '.vork'), { recursive: true });
+  const log = path.join(p, '.vork', 'server.log'); fs.linkSync(other, log);
+  const r = (await mcpCall(p, { ...ENV, PATH: `${path.join(tmp, 'bin-novork')}${path.delimiter}${ENV.PATH}` })).result;
+  assert.equal(r.isError, true, textOf(r)); assert.match(textOf(r), /not a plain file with one link/);
+  await sleep(500); // a child, had one been started, would have written its error by now
+  assert.equal(fs.readFileSync(other, 'utf8'), 'other\n', 'the other file is untouched');
+  assert.equal(fs.statSync(other).nlink, 1, 'our name of it was removed');
+  assert.equal(fs.existsSync(log), false);
+});
+
+await check('mcp.mts: server.log as a FIFO does not block the MCP process', async () => {
+  realDist();
+  const p = path.join(tmp, 'proj-fifolog'); fs.mkdirSync(path.join(p, '.vork'), { recursive: true });
+  const mk = spawnSync('mkfifo', [path.join(p, '.vork', 'server.log')]); assert.equal(mk.status, 0, String(mk.stderr));
+  const t0 = Date.now();
+  const r = await Promise.race([mcpCall(p).then((x) => x.result), sleep(10000).then(() => null)]);
+  assert.ok(r, `no answer in ${Date.now() - t0} ms`);
+  assert.equal(r.isError, true, textOf(r));
+  assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0} ms`);
 });
 
 await check('the runs folder check ignores letter case on macOS and Windows (dist/ missing, DEV)', async () => {
@@ -188,6 +212,18 @@ await check('the runs folder check ignores letter case on macOS and Windows (dis
   const r = await director(['--port', String(await freePort())], { ...ENV, RENDER_DIRECTOR_RUNS: runs, RENDER_DIRECTOR_DEV: '1' }, runs);
   try { assert.equal(r.code, 2, r.stderr); assert.match(r.stderr, /is inside .*served without a session/); }
   finally { await stop(r.proc); fs.rmSync(path.join(T, 'DIST'), { recursive: true, force: true }); }
+});
+
+await check('the runs folder may not be inside dist.tmp or dist.old either (the next dist, or dist during a swap)', async () => {
+  realDist();
+  for (const d of ['dist.tmp', 'dist.old']) {
+    const runs = path.join(T, d, 'x');
+    try {
+      const r = await director(['--port', String(await freePort())], { ...ENV, RENDER_DIRECTOR_RUNS: runs }, runs);
+      try { assert.equal(r.code, 2, r.stderr); assert.match(r.stderr, new RegExp(`is inside .*${d.replace('.', '\\.')}, which is served without a session`)); }
+      finally { await stop(r.proc); }
+    } finally { fs.rmSync(path.join(T, d), { recursive: true, force: true }); }
+  }
 });
 
 await check('mcp.mts: a child that exits 3 (another Director holds the lock) is not a failure', async () => {
