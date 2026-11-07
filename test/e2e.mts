@@ -282,6 +282,9 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.waitForSelector('#adoptBox:not([hidden])', { timeout: 10000 });
     await page.click('#adoptList button'); await sleep(500);
     assert.match(await page.textContent('#adoptPlan') as string, /public\/vork\/hero\.png/);
+    // #58: the image to be written is inside the dialog; nothing is replaced yet
+    await page.waitForFunction(() => (document.querySelector('#adoptDlg img.write') as HTMLImageElement | null)?.naturalWidth! > 0, null, { timeout: 5000 });
+    assert.match(await page.textContent('#adoptImages') as string, /Replaces nothing/);
     await page.screenshot({ path: path.join(SHOTS, 'screenshot-adoption.png') });
     await page.click('#adoptDlg button[value=approve]');
     await sleep(500); await idle(page, 180000); await sleep(800);
@@ -368,6 +371,21 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     assert.deepEqual(evs.map((e: { type: string }) => e.type), ['decision', 'adoption_rejected']);
     assert.equal(evs[0].decision, 'discard'); assert.equal(evs[0].version, recolor);
     assert.doesNotMatch(await page.textContent('#h-insp') as string, new RegExp(`^${recolor}`), 'the view moves to the parent');
+  });
+
+  await check('#58 an adoption that would overwrite shows the existing image; Cancel writes nothing and keeps the request', async () => {
+    const hero = path.join(PROJECT, 'public', 'vork', 'hero.png'); const before = fs.readFileSync(hero);
+    const r = await agent('POST', '/api/agent/adoption-request', { version: 'v001', slug: 'hero', reason: 'the starter instead' });
+    await page.waitForSelector(`#adoptList button[data-req="${r.request}"]`, { timeout: 10000 });
+    await page.click(`#adoptList button[data-req="${r.request}"]`);
+    await page.waitForFunction(() => (document.querySelector('#adoptDlg img.existing') as HTMLImageElement | null)?.naturalWidth! > 0, null, { timeout: 5000 });
+    assert.match(await page.textContent('#adoptImages') as string, /Replaces public\/vork\/hero\.png · modified/);
+    await page.click('#adoptDlg button[value=cancel]'); await sleep(300);
+    assert.equal(await page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.req), r.request, 'focus returns to Review…');
+    assert.deepEqual(fs.readFileSync(hero), before);
+    const st = await page.evaluate(async () => (await fetch('/api/state')).json());
+    assert.equal(st.adoptionRequests.find((a: { id: string }) => a.id === r.request).status, 'pending');
+    assert.equal(await page.evaluate(async (id) => (await fetch('/api/adopt/reject', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: id }) })).status, r.request), 200);
   });
 
   await check('ADE: no page errors', async () => assert.deepEqual(page.errors, []));

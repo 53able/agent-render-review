@@ -28,7 +28,7 @@ export interface Job {
 
 type TicketData =
   | { kind: 'final'; versionId: string; hash: string }
-  | { kind: 'adopt'; versionId: string; hash: string; requestId: string; slug: string; sceneText: string; assetRel: string; overwrites: boolean };
+  | { kind: 'adopt'; versionId: string; hash: string; requestId: string; slug: string; sceneText: string; assetRel: string; overwrites: boolean; existingSha256: string | null };
 type Ticket = TicketData & { expires: number };
 
 /** The built-in proposer (standalone mode): a structured proposal for a prompt, or null when signal was aborted. */
@@ -249,6 +249,20 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     return { slug, assetRel, manifestRel, asset: resolveInside(PROJECT, assetRel), manifest: resolveInside(PROJECT, manifestRel) };
   }
 
+  /**
+   * Reads a file only if it is a plain file with one link, opened without following a symlink, and still the file at
+   * that path after opening (the checks /runs/ uses, #19 #26). null otherwise.
+   */
+  function readPlainFile(file: string): { data: Buffer; mtime: string } | null {
+    let fd: number;
+    try { fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); } catch { return null; }
+    try {
+      const st = fs.fstatSync(fd); const at = fs.lstatSync(file);
+      if (!st.isFile() || st.nlink !== 1 || at.dev !== st.dev || at.ino !== st.ino) return null;
+      return { data: fs.readFileSync(fd), mtime: st.mtime.toISOString() };
+    } catch { return null; } finally { fs.closeSync(fd); }
+  }
+
   // ---------- adoption: the agent asks, the human plans and approves, a job writes into the project ----------
   function requestAdoption(b: { version: string; slug: unknown; reason?: unknown }) {
     const v = liveV(b.version);
@@ -280,13 +294,32 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     const sceneText = fs.readFileSync(path.join(vdir(v.id), 'scene.json'), 'utf8');
     const hash = sha256(sceneText).slice(0, 16);
     const overwrites = fs.existsSync(t.asset);
+    // What would be replaced, so the human can see it next to the new image (#58). Read through the same checks as
+    // a /runs/ file; null when it cannot be shown (not a plain file with one link).
+    const old = overwrites ? readPlainFile(t.asset) : null;
+    const existing = overwrites ? { bytes: old?.data.length ?? null, modified: old?.mtime ?? null, viewable: !!old } : null;
     const reusable = finalMatches(v, hash); const { slug } = t;
-    const ticket = issueTicket({ kind: 'adopt', versionId: v.id, hash, requestId, slug, sceneText, assetRel: t.assetRel, overwrites });
+    const ticket = issueTicket({ kind: 'adopt', versionId: v.id, hash, requestId, slug, sceneText, assetRel: t.assetRel, overwrites, existingSha256: old ? sha256(old.data) : null });
     return {
       ticket, requestId, versionId: v.id, versionStatus: v.status, hash, slug, reason: ar.reason,
-      writes: [t.assetRel, t.manifestRel], overwrites, needsFinalRender: !reusable,
+      writes: [t.assetRel, t.manifestRel], overwrites, existing, needsFinalRender: !reusable,
+      // the image the human approves: the final render that will be written, or the draft until final is rendered
+      shows: (reusable ? 'final' : v.renders.draft ? 'draft' : v.renders.previs ? 'previs' : null) as Profile | null,
       acceptsProposal: v.status === 'proposed', expiresInSec: 600,
     };
+  }
+
+  /**
+   * The project file an adoption plan would overwrite, as it was when the plan was made: null if the ticket is not a
+   * live adoption plan, or the file is no longer a plain file with those bytes (#58). The ticket is not used up.
+   */
+  function existingOfPlan(ticketId: string): Buffer | null {
+    const t = tickets.get(ticketId);
+    if (!t || t.kind !== 'adopt' || t.expires < clock() || !t.existingSha256) return null;
+    let asset: string;
+    try { asset = adoptionTargets(t.slug).asset; } catch { return null; }
+    const now = readPlainFile(asset);
+    return now && sha256(now.data) === t.existingSha256 ? now.data : null;
   }
 
   function rejectAdoption({ requestId, comment }: { requestId: string; comment?: unknown }) {
@@ -322,6 +355,11 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
         const targets = adoptionTargets(t.slug); // re-resolve right before writing
         if (targets.assetRel !== t.assetRel) throw new Error(`asset path changed since approval (${t.assetRel} → ${targets.assetRel}); plan again`);
         if (fs.existsSync(targets.asset) !== t.overwrites) throw new Error('the target file appeared or disappeared since approval; plan again');
+        // The human approved replacing the file they were shown (#58); a different file there needs a new look.
+        if (t.existingSha256) {
+          const now = readPlainFile(targets.asset);
+          if (!now || sha256(now.data) !== t.existingSha256) throw new Error('the existing file changed since approval; plan again');
+        }
         const png = fs.readFileSync(renderFile(v.id, 'final'));
         if (sha256(png) !== v.renders.final!.sha256) throw new Error('final.png changed after rendering; plan again');
         fs.mkdirSync(path.dirname(targets.asset), { recursive: true }); fs.mkdirSync(path.dirname(targets.manifest), { recursive: true });
@@ -544,7 +582,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   return {
     mode: MODE, project: PROJECT, runs: RUNS, renderer, state, readConfig, save, audit, getV, liveV, vdir, renderFile, sceneOf, hashScene, waiters, pushEvent, addVersion,
     jobs, tickets, newJob, step, failJob, renderLocks, renderVersion, validateScene, createProposal,
-    adoptionJobs, requestAdoption, planAdoption, rejectAdoption, startAdoption, agentPropose, checkCanPropose, startPropose,
+    adoptionJobs, requestAdoption, planAdoption, existingOfPlan, rejectAdoption, startAdoption, agentPropose, checkCanPropose, startPropose,
     cancelJob, agentRender, startRender, planFinal, feedback, decide, checkout, directEdit, rendersQueued, recordPagePreview, waitForEvents, takeEvents,
   };
 }

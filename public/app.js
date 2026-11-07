@@ -15,7 +15,7 @@ import { isWildcard, checkClaims, groupDiff, nameRuns, describeNames, visibleObj
 /** @typedef {{ head: string, versions: Version[], vork: string, mode?: string, project?: string, model?: string, adoptionRequests: AdoptionRequest[], events: AgentEvent[], agentCursor: number, audit: AuditEntry[], config: { pageUrl?: string } }} Data */
 /** @typedef {{ kind: string, versionId: string, asset: string, proposal?: { clarifying_question?: string }, policy: { blockers: string[] }, log?: string }} JobResult */
 /** @typedef {{ id: string, kind: string, status: string, versionId: string, steps: { status: string, label: string, t: number, detail?: string }[], elapsed: number, error?: string, result: JobResult }} Job */
-/** @typedef {{ versionId: string, versionStatus: string, acceptsProposal?: boolean, hash: string, reason: string, writes: string[], overwrites?: boolean, needsFinalRender?: boolean, expiresInSec: number, ticket: string }} AdoptPlan */
+/** @typedef {{ versionId: string, versionStatus: string, acceptsProposal?: boolean, hash: string, reason: string, writes: string[], overwrites?: boolean, existing: { bytes: number | null, modified: string | null, image: string | null } | null, needsFinalRender?: boolean, shows: string | null, image: string | null, expiresInSec: number, ticket: string }} AdoptPlan */
 /** @typedef {{ versionId: string, hash: string, profile: string, resolution: number[], output: string, overwrites?: boolean, reference: string, timeoutSec: number, expiresInSec: number, flags: { msg: string }[], ticket: string }} FinalPlan */
 /** @typedef {{ w: number, h: number, arr: Uint16Array, objects: Record<string, string> }} Ids */
 /** @typedef {{ data: Data, viewId: string, profile: string, selection: Set<string>, hover: string | null, compare: boolean, ids: Ids | null, img: HTMLImageElement, imgB: HTMLImageElement | null, lastResult: Job | null, sig?: string, onPage?: boolean, editing?: boolean, objKey?: string }} State */
@@ -158,8 +158,16 @@ async function reviewAdoption(requestId) {
     ['approval valid', `${plan.expiresInSec / 60} min, this scene only`],
   ];
   $('#adoptPlan').innerHTML = rows.map(([k, x]) => `<dt>${k}</dt><dd style="white-space:pre-wrap">${esc(x)}</dd>`).join('');
+  // The images being decided on, inside the dialog (#58): what will be written, and what it replaces.
+  const ex = plan.existing; const kb = /** @param {number | null} n */ (n) => (n == null ? '' : ` · ${(n / 1024).toFixed(0)} KB`);
+  $('#adoptImages').innerHTML = `<figure><figcaption>Writes${plan.needsFinalRender ? ` <span class="flag">(${esc(plan.shows)} shown; rendered again at final quality before writing)</span>` : ' (the final render)'}</figcaption>
+      ${plan.image ? `<img class="write" src="${esc(plan.image)}" alt="The image that will be written to ${esc(plan.writes[0])}">` : '<p class="hint">No render of this version yet.</p>'}</figure>
+    ${ex ? `<figure><figcaption>Replaces ${esc(plan.writes[0])}${ex.modified ? ` · modified ${esc(new Date(ex.modified).toLocaleString())}` : ''}${kb(ex.bytes)}</figcaption>
+      ${ex.image ? `<img class="existing" src="${esc(ex.image)}" alt="The image in the project now, which will be replaced">` : '<p class="flag">The existing file cannot be shown (not a plain file with a single link).</p>'}</figure>` : '<figure><figcaption>Replaces nothing (a new file)</figcaption></figure>'}`;
   /** @type {HTMLDialogElement} */ const dlg = $('#adoptDlg'); dlg.returnValue = ''; dlg.showModal();
   dlg.onclose = async () => {
+    // Focus goes back to this request's Review… button (the list may have been redrawn while the dialog was open).
+    if (dlg.returnValue !== 'approve') /** @type {HTMLElement | null} */ (document.querySelector(`#adoptList button[data-req="${requestId}"]`))?.focus();
     if (dlg.returnValue === 'reject') {
       try { await api('/api/adopt/reject', { requestId }); say(`Rejected ${requestId}`); }
       catch (e) { fail('adopt', `Cannot reject ${requestId}: ${why(e)}`); }

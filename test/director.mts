@@ -288,6 +288,27 @@ await check('adoption: request, plan, adopt writes the asset and manifest, accep
   await refused('conflict', () => setup().d.requestAdoption({ version: 'v001', slug: 'x' }), /--project/);
 });
 
+await check('#58 an adoption plan shows what it overwrites; the write needs that same file to still be there', async () => {
+  const { d, project } = setup({ ade: true });
+  const { v } = await agentProposal(d, [0.2, 0.2, 0.9]);
+  const asset = path.join(project!, 'public/vork/hero.png'); fs.mkdirSync(path.dirname(asset), { recursive: true }); fs.writeFileSync(asset, 'old hero');
+  const requestId = d.requestAdoption({ version: v.id, slug: 'hero' });
+  const plan = d.planAdoption({ requestId });
+  assert.equal(plan.overwrites, true); assert.equal(plan.existing!.viewable, true); assert.equal(plan.existing!.bytes, 8); assert.equal(plan.shows, 'draft');
+  assert.equal(d.existingOfPlan(plan.ticket)!.toString(), 'old hero'); assert.equal(d.existingOfPlan('nope'), null);
+  fs.writeFileSync(asset, 'other hero');
+  assert.equal(d.existingOfPlan(plan.ticket), null, 'a changed file is not shown as the one approved');
+  const job = await waitJob(d.startAdoption(plan.ticket));
+  assert.equal(job.status, 'failed'); assert.match(String(job.error), /existing file changed since approval/);
+  assert.equal(fs.readFileSync(asset, 'utf8'), 'other hero', 'nothing was written');
+  // a hard link (e.g. to server.json) is neither shown nor read
+  fs.rmSync(asset); fs.linkSync(path.join(d.runs, 'state.json'), asset);
+  const linked = d.planAdoption({ requestId });
+  assert.equal(linked.existing!.viewable, false); assert.equal(d.existingOfPlan(linked.ticket), null);
+  fs.rmSync(asset);
+  const fresh = d.planAdoption({ requestId }); assert.equal(fresh.overwrites, false); assert.equal(fresh.existing, null);
+});
+
 await check('#14 #27 while an adoption renders, discard is refused; discarding later rejects pending requests', async () => {
   const { d, fake, project } = setup({ ade: true });
   const { v } = await agentProposal(d, [0.3, 0.6, 0.3]);

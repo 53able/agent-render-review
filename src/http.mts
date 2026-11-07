@@ -264,8 +264,19 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         return send(res, 200, { ok: true });
       }
 
-      if (req.method === 'POST' && url.pathname === '/api/adopt/plan')
-        return send(res, 200, director.planAdoption(await readBody<{ requestId: string; slug?: unknown }>(req)));
+      if (req.method === 'POST' && url.pathname === '/api/adopt/plan') {
+        const plan = director.planAdoption(await readBody<{ requestId: string; slug?: unknown }>(req)); const v = getV(plan.versionId)!;
+        return send(res, 200, {
+          ...plan, image: plan.shows ? presentRender(v.id, v.renders[plan.shows]!).image : null,
+          existing: plan.existing && { ...plan.existing, image: plan.existing.viewable ? `/api/adopt/existing?ticket=${encodeURIComponent(plan.ticket)}` : null },
+        });
+      }
+
+      // The project file an adoption would overwrite, while its plan is valid and the file unchanged (#58).
+      if (req.method === 'GET' && url.pathname === '/api/adopt/existing') {
+        const data = director.existingOfPlan(url.searchParams.get('ticket') || '');
+        return data ? send(res, 200, data, 'image/png', { 'x-content-type-options': 'nosniff' }) : send(res, 404, { error: 'no such file to show' });
+      }
 
       if (req.method === 'POST' && url.pathname === '/api/adopt/reject') {
         director.rejectAdoption(await readBody<{ requestId: string; comment?: unknown }>(req));

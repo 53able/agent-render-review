@@ -112,7 +112,8 @@ textarea { width: 100%; resize: vertical; background: #0f1216; color: var(--text
 .btnrow { display: flex; gap: 8px; flex-wrap: wrap; }
 .plan { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 10px 0 16px; }
 .plan dt { color: var(--muted); } .plan dd { margin: 0; font-family: ui-monospace, monospace; }
-dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 18px; max-width: 520px; }
+dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 18px; max-width: min(960px, calc(100vw - 32px)); }
+#adoptDlg .plan { max-width: 640px; }
 dialog::backdrop { background: rgba(0,0,0,.6); }
 dialog h2 { font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--text); }
 .dlgbtns { display: flex; justify-content: flex-end; gap: 8px; }
@@ -146,3 +147,7 @@ dialog h2 { font-size: 15px; text-transform: none; letter-spacing: 0; color: var
 .planbox { border: 1px solid var(--accent); border-radius: 8px; padding: 10px; }
 .planbox h3 { margin: 0; font-size: 13px; }
 .planbox .plan { margin: 8px 0 10px; font-size: 12px; }
+.adoptimgs { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 10px 0; }
+.adoptimgs figure { margin: 0; display: grid; gap: 6px; align-content: start; }
+.adoptimgs figcaption { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.adoptimgs img { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px; background: #000; }
