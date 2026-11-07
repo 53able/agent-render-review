@@ -468,6 +468,24 @@ function renderReview() {
   /** @type {Map<string, number>} */
   const wildCount = new Map([...claimedNodes].filter(isWildcard).map((c) => [c, changedNodes.filter((n) => n.startsWith(c.slice(0, -1))).length]));
   const ghost = [...claimedNodes].filter((n) => (isWildcard(n) ? !wildCount.get(n) : !changedKeys.has(n) && !(n === 'scene' && v.diff.some((d) => d.node === '(scene)'))));
+  // Large scenes produce thousands of rows: node additions/removals collapse into one row per (type, added|removed), the rest is capped.
+  const typeOf = new Map([...(V(/** @type {string} */ (v.parent))?.scene.nodes || []), ...v.scene.nodes].map((n) => [n.name, n.type]));
+  /** @type {Map<string, Diff[]>} */
+  const groups = new Map(); /** @type {Diff[]} */ const rest = [];
+  for (const d of v.diff) {
+    if (d.path !== '(node)') { rest.push(d); continue; }
+    const k = `${typeOf.get(d.node) || 'node'} ${d.after === 'removed' ? 'removed' : 'added'}`;
+    const g = groups.get(k); if (g) g.push(d); else groups.set(k, [d]);
+  }
+  const groupList = [...groups];
+  /** @param {Diff} d */
+  const row = (d) => `<tr class="${isClaimed(d) ? '' : 'unclaimed'}"><td>${esc(d.node)}${d.path ? '.' + esc(d.path) : ''}</td><td>${fmt(d.before)}</td><td>${fmt(d.after)}</td></tr>`;
+  /** @param {Diff[]} ds */
+  const unclaimedNote = (ds) => { const u = ds.filter((d) => !isClaimed(d)).length; return u ? ` <span class="flag">· ⚠ ${u} not mentioned</span>` : ''; };
+  const CAP = 200; const hidden = rest.slice(CAP);
+  const diffRows = groupList.map(([k, ds], i) => `<tr class="group"><td colspan="3"><details data-group="${i}"><summary>${ds.length} ${esc(k.split(' ')[0])} node${ds.length > 1 ? 's' : ''} ${k.split(' ')[1]} (${esc(ds[0].node)}${ds.length > 1 ? ` … ${esc(ds.at(-1)?.node)}` : ''})${unclaimedNote(ds)}</summary><table class="difftable"><tbody></tbody></table></details></td></tr>`).join('')
+    + rest.slice(0, CAP).map(row).join('')
+    + (hidden.length ? `<tr class="group"><td colspan="3"><button type="button" class="ghost" id="moreDiff">Show remaining ${hidden.length} rows</button>${unclaimedNote(hidden)}</td></tr>` : '');
   box.hidden = false;
   box.style.borderColor = v.status === 'proposed' ? 'var(--warn)' : 'var(--line)';
   box.innerHTML = `
@@ -479,7 +497,7 @@ function renderReview() {
     <div><h3>What the agent says it changed</h3><ul>${p.claimed_changes.map((c) => `<li><b>${esc(c.node)}</b>${isWildcard(c.node) ? ` <span class="hint">→ ${wildCount.get(c.node)} node${wildCount.get(c.node) === 1 ? '' : 's'}</span>` : ''}: ${esc(c.what)} <span class="hint">— ${esc(c.why)}</span></li>`).join('')}</ul></div>
     <div><h3>What actually changed (computed from the scene)</h3>
       <table class="difftable"><thead><tr><th>node.field</th><th>before</th><th>after</th></tr></thead><tbody>
-      ${v.diff.map((d) => `<tr class="${isClaimed(d) ? '' : 'unclaimed'}"><td>${esc(d.node)}${d.path ? '.' + esc(d.path) : ''}</td><td>${fmt(d.before)}</td><td>${fmt(d.after)}</td></tr>`).join('') || '<tr><td colspan="3">No changes</td></tr>'}
+      ${diffRows || '<tr><td colspan="3">No changes</td></tr>'}
       </tbody></table>
       ${ghost.length ? `<p class="flag">⚠ Claimed but not changed: ${ghost.map(esc).join(', ')}</p>` : ''}</div>
     ${p.policy.flags.length ? `<div><h3>Needs attention</h3><ul>${p.policy.flags.map((f) => `<li class="flag">${f.level}: ${esc(f.msg)}</li>`).join('')}</ul></div>` : ''}
@@ -489,6 +507,12 @@ function renderReview() {
       <button class="primary" id="acceptBtn">Accept as new HEAD</button>
       <button class="ghost" id="refineBtn">Refine from this</button>
       <button class="ghost danger" id="discardBtn">Discard</button></div>` : ''}`;
+  // rows inside a group or past the cap are built only when the human opens them
+  box.querySelectorAll('details[data-group]').forEach((el) => el.addEventListener('toggle', () => {
+    const tb = /** @type {HTMLElement} */ (el.querySelector('tbody'));
+    if (/** @type {HTMLDetailsElement} */ (el).open && !tb.children.length) tb.innerHTML = groupList[Number(/** @type {HTMLElement} */ (el).dataset.group)][1].map(row).join('');
+  }));
+  const more = box.querySelector('#moreDiff'); if (more) /** @type {HTMLButtonElement} */ (more).onclick = () => { /** @type {HTMLElement} */ (more.closest('tr')).outerHTML = hidden.map(row).join(''); };
   if (v.status !== 'proposed') return;
   $('#acceptBtn').onclick = () => decide('accept');
   $('#discardBtn').onclick = () => decide('discard');

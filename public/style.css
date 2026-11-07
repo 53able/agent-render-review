@@ -97,6 +97,7 @@ textarea { width: 100%; resize: vertical; background: #0f1216; color: var(--text
 .difftable th { text-align: left; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line); padding: 3px 4px; }
 .difftable td { border-bottom: 1px solid #1d2128; padding: 3px 4px; vertical-align: top; font-family: ui-monospace, monospace; word-break: break-all; }
 .difftable tr.unclaimed td:first-child::after { content: " ⚠ not mentioned"; color: var(--warn); font-family: inherit; }
+.difftable tr.group td { font-family: inherit; } .difftable summary { cursor: pointer; } .difftable .difftable { margin-top: 4px; }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; border: 1px solid #fff3; }
 .flag { color: var(--warn); } .flag.bad { color: var(--bad); }
 .btnrow { display: flex; gap: 8px; flex-wrap: wrap; }
