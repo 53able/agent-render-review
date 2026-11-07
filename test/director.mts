@@ -8,6 +8,7 @@ import { createDirector, Refusal } from '../src/director.mts';
 import type { Proposer } from '../src/director.mts';
 import type { Renderer, RenderOutcome } from '../src/vork.mts';
 import type { Scene } from '../src/policy.mts';
+import { sha256 } from '../src/policy.mts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const starter = JSON.parse(fs.readFileSync(path.join(ROOT, 'scenes', 'starter.json'), 'utf8')) as Scene;
@@ -29,7 +30,7 @@ function fakeRenderer() {
       if (gate) await Promise.race([gate, new Promise((r) => signal.addEventListener('abort', r))]);
       if (signal.aborted) return { ok: false, code: null, timedOut: false, log: 'killed', seconds: 0 };
       if (failWith) return { ok: false, code: 1, timedOut: false, log: failWith, seconds: 0 };
-      const file = path.join(dir, `${profile}.png`); fs.writeFileSync(file, `png ${profile} ${JSON.stringify(scene)}`);
+      const file = path.join(dir, `${profile}.png`); fs.writeFileSync(file, `png ${profile} #${calls.length} ${JSON.stringify(scene)}`); // bytes differ per render
       return {
         ok: true, file, seconds: 0.01, width: 2, height: 1, ids: Buffer.from([1, 0, 2, 0]), objects: [{ pass_index: 1, name: 'vase' }],
         exposure: { mean: 0.5, clipped: 0, near_black: 0 }, settings: { integrator: 'path', samples: 4, denoiser: null }, warnings: [],
@@ -39,11 +40,11 @@ function fakeRenderer() {
   const hold = () => { let release!: () => void; gate = new Promise((r) => (release = r)); return () => { gate = null; release(); }; };
   return { renderer, calls, hold, fail: (log: string | null) => { failWith = log; } };
 }
-const setup = ({ ade = false, proposer }: { ade?: boolean; proposer?: Proposer } = {}) => {
+const setup = ({ ade = false, proposer, clock }: { ade?: boolean; proposer?: Proposer; clock?: () => number } = {}) => {
   const base = path.join(tmp, `case-${++n}`); const project = ade ? path.join(base, 'project') : null;
   const runs = project ? path.join(project, '.vork') : path.join(base, 'runs'); fs.mkdirSync(runs, { recursive: true });
   const fake = fakeRenderer();
-  return { runs, project, fake, d: createDirector({ runs, project, renderer: fake.renderer, starter, proposer }) };
+  return { runs, project, fake, d: createDirector({ runs, project, renderer: fake.renderer, starter, proposer, clock }) };
 };
 /** Asserts that fn is refused with this kind; returns the refusal. */
 const refused = async (kind: Refusal['kind'], fn: () => unknown, message?: RegExp): Promise<Refusal> => {
@@ -116,6 +117,43 @@ await check('#15 a final render of a version discarded while it runs is not kept
   await tick(); v.status = 'discarded'; release();
   const r = await p;
   assert.equal(r.ok, false); assert.match(r.log!, /discarded during the render/); assert.equal(v.renders.final, undefined);
+});
+
+await check('#15 #26 a render that is not kept leaves the recorded files of the version as they were', async () => {
+  const { d, fake } = setup(); const v = d.getV('v001')!;
+  assert.ok((await d.renderVersion(d.newJob('render', v.id), v, 'final')).ok);
+  const kept = fs.readFileSync(v.renders.final!.file); assert.equal(sha256(kept), v.renders.final!.sha256);
+  await tick(); // a request made before the finished render is unregistered would share its result (#28)
+  const release = fake.hold();
+  const p = d.renderVersion(d.newJob('render', v.id), v, 'final');
+  await tick(); v.status = 'discarded'; release();
+  assert.equal((await p).ok, false);
+  assert.deepEqual(fs.readFileSync(v.renders.final!.file), kept, 'the file still has the recorded bytes');
+  assert.deepEqual(fs.readdirSync(d.vdir('v001')).filter((f) => f.startsWith('.render-')), [], 'no render folder is left behind');
+  fake.fail('boom'); v.status = 'accepted'; await tick();
+  assert.equal((await d.renderVersion(d.newJob('render', v.id), v, 'final')).ok, false);
+  assert.deepEqual(fs.readFileSync(v.renders.final!.file), kept, 'a failed render changes nothing either');
+});
+
+await check('#30 rendersQueued resolves only after the renders of the version queued so far', async () => {
+  const { d, fake } = setup(); const v = d.getV('v001')!;
+  const release = fake.hold(); const p = d.renderVersion(d.newJob('render', v.id), v, 'draft');
+  let done = false; const q = d.rendersQueued(v.id).then(() => { done = true; });
+  await tick(); await tick(); assert.equal(done, false);
+  release(); await p; await q; assert.equal(done, true);
+});
+
+await check('#32 finished jobs are dropped after 10 minutes, running ones are kept; expired tickets are removed', async () => {
+  let now = 1_000_000; const { d, fake } = setup({ clock: () => now });
+  const done = await waitJob(d.startRender({ versionId: 'v001', profile: 'previs', ticket: '' }));
+  assert.equal(done.status, 'done');
+  const release = fake.hold(); const running = d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' });
+  const { ticket } = d.planFinal('v001');
+  now += 9 * 60_000; d.newJob('render', 'v001'); assert.ok(d.jobs.has(done.id), 'kept for 10 minutes');
+  now += 2 * 60_000; d.newJob('render', 'v001');
+  assert.equal(d.jobs.has(done.id), false); assert.ok(d.jobs.has(running.id), 'a running job is kept');
+  assert.ok(d.tickets.has(ticket)); d.planFinal('v001'); assert.equal(d.tickets.has(ticket), false, 'an expired ticket is removed when a ticket is issued');
+  release(); await waitJob(running);
 });
 
 await check('validation: a policy blocker renders nothing; a renderer failure is "invalid"; the throwaway folder is removed', async () => {

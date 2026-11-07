@@ -54,11 +54,13 @@ export interface DirectorOptions {
   starter: Scene;
   /** Standalone mode only; without it /api/propose fails its job. */
   proposer?: Proposer;
+  /** Milliseconds since the epoch; tests pass their own to expire jobs and tickets. */
+  clock?: () => number;
 }
 
 export type Director = ReturnType<typeof createDirector>;
 
-export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter, proposer }: DirectorOptions) {
+export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter, proposer, clock = Date.now }: DirectorOptions) {
   const MODE: 'ade' | 'standalone' = PROJECT ? 'ade' : 'standalone';
 
   // project config
@@ -114,7 +116,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   const jobs = new Map<string, Job>();
   const JOB_TTL = 10 * 60_000;
   const newJob = (kind: string, versionId: string, { listed = true } = {}) => {
-    const now = Date.now();
+    const now = clock();
     for (const [id, j] of jobs) if (j.status !== 'running' && j.started + (j.steps.at(-1)?.t ?? 0) < now - JOB_TTL) jobs.delete(id);
     const job: Job = { id: crypto.randomUUID(), kind, versionId, status: 'running', steps: [], started: now, result: null, error: null, ac: new AbortController() };
     if (listed) jobs.set(job.id, job);
@@ -122,7 +124,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   };
   const step = (job: Job, label: string, status: JobStep['status'] = 'running', detail: string | null | undefined = null) => {
     const prev = job.steps.at(-1); if (prev && prev.status === 'running') prev.status = 'done';
-    job.steps.push({ label, status, detail, t: Date.now() - job.started });
+    job.steps.push({ label, status, detail, t: clock() - job.started });
   };
   const failJob = (job: Job, e: Partial<Error> | null | undefined) => { if (job.status === 'cancelled') return; job.status = 'failed'; job.error = String(e?.message || e); step(job, 'Failed', 'failed', job.error); };
 
@@ -149,24 +151,37 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     return next;
   }
   // scene: throwaway validation render (not stored). pinnedText: render exactly this scene text and store it.
+  // A stored render is written into a fresh folder next to the version and moved in only when it is recorded, so the
+  // files under the version are always the recorded ones: a failed, cancelled or discarded render leaves them as they
+  // were, and /runs/ (which serves only recorded bytes, #26) never sees a half-written file.
   async function renderVersionNow(job: Job, v: Pick<Version, 'id' | 'renders'>, profile: Profile, { scene, pinnedText }: { scene?: Scene; pinnedText?: string } = {}): Promise<RenderResult> {
     const dir = vdir(v.id);
     const sceneText = scene ? null : pinnedText ?? fs.readFileSync(path.join(dir, 'scene.json'), 'utf8');
-    const r = await renderer.render({ scene: scene || JSON.parse(sceneText!), dir, profile, signal: job.ac.signal });
-    if (job.status === 'cancelled') return { ok: false, cancelled: true };
-    if (!r.ok) return { ok: false, code: r.code, timedOut: r.timedOut, log: r.log, seconds: r.seconds };
-    fs.writeFileSync(path.join(dir, `${profile}.ids.bin`), r.ids);
-    const stamp = Date.now();
-    const info: RenderInfo = {
-      profile, seconds: r.seconds, width: r.width, height: r.height, image: `/runs/${v.id}/${profile}.png?${stamp}`, ids: `/runs/${v.id}/${profile}.ids.bin?${stamp}`,
-      file: r.file, sha256: sha256(fs.readFileSync(r.file)), idsSha256: sha256(r.ids),
-      sceneHash: sceneText ? sha256(sceneText).slice(0, 16) : null,
-      objects: r.objects, exposure: r.exposure, settings: r.settings, warnings: r.warnings,
-    };
-    // A final render of a version discarded while it ran is not kept (#15).
-    if (profile === 'final' && !liveV(v.id)) return { ok: false, log: `${v.id} was discarded during the render; the final render was not kept` };
-    if (!scene) { v.renders[profile] = info; save(); }
-    return { ok: true, info };
+    const out = scene ? dir : fs.mkdtempSync(path.join(dir, `.render-${profile}-`));
+    try {
+      const r = await renderer.render({ scene: scene || JSON.parse(sceneText!), dir: out, profile, signal: job.ac.signal });
+      if (job.status === 'cancelled') return { ok: false, cancelled: true };
+      if (!r.ok) return { ok: false, code: r.code, timedOut: r.timedOut, log: r.log, seconds: r.seconds };
+      const file = path.join(dir, `${profile}.png`);
+      const stamp = clock();
+      const info: RenderInfo = {
+        profile, seconds: r.seconds, width: r.width, height: r.height, image: `/runs/${v.id}/${profile}.png?${stamp}`, ids: `/runs/${v.id}/${profile}.ids.bin?${stamp}`,
+        file: scene ? r.file : file, sha256: sha256(fs.readFileSync(r.file)), idsSha256: sha256(r.ids),
+        sceneHash: sceneText ? sha256(sceneText).slice(0, 16) : null,
+        objects: r.objects, exposure: r.exposure, settings: r.settings, warnings: r.warnings,
+      };
+      // A final render of a version discarded while it ran is not kept (#15).
+      if (profile === 'final' && !liveV(v.id)) return { ok: false, log: `${v.id} was discarded during the render; the final render was not kept` };
+      if (!scene) {
+        fs.writeFileSync(path.join(out, `${profile}.ids.bin`), r.ids);
+        // vork's side outputs move along with the image; renames replace the old files in place.
+        for (const name of [`${profile}.png.meta.json`, `${profile}.object_index.png`, `${profile}.ids.bin`])
+          if (fs.existsSync(path.join(out, name))) fs.renameSync(path.join(out, name), path.join(dir, name));
+        fs.renameSync(r.file, file);
+        v.renders[profile] = info; save();
+      }
+      return { ok: true, info };
+    } finally { if (out !== dir) fs.rmSync(out, { recursive: true, force: true }); }
   }
 
   // Validate a proposed scene: policy, then a previs render in a throwaway directory.
@@ -200,8 +215,8 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   const issueTicket = (data: TicketData) => {
     // A new adoption plan replaces the older ones for the same request, so two tickets cannot both adopt it.
     if (data.kind === 'adopt') for (const [id, t] of tickets) if (t.kind === 'adopt' && t.requestId === data.requestId) tickets.delete(id);
-    for (const [id, t] of tickets) if (t.expires < Date.now()) tickets.delete(id); // unused tickets are not kept past expiry (#32)
-    const id = crypto.randomUUID(); tickets.set(id, { ...data, expires: Date.now() + 10 * 60_000 }); return id;
+    for (const [id, t] of tickets) if (t.expires < clock()) tickets.delete(id); // unused tickets are not kept past expiry (#32)
+    const id = crypto.randomUUID(); tickets.set(id, { ...data, expires: clock() + 10 * 60_000 }); return id;
   };
   // Adoption requests whose adopt job is running. Kept in memory only: a job does not survive a restart,
   // so after one the request is simply pending again. While a job runs, plan, reject and discard answer 409.
@@ -223,7 +238,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   };
   const takeTicket = <K extends Ticket['kind']>(id: string, kind: K): Extract<Ticket, { kind: K }> | null => {
     const t = tickets.get(id);
-    if (!t || t.kind !== kind || t.expires < Date.now() || t.hash !== hashScene(t.versionId)) return null;
+    if (!t || t.kind !== kind || t.expires < clock() || t.hash !== hashScene(t.versionId)) return null;
     tickets.delete(id); return t as Extract<Ticket, { kind: K }>;
   };
 
@@ -527,7 +542,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
 
   return {
     mode: MODE, project: PROJECT, runs: RUNS, renderer, state, readConfig, save, audit, getV, liveV, vdir, sceneOf, hashScene, waiters, pushEvent, addVersion,
-    jobs, newJob, step, failJob, renderLocks, renderVersion, validateScene, createProposal,
+    jobs, tickets, newJob, step, failJob, renderLocks, renderVersion, validateScene, createProposal,
     adoptionJobs, requestAdoption, planAdoption, rejectAdoption, startAdoption, agentPropose, checkCanPropose, startPropose,
     cancelJob, agentRender, startRender, planFinal, feedback, decide, checkout, directEdit, rendersQueued, recordPagePreview, waitForEvents, takeEvents,
   };
