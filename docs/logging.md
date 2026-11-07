@@ -48,8 +48,8 @@ Director の診断ログを、1 行 1 イベントの JSON Lines にする設計
 
 | キー | 付く範囲 | 付け方 |
 |---|---|---|
-| `reqId` | 1 件の HTTP リクエストの中で書かれたイベントと、そのリクエストから始まったジョブ | `createServer` のコールバック全体を `withContext({ reqId })` で包む。`crypto.randomUUID().slice(0, 8)` |
-| `jobId` / `kind` / `versionId` | 1 つのジョブの中で書かれたイベント | `withJob(job, fn)` が `withContext` を張る |
+| `reqId` | 1 件の HTTP リクエストの中で書かれたイベントと、そのリクエストから始まったジョブ | `createServer` のコールバック全体を `withRequest(reqId, fn)`（`withContext({ reqId })`）で包む。`crypto.randomUUID().slice(0, 8)` |
+| `jobId` / `kind` / `versionId` | 1 つのジョブの中で書かれたイベント | `withJob(job, fn)` が `withContext` を張る。`src/director.mts` の `inJob` がジョブ本体をこれで包む |
 
 `withContext` は `AsyncLocalStorage` で値を運ぶので、`await` をまたいでも届きます。EventEmitter のリスナ（`res.on('finish')` など）には届かないため、そこで書くイベントは相関キーをクロージャで捕まえて明示的に書きます。
 
@@ -64,8 +64,8 @@ Director の診断ログを、1 行 1 イベントの JSON Lines にする設計
 | `http.request` | GET で 400 未満は debug、5xx は error、それ以外は info | `reqId, method, route, status, ms`。切断時は `aborted: true`。500 では `errFields` | `res` の `finish` と `close` のうち先に来たほうで 1 回だけ | #79 |
 | `browser.open_failed` | warning | `opener`（`opener[0]` だけ）, `code` | `openPairing` の spawn の `error` | #79 |
 | `audit` | info | `auditEvent` と許可リストの項目（第 6 節） | `audit()` の `state.json` への追記の後 | #80 |
-| `job.start` | info | `jobId, kind, versionId` | `withJob` の入口。`newJob` では書かない（終わりの無い start を残さないため） | #81 |
-| `job.end` | 失敗は warning、それ以外は info | `jobId, kind, versionId, status, ms`。例外なら `errFields`、vork の失敗なら `exitCode, timedOut, vorkLogTail`（末尾 2000 字） | ジョブ終了の集約点（#70）で 1 回だけ | #81 |
+| `job.start` | info | `jobId, kind, versionId` | `src/director.mts` の `inJob`（`withJob` で包んだジョブ本体の入口）。背景ジョブは `runJob` が、`agentPropose` / `agentRender` は `newJob` の直後に通す。`newJob` では書かない（終わりの無い start を残さないため） | #81 |
+| `job.end` | 失敗は warning、それ以外は info | `jobId, kind, versionId, status, ms`。例外なら `errFields`（built-in proposer の `propose` ジョブは `message: false`）、vork の失敗なら `exitCode, timedOut, vorkLogTail`（末尾 2000 字） | ジョブ終了の集約点 `endJob`（#70）で 1 回だけ。2 回目の呼び出しは何もしない | #81 |
 
 補足:
 
@@ -73,6 +73,9 @@ Director の診断ログを、1 行 1 イベントの JSON Lines にする設計
 - `job.end` の相関キーは job オブジェクトから明示的に書きます。`cancelJob` はキャンセル要求の context で動くので、ALS からは正しいキーが取れません。
 - `job.end.ms` は `clock` から計算します（#66）。
 - audit には `job_failed { jobId, kind, version, errorType?, exitCode?, timedOut? }` を足します。対象は `jobs` に載るジョブで、Refusal 以外の失敗に限ります。Refusal は `agent_proposal_rejected` や `agent_error` と重複し、UI の audit 一覧（直近 60 件）を押し流すためです。
+  - `JobOutcome` の `refusal: true` が「Refusal 扱い」の印です。`agentPropose` / `agentRender` の失敗と、`startPropose` の失敗（例外は `agent_error` が記録し、policy や vork に退けられた提案と空の応答は今も audit に残さない）に付けます。
+  - `job_failed` の `kind` はジョブ種別なので、ログにも `kind` のまま転記します（第 6 節の規則 4 の `checkKind` への改名は、それ以外の audit の `kind` に限る）。
+- `agentPropose` / `agentRender` の結果はエージェントへの HTTP 応答で返るので、ジョブは記録するだけです。応答は変えません。`jobs` に載らないジョブなので、終わると `status` は `done` / `failed` になりますが、`/api/state` や `/api/jobs/:id` からは見えません。
 
 ## 5. `src/log.mts`
 
@@ -82,7 +85,8 @@ LogTape への依存はこの 1 ファイルに閉じ込めます。他のモジ
 |---|---|
 | `setupLogging({ dir, level, stderrLevel = 'warning', maxSize = 5_000_000, maxFiles = 3, testSink? })` | ログ設定。`dir` の下に `logs/` を作る |
 | `log(component)` | `info / warn / error / debug / fatal(event, msg, props)` を持つロガーを返す |
-| `withJob(job, fn)` | ジョブの相関キーを context に張って `fn` を実行する |
+| `withJob(job, fn)` | ジョブの相関キーを context に張って `fn` を実行する。`job.start` は書かない（`src/director.mts` の `inJob` が書く） |
+| `withRequest(reqId, fn)` | `reqId` を context に張って `fn` を実行する。そこで始まったジョブにも引き継がれる |
 | `errFields(e, { message = true })` | Error を `{ errorType, error?, stack? }` に正規化する |
 | `shutdownLogging()` | 設定を外す。冪等。以後のログ呼び出しは何もしない |
 
@@ -112,7 +116,7 @@ LogTape は `configure()` しないと何も出力しません。設定したう
 1. **生の Error を logger に渡さない。** 必ず `errFields(e)` を通す。LogTape の JSON 書式は Error の own key をすべて書き出すので（`formatter.js:295`）、spawn エラーの `spawnargs` に入った `#pair=<PAIR>` が漏れる（C8）。`errFields` が返すのは `errorType`（`e.name`）、`error`（message、2000 字まで）、`stack`（4000 字まで）だけ。
 2. **message にユーザー入力が入りうる Error は `errFields(e, { message: false })`。** built-in proposer のエラー（`proposer.mts` の `claude exited …`）には claude の出力の末尾 600 字が入り、指示文を含みうる。このとき `stack` も先頭の `Name: message` 行を除いた呼び出し位置の行だけにする。
 3. **ユーザー入力は長さだけ書く。** 指示文は `instructionLen`。`comment` と自由入力の `reason` は書かない。
-4. **audit の転記は許可リスト。** 許可する項目は `version, request, jobId, job, via, flags, selection, seconds, errorType, exitCode, timedOut, head, mode, node, field, overwrote, slug, parent, base, hash`。`reason` は `'version discarded'` などのシステム定型文に限る。audit の `kind`（`blocked | invalid`）はログ側で `checkKind` に改名する（明示したプロパティがコンテキストの `kind`＝ジョブ種別を上書きするため）。
+4. **audit の転記は許可リスト。** 許可する項目は `version, request, jobId, job, via, flags, selection, seconds, errorType, exitCode, timedOut, head, mode, node, field, overwrote, slug, parent, base, hash`。`reason` は `'version discarded'` などのシステム定型文に限る。audit の `kind`（`blocked | invalid`）はログ側で `checkKind` に改名する（明示したプロパティがコンテキストの `kind`＝ジョブ種別を上書きするため）。`job_failed` の `kind` はジョブ種別なので改名しない。
 5. **秘匿値を書かない。** `agentToken`、ペアリング用トークンとリンク、Cookie は、どのイベントにも入れない。`RENDER_DIRECTOR_BROWSER` の解析エラーは値を含みうるので message を書かず `errorType` だけにする。`browser.open_failed` は `opener[0]` と `code` だけ。
 6. **`@logtape/redaction` には頼らない。** フィールド名でしか照合せず Error の中も見ないので、規則 1 の漏洩を防げない。
 
@@ -152,4 +156,4 @@ LogTape は `configure()` しないと何も出力しません。設定したう
 | T9a〜T12 | 統合試験での `director.jsonl` の形、`server.log` の中身、MCP の stdout、SIGTERM 後の最終行 | `test/integration.mts` | #78 |
 | T9c, T10, T10b | `http.request` の必須フィールドと `reqId` の一意性、`agentToken` と PAIR が 0 件 | `test/integration.mts` | #79 |
 | T3, T4, T5, T5b | 全イベントの `service` / `component`、指示文が出ないこと、`cancelled.jobId`、`checkKind` | `test/director.mts` | #80 |
-| T1, T2, T5c, T5d | `job.end` の失敗原因、キャンセルの相関キー、Refusal で `job_failed` を出さないこと | `test/director.mts` | #81 |
+| T1, T2, T5c, T5d | `job.end` の失敗原因、キャンセルの相関キーと 1 回だけ書くこと、Refusal で `job_failed` を出さないこと。ほかに `agentRender` の記録と、リクエストから始まったジョブの `reqId` | `test/director.mts` | #81 |
