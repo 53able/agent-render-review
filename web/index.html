@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Render Director</title>
+    <link rel="icon" href="data:," />
+    <script>
+      // Set the theme class before first paint so there is no flash.
+      document.documentElement.classList.toggle(
+        'dark',
+        matchMedia('(prefers-color-scheme: dark)').matches,
+      );
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

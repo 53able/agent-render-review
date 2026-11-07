@@ -10,7 +10,8 @@
     "allowImportingTsExtensions": true,
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "paths": { "@/*": ["./web/src/*"] }
   },
-  "include": ["*.mts", "src/*.mts", "test/*.mts"]
+  "include": ["*.mts", "src/*.mts", "test/*.mts", "scripts/*.mts"]
 }
