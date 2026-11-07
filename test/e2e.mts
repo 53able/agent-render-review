@@ -160,7 +160,7 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     const head = await page.evaluate(() => document.querySelector('.headmark')!.closest('button')!.getAttribute('data-id'));
     await page.click('#finalBtn'); await page.waitForSelector('#finalPlanBox:not([hidden])');
     assert.equal(await page.evaluate(() => document.activeElement?.id), 'h-fplan', 'focus moves to the plan');
-    assert.equal(await page.locator('dialog[open]').count(), 0, 'no modal');
+    assert.equal(await page.locator('[role=dialog],[role=alertdialog]').count(), 0, 'no modal');
     await page.check('#compareToggle'); await page.waitForSelector('#wipe:not([hidden])');
     const thumb = page.locator('#wipe [role=slider]'); await thumb.press('Home'); await thumb.press('PageUp'); await thumb.press('PageUp'); assert.equal(await thumb.getAttribute('aria-valuenow'), '20'); await page.uncheck('#compareToggle');
     assert.equal(await page.locator('#finalPlanBox').isVisible(), true, 'the plan stays open while comparing');
@@ -350,6 +350,30 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     }));
     await page.screenshot({ path: path.join(SHOTS, 'screenshot-proposal.png') });
     await page.setViewportSize({ width: 1500, height: 1000 });
+  });
+
+  await check('at 1440×900 the page itself does not scroll in either theme: the panels scroll inside', async () => {
+    await page.setViewportSize({ width: 1440, height: 900 }); await sleep(300);
+    try {
+      for (const colorScheme of ['light', 'dark'] as const) {
+        await page.emulateMedia({ colorScheme }); await sleep(200);
+        const [sh, ih] = await page.evaluate(() => [document.documentElement.scrollHeight, window.innerHeight]);
+        assert.equal(sh, ih, `${colorScheme}: scrollHeight ${sh} vs innerHeight ${ih}`);
+      }
+    } finally { await page.emulateMedia({ colorScheme: null }); await page.setViewportSize({ width: 1500, height: 1000 }); }
+  });
+  await check('at 390 px Plan final render… starts at the left edge of the inspector heading', async () => {
+    // v001 is HEAD here: its decide row is empty, which is where an unintended gap came from.
+    await page.click('button[data-id="v001"]'); await page.waitForSelector('#canvas[data-ready="v001:draft"]');
+    await page.setViewportSize({ width: 390, height: 844 }); await sleep(300);
+    try {
+      await page.click('#tab-insp');
+      const [h, b] = await page.evaluate(() => ['#h-insp', '#finalBtn'].map((q) => document.querySelector(q)!.getBoundingClientRect().left));
+      assert.ok(Math.abs(h! - b!) < 1, `heading at ${h} px, button at ${b} px`);
+    } finally {
+      await page.setViewportSize({ width: 1500, height: 1000 }); await sleep(200);
+      await page.click(`button[data-id="${vid}"]`); await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`);
+    }
   });
 
   await check('#60 at 1024 px the render stays on top and Accept is within one screen of scrolling', async () => {
@@ -700,6 +724,24 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     const empty = await spotOf(page, null); assert.ok(empty, 'some pixel shows no object');
     const pe = await canvasPoint(page, empty); await page.mouse.click(pe.x, pe.y);
     assert.doesNotMatch(await page.textContent('#selCount') as string, /vase/);
+  });
+
+  await check('a direct edit on an accepted version that is not HEAD keeps selected an object HEAD does not have', async () => {
+    // v001 as HEAD: the accepted large scene is not HEAD, and its dots are not in HEAD's scene.
+    const st = await page.evaluate(() => fetch('/api/checkout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ versionId: 'v001' }) }).then((r) => r.status));
+    assert.equal(st, 200);
+    await page.click(`button[data-id="${large}"]`); await page.waitForSelector(`#canvas[data-ready="${large}:draft"]`, { timeout: 15000 });
+    const dot = largeNodeName(0);
+    await page.fill('#objectFilter', dot);
+    await page.locator(`#objectList li[data-name="${dot}"] [role=checkbox]`).check();
+    await page.waitForSelector('#quick input[type=range]'); await idle(page);
+    const before = await versionsOf(page);
+    await dragQuickInput(page, 'range', ['0.7']);
+    const after = await waitForNewVersion(page, before.length + 1);
+    assert.equal(after.at(-1)!.parent, large);
+    assert.match(await page.textContent('#selCount') as string, new RegExp(dot), 'the dot is still selected');
+    assert.equal(await page.textContent('#quick b'), dot, 'QuickEdit stays on the dot');
+    await page.fill('#objectFilter', '');
   });
 
   await check('ADE: no page errors', async () => assert.deepEqual(page.errors, []));

@@ -1,5 +1,5 @@
 // Objects of the viewed scene, selectable by keyboard. At most OBJECT_CAP rows; #objectMore says how many more.
-import { useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -16,11 +16,13 @@ export function ObjectList() {
   const filter = filterRaw.trim().toLowerCase();
   // An object selected past the cap is listed first (#46) and stays listed, also once deselected, until the version or
   // the filter changes: a row does not vanish under the pointer.
-  const pins = useRef({ base: '', names: new Set<string>() });
+  // The pins of the previous renders are state, updated during render when they change (React's pattern for
+  // information from previous renders), so nothing is mutated while rendering.
   const base = `${v.id}\n${filter}`;
-  if (pins.current.base !== base) pins.current = { base, names: new Set() };
-  for (const s of selection) pins.current.names.add(s);
-  const { shown, rest, matches } = visibleObjects(v.scene.nodes, filter, pins.current.names, OBJECT_CAP);
+  const [pins, setPins] = useState(() => ({ base, names: new Set(selection) }));
+  const kept = pins.base === base ? pins.names : null;
+  if (!kept || [...selection].some((s) => !kept.has(s))) setPins({ base, names: new Set([...(kept ?? []), ...selection]) });
+  const { shown, rest, matches } = useMemo(() => visibleObjects(v.scene.nodes, filter, pins.names, OBJECT_CAP), [v.scene.nodes, filter, pins.names]);
   return (
     <section aria-labelledby="h-objects">
       <h2 id="h-objects">Objects</h2>

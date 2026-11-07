@@ -11,6 +11,7 @@ import {
   NO_RENDER, V, baseOf, cachePagePreview, clearFails, clearSelection, fail, get, say, set, setOnPage, toggleSel, useStore, viewV,
 } from '../store.ts';
 
+const DRAW_FAILED = 'Cannot show the render: ';
 const loadImg = (src: string) => new Promise<HTMLImageElement>((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error(`cannot load ${src}`)); i.src = src; });
 
 /** What the canvas shows: the images, the object ids, and which versions the wipe labels name (those drawn, not those viewed). */
@@ -20,7 +21,13 @@ export function Viewport() {
   const cvRef = useRef<HTMLCanvasElement>(null), ovRef = useRef<HTMLCanvasElement>(null), vpRef = useRef<HTMLDivElement>(null);
   const g = useRef<Gfx>({ img: null, imgB: null, ids: null, hover: null, wipe: 50, seq: 0, labels: ['', ''], drawn: '' });
   const [wipeVal, setWipeVal] = useState(50);
-  const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null);
+  // The hover tip is written to the DOM directly: a state change on every mouse move would draw the whole viewport again.
+  const tipRef = useRef<HTMLDivElement>(null);
+  const setTip = (t: { x: number; y: number; text: string } | null) => {
+    const el = tipRef.current; if (!el) return;
+    if (!t) { el.hidden = true; return; }
+    el.style.left = `${t.x}px`; el.style.top = `${t.y}px`; el.textContent = t.text; el.hidden = false;
+  };
   const drawSeq = useStore((s) => s.drawSeq), viewId = useStore((s) => s.viewId), selection = useStore((s) => s.selection);
   const empty = useStore((s) => s.empty), wipe = useStore((s) => s.wipe);
 
@@ -119,10 +126,13 @@ export function Viewport() {
     paint();
     set({ wipe: !!imgB });
     g.current.drawn = key; cv.dataset.ready = `${v.id}:${s.profile}`;
+    // A failed draw is over once a render is on screen. Only the draw failures go: the other view failures (a render
+    // or a cancel that could not start) stay until dismissed or that action succeeds (#53).
+    const fs = get().fails; if (fs.view.some((f) => f.msg.startsWith(DRAW_FAILED))) set({ fails: { ...fs, view: fs.view.filter((f) => !f.msg.startsWith(DRAW_FAILED)) } });
   }, [drawPage, paint]);
 
   useEffect(() => {
-    drawViewport().catch((e: Error) => fail('view', `Cannot show the render: ${e.message}`));
+    drawViewport().catch((e: Error) => fail('view', `${DRAW_FAILED}${e.message}`));
   }, [drawSeq, viewId, drawViewport]);
   useEffect(() => { paintOverlay(); }, [selection, paintOverlay]);
 
@@ -156,9 +166,9 @@ export function Viewport() {
       />
       <canvas id="overlay" ref={ovRef} width={960} height={540} aria-hidden="true" className="pointer-events-none absolute inset-0 size-full" />
       <div
-        id="tip" hidden={!tip} className="pointer-events-none absolute translate-x-2.5 translate-y-2.5 rounded border px-1.5 py-0.5 text-xs"
-        style={{ left: tip?.x, top: tip?.y, color: C.tipFg, background: C.tipBg, borderColor: C.tipBorder }}
-      >{tip?.text}</div>
+        id="tip" ref={tipRef} hidden className="pointer-events-none absolute translate-x-2.5 translate-y-2.5 rounded border px-1.5 py-0.5 text-xs"
+        style={{ color: C.tipFg, background: C.tipBg, borderColor: C.tipBorder }}
+      />
       <Slider
         id="wipe" hidden={!wipe} min={0} max={100} value={[wipeVal]} aria-label="Compare wipe position"
         className="absolute inset-x-0 bottom-2 mx-auto w-3/5! **:data-[slot=slider-thumb]:bg-(--primary)" style={wipeStyle}

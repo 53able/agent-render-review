@@ -74,12 +74,15 @@ export const runningJob = (versionId: string, kind?: string, s: State = state): 
 export function set(patch: Partial<State>): void {
   const prev = state;
   let next: State = { ...prev, ...patch };
-  if (next.data && (next.data !== prev.data || next.viewId !== prev.viewId)) {
+  // Only against the version the view id names: while it is not loaded yet, viewV shows HEAD in its place, and HEAD's
+  // scene must not prune a selection made in another version.
+  const viewed = next.data && (next.data !== prev.data || next.viewId !== prev.viewId) ? V(next.viewId, next) : undefined;
+  if (viewed) {
     // Objects that are not in the viewed scene cannot stay selected (app.js renderObjects).
-    const names = new Set(viewV(next)?.scene.nodes.map((n) => n.name) ?? []);
+    const names = new Set(viewed.scene.nodes.map((n) => n.name));
     if ([...next.selection].some((s) => !names.has(s))) next = { ...next, selection: new Set([...next.selection].filter((s) => names.has(s))) };
     // The final render plan is for the version on screen only; switching versions closes it (#57).
-    if (next.finalPlan && next.finalPlan.plan.versionId !== viewV(next)?.id) next = { ...next, finalPlan: null };
+    if (next.finalPlan && next.finalPlan.plan.versionId !== viewed.id) next = { ...next, finalPlan: null };
   }
   // The notice is done once its proposal is on screen or no longer a proposal.
   if (!('notice' in patch) && next.notice && next.data && (next.notice === viewV(next)?.id || V(next.notice, next)?.status !== 'proposed')) next = { ...next, notice: null };
@@ -280,13 +283,17 @@ let editing = false;
 export async function directEdit(node: string, field: string, value: unknown): Promise<boolean> {
   if (editing) return true; // the edit in flight creates the version
   editing = true;
-  try {
-    const r = await api<{ version: string; job: Job }>('/api/edit', { baseId: state.viewId, node, field, value });
-    clearFails('edit'); set({ viewId: r.version }); await load(); say(`Created ${r.version}`);
-    trackJob(r.job, () => load());
-    return true;
-  } catch (e) { fail('edit', `Edit of ${node}.${field} failed: ${why(e)}`); return false; }
+  let r: { version: string; job: Job };
+  try { r = await api<{ version: string; job: Job }>('/api/edit', { baseId: state.viewId, node, field, value }); }
+  catch (e) { editing = false; fail('edit', `Edit of ${node}.${field} failed: ${why(e)}`); return false; }
+  clearFails('edit');
+  // The new version is loaded before it is viewed, so HEAD is not shown in its place meanwhile. The edit succeeded
+  // either way: a failed load is a view failure, and the next poll brings the version in.
+  try { await load(); } catch (e) { fail('view', `Created ${r.version}, but could not load it: ${why(e)}`); }
   finally { editing = false; }
+  openVersion(r.version); say(`Created ${r.version}`);
+  trackJob(r.job, () => load());
+  return true;
 }
 
 // ---------- ask the agent ----------
@@ -295,8 +302,10 @@ export async function submitAsk(): Promise<void> {
   const target = askTarget();
   if (isADE()) {
     if (discarding(target)) return fail('ask', `${target} is about to be discarded; undo the discard or open another version. Your text is kept.`);
-    try { await api('/api/feedback', { versionId: target, selection: [...state.selection], comment: instruction }); set({ instruction: '' }); clearFails('ask'); say('Sent to your agent'); await load(); }
-    catch (e) { fail('ask', `Could not send: ${why(e)}. Your text is kept.`); }
+    try { await api('/api/feedback', { versionId: target, selection: [...state.selection], comment: instruction }); }
+    catch (e) { return fail('ask', `Could not send: ${why(e)}. Your text is kept.`); }
+    set({ instruction: '' }); clearFails('ask'); say('Sent to your agent');
+    await load().catch((e) => fail('view', `Sent, but could not reload: ${why(e)}`));
     return;
   }
   if (runningJob(target, 'propose')) return fail('ask', `A proposal from ${target} is already being made. Wait for it or cancel it, then propose again.`);

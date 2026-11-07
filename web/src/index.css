@@ -196,9 +196,13 @@
     color: var(--muted-foreground);
   }
   .btnrow { display: flex; flex-wrap: wrap; gap: 8px; }
+  /* An empty row (#decide for a HEAD) would still add a gap before the next button. */
+  .btnrow:empty { display: none; }
 
   /* Layout (#56): versions | render | inspector of the version on screen */
-  .layout { display: grid; grid-template-columns: 240px minmax(0, 1fr) 360px; height: calc(100vh - 43px); }
+  /* The row is minmax(0, 1fr), not auto: an auto row grows with its tallest panel past the fixed height, and the page
+     then scrolls instead of the panels. */
+  .layout { display: grid; grid-template-columns: 240px minmax(0, 1fr) 360px; grid-template-rows: minmax(0, 1fr); height: calc(100vh - 43px); }
   .panel { background: var(--card); padding: 14px; overflow: auto; }
   .versions { display: flex; flex-direction: column; gap: 10px; border-right: 1px solid var(--border); }
   .inspector { display: flex; flex-direction: column; gap: 18px; border-left: 1px solid var(--border); }
@@ -208,7 +212,7 @@
   .insp-title { margin: 0; font-size: 14px; letter-spacing: 0; text-transform: none; color: var(--foreground); }
   .panetabs { display: none; }
   @media (max-width: 1100px) {
-    .layout { grid-template-columns: 1fr; height: auto; }
+    .layout { grid-template-columns: 1fr; grid-template-rows: none; height: auto; }
     .versions, .inspector { overflow: visible; border: 0; border-top: 1px solid var(--border); }
     /* the render stays in view while scrolling the panel below it (#60) */
     .stage { position: sticky; top: 0; z-index: 5; overflow: visible; padding-bottom: 8px; border-bottom: 1px solid var(--border); background: var(--background); }
