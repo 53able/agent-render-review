@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createDirector } from '../src/director.mts';
+import { createDirector, Refusal } from '../src/director.mts';
+import type { Proposer } from '../src/director.mts';
 import type { Renderer, RenderOutcome } from '../src/vork.mts';
 import type { Scene } from '../src/policy.mts';
 
@@ -38,11 +39,21 @@ function fakeRenderer() {
   const hold = () => { let release!: () => void; gate = new Promise((r) => (release = r)); return () => { gate = null; release(); }; };
   return { renderer, calls, hold, fail: (log: string | null) => { failWith = log; } };
 }
-const setup = ({ project = null as string | null } = {}) => {
-  const runs = path.join(tmp, `runs-${++n}`); fs.mkdirSync(runs);
+const setup = ({ ade = false, proposer }: { ade?: boolean; proposer?: Proposer } = {}) => {
+  const base = path.join(tmp, `case-${++n}`); const project = ade ? path.join(base, 'project') : null;
+  const runs = project ? path.join(project, '.vork') : path.join(base, 'runs'); fs.mkdirSync(runs, { recursive: true });
   const fake = fakeRenderer();
-  return { runs, fake, d: createDirector({ runs, project, renderer: fake.renderer, starter }) };
+  return { runs, project, fake, d: createDirector({ runs, project, renderer: fake.renderer, starter, proposer }) };
 };
+/** Asserts that fn is refused with this kind; returns the refusal. */
+const refused = async (kind: Refusal['kind'], fn: () => unknown, message?: RegExp): Promise<Refusal> => {
+  try { await fn(); } catch (e) {
+    assert.ok(e instanceof Refusal, String(e)); assert.equal(e.kind, kind, e.message); if (message) assert.match(e.message, message); return e;
+  }
+  assert.fail(`not refused (expected ${kind})`);
+};
+const waitJob = async <T extends { status: string }>(job: T): Promise<T> => { for (let i = 0; i < 200 && job.status === 'running'; i++) await tick(); return job; };
+const agentProposal = (d: ReturnType<typeof setup>['d'], color: number[], base = 'v001') => d.agentPropose({ base, interpretation: 'x', claimed_changes: [], scene: withColor(color) });
 const tick = () => new Promise((r) => setTimeout(r, 10));
 const withColor = (c: number[]): Scene => { const s = structuredClone(starter); s.nodes.find((x) => x.name === 'vase')!.materials![0].inputs!.base_color = c; return s; };
 
@@ -125,6 +136,117 @@ await check('createProposal stores a proposed version, renders draft then previs
   assert.ok(draft.ok); assert.equal(v.status, 'proposed'); assert.equal(d.state.head, 'v001');
   assert.deepEqual(fake.calls.map((c) => c.profile), ['draft', 'previs']);
   assert.equal(d.state.audit.at(-1)!.event, 'proposed');
+});
+
+await check('agent propose: bad fields are refused before rendering; a policy blocker is 422 and makes no version', async () => {
+  const { d, fake } = setup({ ade: true });
+  await refused('invalid', () => d.agentPropose({ interpretation: 'x', claimed_changes: [{ node: 1 }], scene: starter }), /claimed_changes/);
+  await refused('invalid', () => d.agentPropose({ interpretation: 'x', claimed_changes: [], assumptions: [1], scene: starter }), /assumptions/);
+  const r = await refused('unprocessable', () => d.agentPropose({ interpretation: 'x', claimed_changes: [], scene: { ...starter, programs: { p: {} } } }), /policy/);
+  assert.deepEqual(Object.keys(r.extra), ['blockers', 'log', 'version']);
+  assert.equal(fake.calls.length, 0); assert.equal(d.state.versions.length, 1);
+  const { v, draft, flags } = await agentProposal(d, [0.2, 0.2, 0.9]);
+  assert.ok(draft.ok); assert.deepEqual(flags, []); assert.equal(v.proposal!.via, 'mcp'); assert.equal(v.proposal!.respondsTo, null);
+});
+
+await check('#15 agent propose: a base discarded during the validation render makes no version', async () => {
+  const { d, fake } = setup({ ade: true });
+  const { v: base } = await agentProposal(d, [0.1, 0.1, 0.1]);
+  const release = fake.hold();
+  const p = agentProposal(d, [0.3, 0.3, 0.3], base.id);
+  await tick(); d.decide({ versionId: base.id, decision: 'discard' }); release();
+  await refused('conflict', () => p, /discarded while the scene was being validated/);
+  assert.equal(d.state.versions.length, 2);
+});
+
+await check('built-in propose: the proposer gets the context; a base discarded while it works makes no proposal', async () => {
+  const prompts: string[] = []; let hold: Promise<void> | null = null;
+  const proposer: Proposer = async (prompt) => { prompts.push(prompt); if (hold) await hold; return { out: { interpretation: 'blue', assumptions: [], clarifying_question: null, claimed_changes: [], scene: withColor([0, 0, 1]) }, cost: 0.01, ms: 1 }; };
+  const { d } = setup({ proposer });
+  await refused('invalid', () => d.startPropose({ baseId: 'v001', instruction: 1 }));
+  const job = await waitJob(d.startPropose({ baseId: 'v001', instruction: 'blue', selection: ['vase', 1], context: { selection: true } }));
+  assert.equal(job.status, 'done', JSON.stringify(job)); assert.match(prompts[0], /^SELECTED objects \(director clicked these in the image\): vase$/m);
+  const proposed = (job.result as { versionId: string }).versionId;
+  assert.equal(d.getV(proposed)!.proposal!.cost, 0.01);
+  let release!: () => void; hold = new Promise((r) => (release = r));
+  const second = d.startPropose({ baseId: proposed, instruction: 'again' }); await tick();
+  d.decide({ versionId: proposed, decision: 'discard' }); release();
+  await waitJob(second); assert.equal(second.status, 'failed'); assert.equal(second.error, 'base_discarded');
+  await refused('invalid', () => d.startPropose({ baseId: proposed, instruction: 'x' }), /discarded/);
+  const ade = setup({ ade: true }).d; await refused('conflict', () => ade.checkCanPropose(), /ADE mode/);
+});
+
+await check('decide, checkout and direct edits keep HEAD on an accepted version and tell the agent', async () => {
+  const { d } = setup({ ade: true });
+  const { v } = await agentProposal(d, [0.5, 0.1, 0.1]);
+  await refused('invalid', () => d.checkout({ versionId: v.id }), /accepted/);
+  assert.equal(d.decide({ versionId: v.id, decision: 'accept', comment: 'ok' }), v.id);
+  await refused('invalid', () => d.decide({ versionId: v.id, decision: 'discard' }), /only proposed/);
+  d.checkout({ versionId: 'v001' }); assert.equal(d.state.head, 'v001');
+  await refused('invalid', () => d.directEdit({ baseId: 'v001', node: 'vase', field: 'toString', value: 1 }), /unsupported/);
+  await refused('invalid', () => d.directEdit({ baseId: 'v001', node: 'vase', field: 'energy', value: 5 }), /not a light/);
+  const { v: edited, job } = d.directEdit({ baseId: 'v001', node: 'vase', field: 'specular_roughness', value: 0.3 });
+  assert.equal(d.state.head, edited.id); await waitJob(job); assert.equal(job.status, 'done'); assert.ok(edited.renders.draft && edited.renders.previs);
+  assert.deepEqual(d.takeEvents().map((e) => e.type), ['decision', 'checkout', 'direct_edit']);
+});
+
+await check('#31 two waiting agents get one event once in total; an aborted wait returns without reading', async () => {
+  const { d } = setup();
+  const gone = new AbortController(); const aborted = d.waitForEvents(10_000, gone.signal); gone.abort(); await aborted;
+  const waits = [0, 1].map(() => d.waitForEvents(10_000, new AbortController().signal).then(() => d.takeEvents()));
+  await tick(); d.feedback({ versionId: 'v001', selection: ['vase', 2], comment: ' darker ' });
+  const got = await Promise.all(waits);
+  assert.deepEqual(got.map((evs) => evs.length).sort(), [0, 1]);
+  const ev = got.flat()[0]; assert.ok(ev.type === 'feedback' && ev.comment === 'darker' && ev.selection.length === 1);
+  assert.equal(d.state.agentCursor, ev.seq); assert.deepEqual(d.takeEvents(), []);
+});
+
+await check('adoption: request, plan, adopt writes the asset and manifest, accepts the proposal and tells the agent', async () => {
+  const { d, project } = setup({ ade: true });
+  const { v } = await agentProposal(d, [0.9, 0.9, 0.1]);
+  await refused('invalid', () => d.requestAdoption({ version: v.id, slug: '../evil' }), /slug/);
+  const requestId = d.requestAdoption({ version: v.id, slug: 'hero', reason: 'fits' });
+  await refused('conflict', () => d.requestAdoption({ version: v.id, slug: 'hero' }), /already pending/);
+  const first = d.planAdoption({ requestId }); const plan = d.planAdoption({ requestId });
+  assert.deepEqual(plan.writes, ['public/vork/hero.png', '.vork/adopted/hero.json']); assert.equal(plan.needsFinalRender, true);
+  await refused('forbidden', () => d.startAdoption(first.ticket), /fresh approval/);
+  const job = await waitJob(d.startAdoption(plan.ticket));
+  assert.equal(job.status, 'done', JSON.stringify(job));
+  const manifest = JSON.parse(fs.readFileSync(path.join(project!, '.vork/adopted/hero.json'), 'utf8'));
+  assert.equal(manifest.vork, 'fake 1.0'); assert.equal(manifest.version, v.id);
+  assert.ok(fs.readFileSync(path.join(project!, 'public/vork/hero.png')).toString().startsWith('png final'));
+  assert.equal(v.status, 'accepted'); assert.equal(d.state.head, v.id); assert.equal(d.state.adoptionRequests[0].status, 'adopted');
+  assert.equal(d.takeEvents().filter((e) => e.type === 'adopted').length, 1);
+  await refused('forbidden', () => d.startAdoption(plan.ticket));
+  await refused('conflict', () => setup().d.requestAdoption({ version: 'v001', slug: 'x' }), /--project/);
+});
+
+await check('#14 #27 while an adoption renders, discard is refused; discarding later rejects pending requests', async () => {
+  const { d, fake, project } = setup({ ade: true });
+  const { v } = await agentProposal(d, [0.3, 0.6, 0.3]);
+  const requestId = d.requestAdoption({ version: v.id, slug: 'race' });
+  const release = fake.hold();
+  const job = d.startAdoption(d.planAdoption({ requestId }).ticket); await tick();
+  await refused('conflict', () => d.decide({ versionId: v.id, decision: 'discard' }), /being adopted/);
+  await refused('conflict', () => d.rejectAdoption({ requestId }), /running/);
+  d.cancelJob(job.id); release(); await tick();
+  assert.equal(job.status, 'cancelled'); assert.equal(fs.existsSync(path.join(project!, 'public/vork/race.png')), false);
+  d.takeEvents();
+  d.decide({ versionId: v.id, decision: 'discard' });
+  assert.equal(d.state.adoptionRequests[0].status, 'rejected');
+  assert.ok(d.takeEvents().some((e) => e.type === 'adoption_rejected' && e.comment === 'version discarded'));
+});
+
+await check('final render: needs a ticket for the exact scene; a ticket of a discarded version is refused', async () => {
+  const { d } = setup({ ade: true });
+  await refused('forbidden', () => d.startRender({ versionId: 'v001', profile: 'final', ticket: 'x' }));
+  const job = await waitJob(d.startRender({ versionId: 'v001', profile: 'final', ticket: d.planFinal('v001').ticket }));
+  assert.equal(job.status, 'done'); assert.ok(d.getV('v001')!.renders.final);
+  const { v } = await agentProposal(d, [0.7, 0.2, 0.7]); const { ticket } = d.planFinal(v.id);
+  d.decide({ versionId: v.id, decision: 'discard' });
+  await refused('conflict', () => d.startRender({ versionId: v.id, profile: 'final', ticket }), /discarded/);
+  await refused('not_found', () => d.agentRender('v999', 'draft'));
+  await refused('forbidden', () => d.agentRender(v.id, 'final'), /human approval/);
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

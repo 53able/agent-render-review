@@ -201,3 +201,37 @@ export function applyDirectEdit(scene: Scene, node: unknown, field: unknown, val
 export const adoptionRels = (slug: string, assetDir: string) => ({
   assetRel: path.posix.join(assetDir.replace(/\\/g, '/'), `${slug}.png`), manifestRel: path.posix.join('.vork', 'adopted', `${slug}.json`),
 });
+
+// ---------- state transitions (no I/O; the caller saves) ----------
+// Every change of a version's status, of HEAD and of an adoption request's status goes through these, so the rules
+// hold in one place: a discarded version never becomes accepted or HEAD, HEAD is always an accepted version, and a
+// request is settled once.
+export const isLive = (v: Version | undefined): v is Version => v !== undefined && v.status !== 'discarded';
+export const nextVersionId = (state: DirectorState) => `v${String(state.versions.length + 1).padStart(3, '0')}`;
+export const nextRequestId = (state: DirectorState) => `a${String(state.adoptionRequests.length + 1).padStart(3, '0')}`;
+/** Accepting a version also makes it HEAD. */
+export function acceptVersion(state: DirectorState, v: Version): void {
+  if (v.status === 'discarded') throw new Error(`${v.id} is discarded and cannot be accepted`);
+  v.status = 'accepted'; state.head = v.id;
+}
+export function discardVersion(v: Version): void {
+  if (v.status !== 'proposed') throw new Error(`only a proposed version can be discarded, not ${v.id} (${v.status})`);
+  v.status = 'discarded';
+}
+export function checkoutVersion(state: DirectorState, v: Version): void {
+  if (v.status !== 'accepted') throw new Error(`only an accepted version can become HEAD, not ${v.id} (${v.status})`);
+  state.head = v.id;
+}
+export function settleRequest(ar: AdoptionRequest, status: 'rejected' | 'adopted'): void {
+  if (ar.status !== 'pending') throw new Error(`adoption request ${ar.id} is already ${ar.status}`);
+  ar.status = status;
+}
+/** Pending requests whose version is discarded (or gone), except those busy() says are being adopted. */
+export const requestsOfDiscarded = (state: DirectorState, busy: (requestId: string) => boolean): AdoptionRequest[] =>
+  state.adoptionRequests.filter((ar) => ar.status === 'pending' && !isLive(state.versions.find((v) => v.id === ar.version)) && !busy(ar.id));
+/** Fills in what a state.json from an older Director lacks. */
+export function normalizeState(raw: Partial<DirectorState>): DirectorState {
+  const state = raw as DirectorState;
+  state.versions ||= []; state.head ??= null; state.audit ||= []; state.events ||= []; state.agentCursor ||= 0; state.adoptionRequests ||= [];
+  return state;
+}
