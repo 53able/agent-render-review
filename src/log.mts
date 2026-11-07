@@ -15,7 +15,7 @@ const fmt = getJsonLinesFormatter({ properties: 'flatten' });
 /** Fields kept in the file only: stderr goes to server.log in ADE mode, which has no size limit. */
 const FILE_ONLY = ['vorkLogTail', 'stack'];
 /** A V8 stack frame: "    at fn (file:line:col)", "    at file:line:col" or "    at fn (native)"-like forms ending in a location. */
-const FRAME = /^\s+at (?:.+ \((?:.+:\d+:\d+|native|<anonymous>)\)|.+:\d+:\d+|<anonymous>)$/;
+const FRAME = /^\s+at (?:.+ \((?:.+:\d+:\d+|native|<anonymous>|index \d+)\)|.+:\d+:\d+|<anonymous>)$/;
 let active = false;
 
 /**
@@ -26,10 +26,12 @@ let active = false;
 function fileSink(file: string, maxSize: number, maxFiles: number): Sink {
   const dir = path.dirname(file);
   const reported = new Set<string>();
-  // Each kind of failure goes to stderr once (stderr is server.log in ADE mode, which has no size limit).
+  // Each kind of failure, by event and error code, goes to stderr once (stderr is server.log in ADE mode, which has
+  // no size limit), so a later lasting failure is not hidden by an earlier passing one.
   const report = (event: string, message: string, e: unknown) => {
-    if (reported.has(event)) return;
-    reported.add(event);
+    const key = `${event}:${(e as NodeJS.ErrnoException)?.code ?? ''}`;
+    if (reported.has(key)) return;
+    reported.add(key);
     try {
       process.stderr.write(JSON.stringify({
         '@timestamp': new Date().toISOString(), level: 'ERROR', logger: `${SERVICE}.log`, message,
@@ -42,13 +44,18 @@ function fileSink(file: string, maxSize: number, maxFiles: number): Sink {
     try {
       // .vork/ is writable by the agent. A symlink or a hard link put in place of logs/ or the log file must not
       // redirect the writes to another file (the same nlink and O_NOFOLLOW checks /runs/ makes, src/http.mts).
-      if (!fs.lstatSync(dir).isDirectory()) throw Object.assign(new Error('logs is not a directory'), { code: 'ENOTDIR' });
+      // logs/ removed, or replaced by a symlink: our own name of it is removed and the folder made again.
+      let d: fs.Stats | null = null;
+      try { d = fs.lstatSync(dir); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+      if (d && d.isSymbolicLink()) { fs.unlinkSync(dir); d = null; report('log.dir_replaced', 'logs/ was a symlink; it was unlinked and made again', notPlainFile); }
+      if (!d) fs.mkdirSync(dir);
+      else if (!d.isDirectory()) throw Object.assign(new Error('logs is not a directory'), { code: 'ENOTDIR' });
       let st: fs.Stats | null = null;
       try { st = fs.lstatSync(file); } catch {}
       if (st && (!st.isFile() || st.nlink !== 1)) {
         // Unlinking our own name of it leaves the file it points at, or shares its data with, as it was.
+        fs.unlinkSync(file); st = null; // throws for a directory: reported as log.write_failed below
         report('log.file_replaced', 'The log file was not a plain file with one link; it was unlinked and started again', notPlainFile);
-        fs.unlinkSync(file); st = null;
       }
       const line = Buffer.from(fmt(r));
       if (st && st.size > 0 && st.size + line.length > maxSize) {
@@ -56,7 +63,8 @@ function fileSink(file: string, maxSize: number, maxFiles: number): Sink {
         try { fs.renameSync(file, `${file}.1`); }
         catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') report('log.rotate_failed', 'Could not rotate the log file', e); }
       }
-      const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
+      // O_NONBLOCK: a FIFO put there between lstat and open would otherwise block open, and with it the whole process.
+      const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 0o600);
       try {
         // Checked again on the open file: the name could have been swapped between lstat and open.
         const o = fs.fstatSync(fd);

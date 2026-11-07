@@ -116,6 +116,10 @@ LogTape は `configure()` しないと何も出力しません。設定したう
 
 失敗は呼び出し元へ投げません。`log.write_failed`、`log.rotate_failed`（`ENOENT` 以外の名前送りの失敗）、`log.file_replaced` を、種類ごとに 1 回だけ stderr に書きます。`maxFiles` は 1 未満なら 1、`maxSize` は 1 未満なら 1 として扱います。
 
+`logs/` が消されていれば作り直し、シンボリックリンクに置き換えられていればその名前を消して作り直します。ファイルは `O_NONBLOCK` でも開くので、`lstat` と `open` の間に FIFO を置かれても open で止まりません（`/runs/` の配信と同じ）。失敗の報告は「イベントとエラーコード」の組ごとに 1 回です。
+
+残るリスク: Node に `openat` が無いので、`logs/` の `lstat` と `open` の間に `logs/` をシンボリックリンクへ差し替える競合は防げません。この場合は別の場所の `director.jsonl` という名前のファイルに 1 行追記されえます。`errFields(e, { message: false })` は、stack を一度読んだ後に message を書き換えた Error では先頭行の照合が外れ、V8 のフレームと同じ形の行（`    at x (y:1:2)`）が message にあれば残ります。`message: false` の呼び出し元は今は `errorType` しか使っていません。
+
 1 レコードごとに `lstat`（2 回）と open / `fstat` / write / close が走ります。`fsync` はしないので、OS ごと落ちたときは最後の数件を失いえます。Director のイベントは HTTP リクエストとジョブの単位で、毎秒数十件を超えない想定なので許容します。`GET` の 400 未満を debug に落としているのは、画像の取得で件数が増えるのを抑えるためでもあります。
 
 ## 6. 漏洩防止の規則

@@ -111,6 +111,24 @@ await check('T7d a hard link put in place of director.jsonl is not written throu
   assert.doesNotThrow(() => L.info('t7d.dir', 'dir'));
   assert.doesNotThrow(() => shutdownLogging());
   assert.deepEqual(fs.readdirSync(elsewhere), []);
+  assert.ok(fs.lstatSync(logs).isDirectory(), 'logs/ is made again as a folder');
+  assert.deepEqual(lines(dir).map((e) => e.event), ['t7d.dir']);
+});
+
+await check('T7f a FIFO in place of director.jsonl does not block; logs/ removed is made again', async () => {
+  const dir = newDir(); const logs = path.join(dir, 'logs');
+  setupLogging({ dir, level: 'info', stderrLevel: 'fatal' });
+  fs.rmSync(logs, { recursive: true });
+  L.info('t7f.recreated', 'recreated');
+  assert.deepEqual(lines(dir).map((e) => e.event), ['t7f.recreated']);
+  fs.rmSync(path.join(logs, 'director.jsonl'));
+  const r = spawnSync('mkfifo', [path.join(logs, 'director.jsonl')]);
+  assert.equal(r.status, 0, String(r.stderr));
+  const t0 = Date.now();
+  L.info('t7f.after', 'after');
+  assert.ok(Date.now() - t0 < 2000, 'logging blocked on the FIFO');
+  shutdownLogging();
+  assert.deepEqual(lines(dir).map((e) => e.event), ['t7f.after']);
 });
 
 await check('T7e maxFiles below 1 is treated as 1, so at most two files exist', async () => {
@@ -175,6 +193,10 @@ await check('errFields keeps only type, message and stack, and message: false re
   const frameLike = errFields(new Error('UNIQUE-FIRST\n    at night UNIQUE-SECOND'), { message: false });
   assert.ok(frameLike.stack && frameLike.stack.includes(' at '), String(frameLike.stack));
   assert.ok(!frameLike.stack.includes('UNIQUE'), frameLike.stack);
+  // Real V8 frame forms are kept, including Promise.all's "(index N)".
+  const forms = ['    at async fn (file:///a.mts:1:2)', '    at new X (/a.mts:3:4)', '    at file:///a.mts:10:5', '    at Array.map (<anonymous>)', '    at async Promise.all (index 0)', '    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)'];
+  const built = Object.assign(new Error('m'), { stack: ['Error: m', ...forms].join('\n') });
+  assert.equal(errFields(built, { message: false }).stack, forms.join('\n'));
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });
