@@ -305,10 +305,16 @@ await check('#11 /runs/ does not follow a symlink out of .vork; a runs folder in
     assert.equal(r.status, 404); assert.doesNotMatch(body, /agentToken/);
   } finally { fs.rmSync(link); }
   const { spawnSync } = await import('node:child_process');
-  const inside = path.join(ROOT, 'public', `runs-${process.pid}`);
-  const p = spawnSync(process.execPath, [path.join(ROOT, 'server.mts'), '--port', '0'], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_RUNS: inside }, encoding: 'utf8', timeout: 20000 });
-  assert.notEqual(p.status, 0); assert.match(p.stderr, /inside/);
-  assert.ok(!fs.existsSync(inside), 'nothing is created under public/');
+  // The upper-case spelling only names public/ on a case-insensitive file system; there it must be refused too.
+  const caseInsensitive = fs.existsSync(path.join(ROOT, 'PUBLIC'));
+  for (const dir of ['public', ...(caseInsensitive ? ['PUBLIC', 'Public'] : [])]) {
+    const inside = path.join(ROOT, dir, `runs-${process.pid}`);
+    try {
+      const p = spawnSync(process.execPath, [path.join(ROOT, 'server.mts'), '--port', '0'], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_RUNS: inside }, encoding: 'utf8', timeout: 20000 });
+      assert.notEqual(p.status, 0, dir); assert.match(p.stderr, /inside/, dir);
+      assert.ok(!fs.existsSync(inside), `nothing is created under ${dir}/`);
+    } finally { fs.rmSync(inside, { recursive: true, force: true }); }
+  }
 });
 
 await check('#10 a static .json file is served as its contents, not as a serialized Buffer', async () => {

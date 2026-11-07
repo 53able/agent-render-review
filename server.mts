@@ -322,8 +322,9 @@ async function main() {
   const MODEL = process.env.DIRECTOR_MODEL || 'sonnet';
   // Files under PUBLIC are served without a session, so RUNS (server.json, state.json) must not live there.
   // Checked before mkdir, on the real path of the nearest existing ancestor.
-  const realish = (p: string): string => { let probe = p; while (!fs.existsSync(probe)) probe = path.dirname(probe); return path.join(fs.realpathSync(probe), path.relative(probe, p)); };
-  const runsReal = realish(RUNS), publicReal = fs.realpathSync(PUBLIC);
+  // realpathSync.native returns the on-disk letter case, so PUBLIC/x is caught on case-insensitive file systems.
+  const realish = (p: string): string => { let probe = p; while (!fs.existsSync(probe)) probe = path.dirname(probe); return path.join(fs.realpathSync.native(probe), path.relative(probe, p)); };
+  const runsReal = realish(RUNS), publicReal = fs.realpathSync.native(PUBLIC);
   if (runsReal === publicReal || runsReal.startsWith(publicReal + path.sep)) { console.error(`refusing to start: the runs folder ${RUNS} is inside ${PUBLIC}, which is served without a session`); process.exit(2); }
   fs.mkdirSync(RUNS, { recursive: true });
   const LOCK = path.join(RUNS, 'lock');
@@ -977,9 +978,10 @@ ${VORK_HELP}`;
       if (rel.includes('\0') || rel.split(/[\\/]/).includes('..')) return send(res, 404, 'not found', 'text/plain');
       // No symlinks below the root: the real path must be the literal one. A link that stays inside RUNS
       // (v001/final.png -> ../server.json) would otherwise still pass a "real path is inside the root" check.
-      const rootReal = fs.realpathSync(root); const want = path.resolve(rootReal, '.' + path.sep + rel);
+      // .native also makes a URL whose letter case differs from the file on disk a 404.
+      const rootReal = fs.realpathSync.native(root); const want = path.resolve(rootReal, '.' + path.sep + rel);
       let real: string;
-      try { real = fs.realpathSync(want); } catch { return send(res, 404, 'not found', 'text/plain'); }
+      try { real = fs.realpathSync.native(want); } catch { return send(res, 404, 'not found', 'text/plain'); }
       if (real !== want || !real.startsWith(rootReal + path.sep) || !fs.statSync(real).isFile())
         return send(res, 404, 'not found', 'text/plain');
       return send(res, 200, fs.readFileSync(real), MIME[path.extname(real)] || 'application/octet-stream');
