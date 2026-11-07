@@ -88,8 +88,7 @@
 
     <section id="jobBox" class="job" hidden aria-labelledby="h-job">
       <h2 id="h-job">Working</h2>
-      <ol id="jobSteps" class="steps"></ol>
-      <div class="jobfoot"><span id="jobElapsed"></span><button id="cancelBtn" class="ghost">Cancel</button></div>
+      <ol id="jobList" class="jobs"></ol>
     </section>
 
     <section id="review" class="review" hidden aria-labelledby="h-review"></section>
@@ -99,6 +98,7 @@
       <h2 id="h-final">Final render</h2>
       <p class="hint">Uses GPU time and writes a file. Requires approval for the exact scene shown.</p>
       <button id="finalBtn" class="ghost">Plan final render…</button>
+      <p id="finalBusy" class="hint" hidden></p>
       <div id="err-final" class="errs"></div>
     </section>
 

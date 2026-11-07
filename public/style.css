@@ -86,7 +86,10 @@ textarea { width: 100%; resize: vertical; background: #0f1216; color: var(--text
 .steps .done .ic::before { content: "✓"; color: var(--ok); }
 .steps .failed .ic::before { content: "✕"; color: var(--bad); }
 .steps pre { grid-column: 2 / -1; margin: 2px 0 0; white-space: pre-wrap; font-size: 11px; color: var(--muted); max-height: 120px; overflow: auto; }
-.jobfoot { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; color: var(--muted); }
+.jobs { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.jobhead { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; } .jobhead .hint { margin: 0 auto 0 0; }
+.jobrow[data-status="failed"] .jobhead b, .jobrow[data-status="cancelled"] .jobhead b { color: var(--bad); }
+.vlist button.busy .vid::after { content: " · working…"; color: var(--accent); }
 @media (prefers-reduced-motion: no-preference) { .steps .running .ic::before { display: inline-block; animation: spin 1.2s linear infinite; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 

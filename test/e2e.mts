@@ -47,7 +47,7 @@ const newPage = async () => {
   page.errors = []; page.on('pageerror', (e) => page.errors.push(String(e)));
   return page;
 };
-const idle = (page: Page, t = 120000) => page.waitForFunction(() => document.querySelector<HTMLElement>('#cancelBtn')!.hidden, null, { timeout: t });
+const idle = (page: Page, t = 120000) => page.waitForFunction(() => !document.querySelector('#jobList [data-status="running"]'), null, { timeout: t });
 const clickObject = async (page: Page, fx: number, fy: number) => { await page.waitForSelector('#canvas[data-ready]'); const b = await page.locator('#canvas').boundingBox(); await page.mouse.click(b!.x + b!.width * fx, b!.y + b!.height * fy); };
 
 // ---------------- Part A: standalone ----------------
@@ -112,7 +112,11 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     if (!f.startsWith(path.join(PROJECT, 'public')) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) { res.writeHead(404); return res.end(); }
     res.writeHead(200, { 'content-type': f.endsWith('.html') ? 'text/html; charset=utf-8' : 'image/png' }); res.end(fs.readFileSync(f));
   }).listen(4794, '127.0.0.1');
-  const url = await startDirector(['--project', PROJECT, '--port', '4793']);
+  // Test-only vork wrapper: while GATE exists, a final render waits before it runs, so a test can act during one.
+  const BIN = path.join(tmp, 'bin'); fs.mkdirSync(BIN); const GATE = path.join(tmp, 'gate');
+  const realVork = process.env.PATH!.split(path.delimiter).map((d) => path.join(d, 'vork')).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return true; } catch { return false; } });
+  fs.writeFileSync(path.join(BIN, 'vork'), `#!/bin/sh\ncase "$*" in *std/final*) while [ -e '${GATE}' ]; do sleep 0.05; done;; esac\nexec '${realVork}' "$@"\n`, { mode: 0o755 });
+  const url = await startDirector(['--project', PROJECT, '--port', '4793'], { PATH: `${BIN}${path.delimiter}${process.env.PATH}` });
   const cfgFile = path.join(PROJECT, '.vork', 'config.json');
   const setConfig = (c: Record<string, string>) => fs.writeFileSync(cfgFile, JSON.stringify({ assetDir: 'public/vork', ...c }, null, 2));
   setConfig({ pageUrl: 'http://127.0.0.1:4794/', assetUrlPattern: '**/vork/hero.png' });
@@ -166,6 +170,31 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     const ev = fb.events.find((e: { type: string }) => e.type === 'feedback');
     assert.equal(ev.version, vid); assert.deepEqual(ev.selection, ['vase'], JSON.stringify(ev)); assert.match(ev.comment, /花瓶/);
     await page.waitForFunction(() => document.querySelector('#eventList')!.textContent!.includes('read by agent'), null, { timeout: 8000 });
+  });
+
+  await check('#54 while a final render runs, the page keeps updating and other versions can be viewed', async () => {
+    fs.writeFileSync(GATE, '');
+    try {
+      await page.click(`button[data-id="${vid}"]`); await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`);
+      await page.click('#finalBtn'); await sleep(300); await page.click('#finalDlg button[value=approve]');
+      await page.waitForSelector(`#jobList [data-status="running"][data-version="${vid}"]`, { timeout: 10000 });
+      assert.equal(await page.locator('#finalBtn').isDisabled(), true, 'no second final render of the same version');
+      assert.match(await page.textContent('#finalBusy') as string, new RegExp(`${vid} has a running job`));
+      // the agent asks for an adoption meanwhile: the request shows up within the poll interval
+      const r = await agent('POST', '/api/agent/adoption-request', { version: vid, slug: 'during-job', reason: 'x' });
+      await page.waitForFunction(() => document.querySelector('#adoptList')!.textContent!.includes('during-job'), null, { timeout: 3500 });
+      // another version can be opened and compared while the job runs
+      await page.click('button[data-id="v001"]'); await page.waitForSelector('#canvas[data-ready="v001:draft"]', { timeout: 10000 });
+      assert.equal(await page.locator('#finalBtn').isDisabled(), false, 'v001 has no job');
+      assert.ok(await page.locator(`#versionList button.busy[data-id="${vid}"]`).count(), 'the version list marks the busy version');
+      await page.click(`#jobList [data-version="${vid}"] button[data-cancel-job]`);
+      await page.waitForSelector(`#jobList [data-status="cancelled"][data-version="${vid}"]`, { timeout: 10000 });
+      await sleep(2000);
+      assert.equal(await page.locator(`#jobList [data-status="cancelled"][data-version="${vid}"]`).count(), 1, 'a cancelled job stays listed');
+      await page.click(`#jobList [data-version="${vid}"] button[data-dismiss-job]`);
+      assert.equal(await page.evaluate(async (id) => (await fetch('/api/adopt/reject', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: id }) })).status, r.request), 200);
+      await page.click(`button[data-id="${vid}"]`); await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`);
+    } finally { fs.rmSync(GATE, { force: true }); }
   });
 
   await check('AC-09 page preview substitutes the candidate without touching project files', async () => {

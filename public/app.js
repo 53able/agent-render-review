@@ -14,11 +14,11 @@ import { isWildcard, checkClaims, groupDiff, nameRuns, describeNames, visibleObj
 /** @typedef {{ t: string, event: string, version?: string, instruction?: string }} AuditEntry */
 /** @typedef {{ head: string, versions: Version[], vork: string, mode?: string, project?: string, model?: string, adoptionRequests: AdoptionRequest[], events: AgentEvent[], agentCursor: number, audit: AuditEntry[], config: { pageUrl?: string } }} Data */
 /** @typedef {{ kind: string, versionId: string, asset: string, proposal?: { clarifying_question?: string }, policy: { blockers: string[] }, log?: string }} JobResult */
-/** @typedef {{ id: string, status: string, versionId: string, steps: { status: string, label: string, t: number, detail?: string }[], elapsed: number, error?: string, result: JobResult }} Job */
+/** @typedef {{ id: string, kind: string, status: string, versionId: string, steps: { status: string, label: string, t: number, detail?: string }[], elapsed: number, error?: string, result: JobResult }} Job */
 /** @typedef {{ versionId: string, versionStatus: string, acceptsProposal?: boolean, hash: string, reason: string, writes: string[], overwrites?: boolean, needsFinalRender?: boolean, expiresInSec: number, ticket: string }} AdoptPlan */
 /** @typedef {{ versionId: string, hash: string, profile: string, resolution: number[], output: string, overwrites?: boolean, reference: string, timeoutSec: number, expiresInSec: number, flags: { msg: string }[], ticket: string }} FinalPlan */
 /** @typedef {{ w: number, h: number, arr: Uint16Array, objects: Record<string, string> }} Ids */
-/** @typedef {{ data: Data, viewId: string, profile: string, selection: Set<string>, hover: string | null, compare: boolean, job: Job | null, ids: Ids | null, img: HTMLImageElement, imgB: HTMLImageElement | null, lastResult: Job | null, sig?: string, onPage?: boolean, editing?: boolean, objKey?: string }} State */
+/** @typedef {{ data: Data, viewId: string, profile: string, selection: Set<string>, hover: string | null, compare: boolean, ids: Ids | null, img: HTMLImageElement, imgB: HTMLImageElement | null, lastResult: Job | null, sig?: string, onPage?: boolean, editing?: boolean, objKey?: string }} State */
 /** @typedef {[string, string, string, any, ...number[]]} QuickRow */
 
 /**
@@ -29,7 +29,7 @@ import { isWildcard, checkClaims, groupDiff, nameRuns, describeNames, visibleObj
  */
 const $ = (s) => /** @type {T} */ (document.querySelector(s));
 /** @type {State} */
-const S = { data: /** @type {Data} */ (/** @type {unknown} */ (null)), viewId: /** @type {string} */ (/** @type {unknown} */ (null)), profile: 'draft', selection: new Set(), hover: null, compare: false, job: null, ids: null, img: /** @type {HTMLImageElement} */ (/** @type {unknown} */ (null)), imgB: null, lastResult: null };
+const S = { data: /** @type {Data} */ (/** @type {unknown} */ (null)), viewId: /** @type {string} */ (/** @type {unknown} */ (null)), profile: 'draft', selection: new Set(), hover: null, compare: false, ids: null, img: /** @type {HTMLImageElement} */ (/** @type {unknown} */ (null)), imgB: null, lastResult: null };
 
 /**
  * @param {string} url
@@ -201,7 +201,8 @@ function connection(ok) {
 // Agents act from outside the page: poll for new proposals, requests and reads.
 setInterval(async () => {
   // Also while the tab is hidden: the "(1)" title mark is how a hidden tab shows a new proposal (browsers slow this timer down there).
-  if (!S.data || S.job || document.querySelector('dialog[open]')) return;
+  // Also while a job runs or a dialog is open (#54): the agent keeps working meanwhile, and load() keeps the version you view.
+  if (!S.data) return;
   /** @type {Data | null} */
   const d = await api('/api/state').catch(() => null);
   connection(!!d);
@@ -227,6 +228,7 @@ function renderVersions() {
     /** @type {HTMLButtonElement} */ (li.querySelector('button')).onclick = () => { S.viewId = v.id; renderVersions(); renderObjects(); renderReview(); drawViewport(); say(`Viewing ${v.id}, ${v.status}`); };
     list.append(li);
   }
+  renderJobs();
 }
 
 // ---------- viewport ----------
@@ -237,21 +239,25 @@ const /** @type {HTMLCanvasElement} */ cv = $('#canvas'), /** @type {HTMLCanvasE
  */
 const loadImg = (src) => new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = src; });
 
+let drawSeq = 0;
 /** @returns {Promise<void>} */
 async function drawViewport() {
   if (S.onPage) return drawPage();
+  // The poll, a finished job and the human can each redraw; only the latest draw may write to the canvas (#54).
+  const seq = ++drawSeq; const stale = () => seq !== drawSeq;
   const v = viewV(); const r = v.renders[S.profile];
   delete cv.dataset.ready; // clicks are ignored until this view's object ids are loaded
   $('#viewing').textContent = `${v.id} · ${v.status}${v.status === 'accepted' && v.id !== S.data.head ? ' (not head)' : ''} · scene ${v.hash}`;
   $('#empty').hidden = !!r;
   renderMeasure(r);
   if (!r) { ctx.clearRect(0, 0, cv.width, cv.height); octx.clearRect(0, 0, ov.width, ov.height); S.ids = null; return; }
-  S.img = await loadImg(r.image);
+  const img = await loadImg(r.image);
   const p = /** @type {Version | undefined} */ (v.parent && V(v.parent)); const pr = p?.renders[S.profile];
-  S.imgB = S.compare && pr ? await loadImg(pr.image) : null;
-  $('#wipe').hidden = !S.imgB;
+  const imgB = S.compare && pr ? await loadImg(pr.image) : null;
   // ids is null for a render recorded before object ids were hashed: Director does not serve that file (#43).
   const buf = r.ids ? await (await fetch(r.ids)).arrayBuffer() : null;
+  if (stale()) return;
+  S.img = img; S.imgB = imgB; $('#wipe').hidden = !S.imgB;
   S.ids = buf && { w: r.width, h: r.height, arr: new Uint16Array(buf), objects: Object.fromEntries(r.objects.map((o) => [o.pass_index, o.name])) };
   for (const c of [cv, ov]) { c.width = r.width; c.height = r.height; }
   $('#viewport').style.aspectRatio = `${r.width} / ${r.height}`;
@@ -261,6 +267,7 @@ async function drawViewport() {
 // The real page with the candidate substituted (server-side headless Chrome; project files untouched).
 /** @returns {Promise<void>} */
 async function drawPage() {
+  const seq = ++drawSeq;
   delete cv.dataset.ready;
   const v = viewV(); const prof = v.renders[S.profile] ? S.profile : 'draft';
   $('#viewing').textContent = `${v.id} · on page · ${S.data.config.pageUrl || 'no pageUrl'}`;
@@ -282,6 +289,7 @@ async function drawPage() {
   clearFails('view');
   $('#empty').hidden = true;
   const img = await loadImg(pv.image);
+  if (seq !== drawSeq) return;
   for (const c of [cv, ov]) { c.width = img.width; c.height = img.height; }
   $('#viewport').style.aspectRatio = `${img.width} / ${img.height}`;
   ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0);
@@ -440,7 +448,7 @@ function renderQuick(scene) {
  * @param {unknown} value
  */
 async function directEdit(node, field, value) {
-  if (S.job || S.editing) return fail('edit', 'Wait for the current job to finish or cancel it, then edit again.');
+  if (S.editing) return;
   S.editing = true; // set synchronously so a second change event cannot fork a duplicate version
   try {
     const r = await api('/api/edit', { baseId: S.viewId, node, field, value });
@@ -468,8 +476,8 @@ $('#askForm').addEventListener('submit', async (e) => {
     catch (err) { fail('ask', `Could not send: ${why(err)}. Your text is kept.`); }
     return;
   }
-  if (S.job) return fail('ask', 'A job is already running. Wait for it or cancel it, then propose again.');
   const v = viewV(); const baseId = v.status === 'discarded' ? S.data.head : v.id;
+  if (runningJob(baseId, 'propose')) return fail('ask', `A proposal from ${baseId} is already being made. Wait for it or cancel it, then propose again.`);
   try {
     const job = await api('/api/propose', {
       baseId, instruction, selection: [...S.selection],
@@ -486,34 +494,60 @@ $('#askForm').addEventListener('submit', async (e) => {
 });
 
 // ---------- jobs ----------
+// Jobs run in the background, each tied to a version (#54): the page keeps polling, other versions can be viewed and
+// compared, and only a second job of the same kind on the same version is refused. Finished jobs that failed or were
+// cancelled stay listed until dismissed.
+/** @type {Map<string, Job>} */
+const JOBS = new Map();
+/** @param {string} versionId @param {string} [kind] */
+const runningJob = (versionId, kind) => [...JOBS.values()].find((j) => j.status === 'running' && j.versionId === versionId && (!kind || j.kind === kind));
+const JOB_TITLE = /** @type {Record<string, string>} */ ({ render: 'Render', propose: 'Proposal from', adopt: 'Adoption of' });
+function renderJobs() {
+  const jobs = [...JOBS.values()];
+  $('#jobBox').hidden = !jobs.length;
+  $('#jobList').innerHTML = jobs.map((j) => `<li class="jobrow" data-job="${esc(j.id)}" data-status="${esc(j.status)}" data-version="${esc(j.versionId)}">
+    <div class="jobhead"><b>${esc(JOB_TITLE[j.kind] || j.kind)} ${esc(j.versionId)}</b><span class="hint">${esc(j.status === 'running' ? `elapsed ${(j.elapsed / 1000).toFixed(0)}s (no ETA: agent and GPU time vary)` : j.status)}</span>
+      ${j.status === 'running' ? `<button type="button" class="ghost" data-cancel-job="${esc(j.id)}">Cancel</button>` : `<button type="button" class="ghost" data-dismiss-job="${esc(j.id)}" aria-label="Dismiss">✕</button>`}</div>
+    <ol class="steps">${j.steps.map((st) => `<li class="${st.status}"><span class="ic" aria-hidden="true"></span><span>${esc(st.label)}</span><span class="t">${(st.t / 1000).toFixed(1)}s</span>${st.detail ? `<pre>${esc(st.detail)}</pre>` : ''}</li>`).join('')}</ol></li>`).join('');
+  $('#jobList').querySelectorAll('button[data-cancel-job]').forEach((b) => (/** @type {HTMLButtonElement} */ (b).onclick = () => api(`/api/jobs/${/** @type {HTMLButtonElement} */ (b).dataset.cancelJob}/cancel`, {}).catch((e) => fail('view', `Cannot cancel: ${why(e)}`))));
+  $('#jobList').querySelectorAll('button[data-dismiss-job]').forEach((b) => (/** @type {HTMLButtonElement} */ (b).onclick = () => { JOBS.delete(/** @type {string} */ (/** @type {HTMLButtonElement} */ (b).dataset.dismissJob)); renderJobs(); }));
+  // The version list marks versions with a running job; the final render waits for the viewed version's jobs.
+  for (const li of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#versionList button[data-id]'))) li.classList.toggle('busy', !!runningJob(/** @type {string} */ (li.dataset.id)));
+  renderBusy();
+}
+/** Says next to a button why it cannot be used while a job of the viewed version runs. */
+function renderBusy() {
+  if (!S.data) return;
+  const busy = runningJob(S.viewId);
+  /** @type {HTMLButtonElement} */ ($('#finalBtn')).disabled = !!busy;
+  $('#finalBusy').hidden = !busy; $('#finalBusy').textContent = busy ? `${S.viewId} has a running job (${busy.kind}); plan the final render when it ends.` : '';
+}
 /**
  * @param {Job} job
  * @param {(j: Job) => unknown} [onEnd]
  */
 function trackJob(job, onEnd) {
-  S.job = job; $('#jobBox').hidden = false; /** @type {HTMLButtonElement} */ ($('#askBtn')).disabled = true; /** @type {HTMLButtonElement} */ ($('#finalBtn')).disabled = true;
+  JOBS.set(job.id, job); renderJobs();
   let lastCount = 0;
   const tick = async () => {
-    /** @type {Job | null} */
     // 'no job': Director drops finished jobs after a while (#32); treat it as ended instead of polling forever.
+    // Any other failure (Director not answering): keep asking; the connection banner says what is going on.
     /** @type {Job | null} */
-    const j = await api(`/api/jobs/${job.id}`).catch((e) => (/** @type {Error} */ (e).message === 'no job' ? { ...job, status: 'gone' } : null)); if (!j) return;
-    $('#jobSteps').innerHTML = j.steps.map((s) => `<li class="${s.status}"><span class="ic" aria-hidden="true"></span><span>${esc(s.label)}</span><span class="t">${(s.t / 1000).toFixed(1)}s</span>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ''}</li>`).join('');
-    $('#jobElapsed').textContent = `elapsed ${(j.elapsed / 1000).toFixed(0)}s (no ETA: agent and GPU time vary)`;
+    const j = await api(`/api/jobs/${job.id}`).catch((e) => (why(e) === 'no job' ? { ...job, status: 'gone' } : null));
+    if (!j) return setTimeout(tick, 2000);
     if (j.steps.length !== lastCount) { lastCount = j.steps.length; say(j.steps.at(-1)?.label || ''); }
-    if (j.status === 'running') return setTimeout(tick, 500);
     if (j.status === 'gone') {
       // The result is unknown here (the tab did not poll for over 10 minutes); the reloaded state shows what happened.
-      S.job = null; /** @type {HTMLButtonElement} */ ($('#askBtn')).disabled = false; /** @type {HTMLButtonElement} */ ($('#finalBtn')).disabled = false; $('#cancelBtn').hidden = true; $('#jobBox').hidden = true;
+      JOBS.delete(job.id); renderJobs();
       await load(); say('The job ended while this tab was not watching it; the versions and requests show the result');
       return;
     }
-    S.job = null; /** @type {HTMLButtonElement} */ ($('#askBtn')).disabled = false; /** @type {HTMLButtonElement} */ ($('#finalBtn')).disabled = false; $('#cancelBtn').hidden = true;
+    JOBS.set(job.id, j); renderJobs();
+    if (j.status === 'running') return setTimeout(tick, 500);
     say(j.status === 'done' ? 'Finished' : `Stopped: ${j.error || j.status}`);
     await onEnd?.(j);
-    setTimeout(() => { if (!S.job) $('#jobBox').hidden = j.status !== 'done' ? false : true; }, j.status === 'done' ? 1500 : 0);
+    if (j.status === 'done') setTimeout(() => { JOBS.delete(job.id); renderJobs(); }, 1500);
   };
-  $('#cancelBtn').hidden = false; $('#cancelBtn').onclick = () => api(`/api/jobs/${job.id}/cancel`, {});
   tick();
 }
 
