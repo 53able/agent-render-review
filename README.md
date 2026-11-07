@@ -14,7 +14,7 @@
 ## 必要なもの
 
 - vork 0.1.0（Apple Silicon + macOS 26以降、またはNVIDIA RTX + Vulkan）
-- Node.js 22以降
+- Node.js 22.18以降（`.mts` を型除去でそのまま実行する）
 - ページプレビューに Google Chrome（`CHROME_PATH` で変更可）
 - 単独モードに Claude Code CLI（`claude`、ログイン済み）
 
@@ -99,7 +99,7 @@ Director は起動時に、ブラウザでレビュー用のタブを開きま�
 ## 単独モード
 
 ```sh
-node server.mjs             # http://127.0.0.1:4747 、状態は runs/
+node server.mts             # http://127.0.0.1:4747 、状態は runs/
 ```
 
 ## 試験と計測

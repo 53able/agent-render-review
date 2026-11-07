@@ -23,7 +23,7 @@ ai-builder-mentor のレビュー（2026-11-07）で提案された7日実験の
 
 ## 計測
 
-`node server.mjs --report <project>` で自動集計できるもの:
+`node server.mts --report <project>` で自動集計できるもの:
 
 | 指標 | 内容 |
 |---|---|
