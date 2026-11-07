@@ -410,11 +410,17 @@ function trackJob(job, onEnd) {
     /** @type {Job | null} */
     // 'no job': Director drops finished jobs after a while (#32); treat it as ended instead of polling forever.
     /** @type {Job | null} */
-    const j = await api(`/api/jobs/${job.id}`).catch((e) => (/** @type {Error} */ (e).message === 'no job' ? { ...job, status: 'gone', steps: [], elapsed: 0, error: 'the job is no longer tracked by Director' } : null)); if (!j) return;
+    const j = await api(`/api/jobs/${job.id}`).catch((e) => (/** @type {Error} */ (e).message === 'no job' ? { ...job, status: 'gone' } : null)); if (!j) return;
     $('#jobSteps').innerHTML = j.steps.map((s) => `<li class="${s.status}"><span class="ic" aria-hidden="true"></span><span>${esc(s.label)}</span><span class="t">${(s.t / 1000).toFixed(1)}s</span>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ''}</li>`).join('');
     $('#jobElapsed').textContent = `elapsed ${(j.elapsed / 1000).toFixed(0)}s (no ETA: agent and GPU time vary)`;
     if (j.steps.length !== lastCount) { lastCount = j.steps.length; say(j.steps.at(-1)?.label || ''); }
     if (j.status === 'running') return setTimeout(tick, 500);
+    if (j.status === 'gone') {
+      // The result is unknown here (the tab did not poll for over 10 minutes); the reloaded state shows what happened.
+      S.job = null; /** @type {HTMLButtonElement} */ ($('#askBtn')).disabled = false; /** @type {HTMLButtonElement} */ ($('#finalBtn')).disabled = false; $('#cancelBtn').hidden = true; $('#jobBox').hidden = true;
+      await load(); say('The job ended while this tab was not watching it; the versions and requests show the result');
+      return;
+    }
     S.job = null; /** @type {HTMLButtonElement} */ ($('#askBtn')).disabled = false; /** @type {HTMLButtonElement} */ ($('#finalBtn')).disabled = false; $('#cancelBtn').hidden = true;
     say(j.status === 'done' ? 'Finished' : `Stopped: ${j.error || j.status}`);
     await onEnd?.(j);

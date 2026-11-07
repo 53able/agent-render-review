@@ -78,7 +78,7 @@ default_tools_approval_mode = "approve"   # 無いと承認ポリシーによっ
 
 Director は起動時に、ブラウザでレビュー用のタブを開きます。このタブは1回限りのペアリングリンク（URLの `#pair=...`）で Director と結び付きます。URL（既定 http://127.0.0.1:4747 。使用中なら次の番号）を直接開いただけのタブでは何も操作できません。タブを閉じてしまったら、エージェントに `open_review_tab` を頼むか、Director のプロセスに `kill -USR1 <pid>` を送ると新しいタブが開きます。Director を端末で直接起動した場合は、ペアリングリンクが端末に表示されます。
 
-既定のブラウザ以外で開くには、環境変数 `RENDER_DIRECTOR_BROWSER` にブラウザを開くコマンドを指定します。値は実行ファイル1つか、文字列の JSON 配列です。リンクは最後の引数として渡されます。MCP から起動する Director には、MCP の登録時に渡します（例: `claude mcp add vork -e 'RENDER_DIRECTOR_BROWSER=["open","-a","Firefox"]' -- node /path/to/render-director/mcp.mjs --project .`）。`.vork/config.json` では指定できません（エージェントが書き換えられるため、リンクがエージェントに渡る経路になる）。
+既定のブラウザ以外で開くには、環境変数 `RENDER_DIRECTOR_BROWSER` にブラウザを開くコマンドを指定します。値は実行ファイル1つか、文字列の JSON 配列です。リンクは最後の引数として渡されます。MCP から起動する Director には、MCP の登録時に渡します（例: `claude mcp add vork -e 'RENDER_DIRECTOR_BROWSER=["open","-a","Firefox"]' -- node /path/to/render-director/mcp.mjs --project .`）。`.vork/config.json` では指定できません（エージェントが書き換えられるため、リンクがエージェントに渡る経路になる）。リンクはコマンドの引数として渡るので、そのプロセスが動いている間は `ps` で見えます。起動後すぐ終わるコマンド（`open` など）を使い、常駐するコマンドは避けてください。
 
 - エージェントの新しい提案は通知されます。「View」で開き、親の版とワイプで比べられます。見ている版が勝手に切り替わることはありません。
 - 物体をクリックして選び、コメントを「Send to agent」で送ります。エージェントが読んだかどうかが表示されます。
