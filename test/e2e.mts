@@ -22,7 +22,7 @@ async function check(name, fn) {
 }
 const PAIR = 'e2e' + Date.now().toString(16); // test-only pairing token (normally sent only to the OS browser opener)
 async function startDirector(args, env = {}) {
-  const p = spawn(process.execPath, [path.join(ROOT, 'server.mjs'), ...args], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const p = spawn(process.execPath, [path.join(ROOT, 'server.mts'), ...args], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
   procs.push(p); let out = '';
   p.stdout.on('data', (d) => (out += d)); p.stderr.on('data', (d) => (out += d));
   for (let i = 0; i < 80 && !/vork Director on (http:\/\/\S+)/.test(out); i++) await sleep(150);

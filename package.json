@@ -5,14 +5,14 @@
   "type": "module",
   "description": "Review surface for ADE agents rendering with vork",
   "scripts": {
-    "start": "node server.mjs",
-    "mcp": "node mcp.mjs",
-    "test": "node server.mjs --selftest && node test/integration.mjs",
-    "test:e2e": "node test/e2e.mjs",
-    "report": "node server.mjs --report"
+    "start": "node server.mts",
+    "mcp": "node mcp.mts",
+    "test": "node server.mts --selftest && node test/integration.mts",
+    "test:e2e": "node test/e2e.mts",
+    "report": "node server.mts --report"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.18"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

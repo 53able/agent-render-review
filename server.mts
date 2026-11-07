@@ -1,6 +1,6 @@
 // vork Director — a review surface for renders made with vork.
-// Standalone mode: `node server.mjs` (built-in proposer via `claude -p`).
-// ADE mode:        `node server.mjs --project <dir>` (your ADE agent proposes through mcp.mjs; you review and adopt here).
+// Standalone mode: `node server.mts` (built-in proposer via `claude -p`).
+// ADE mode:        `node server.mts --project <dir>` (your ADE agent proposes through mcp.mts; you review and adopt here).
 import http from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -195,7 +195,7 @@ if (argv[0] === '--report') {
 }
 
 if (argv[0] && argv[0].startsWith('--') && !['--project', '--port'].includes(argv[0])) {
-  console.error('usage: node server.mjs [--project DIR] [--port N] | --selftest | --report DIR'); process.exit(2);
+  console.error('usage: node server.mts [--project DIR] [--port N] | --selftest | --report DIR'); process.exit(2);
 }
 if (process.env.VORK_DIRECTOR_IMPORT) { /* imported by tests for the pure helpers only */ } else { await main(); }
 
@@ -600,7 +600,7 @@ ${VORK_HELP}`;
       if (!String(req.headers['content-type'] || '').startsWith('application/json')) return send(res, 415, { error: 'application/json required' });
     }
     try {
-      // Agent API: bearer token from .vork/server.json (read by mcp.mjs). Cannot accept, discard, approve or adopt.
+      // Agent API: bearer token from .vork/server.json (read by mcp.mts). Cannot accept, discard, approve or adopt.
       if (url.pathname.startsWith('/api/agent/')) {
         if (!tokenEq(String(req.headers.authorization || '').replace(/^Bearer /, ''), AGENT_TOKEN)) return send(res, 401, { error: 'agent token required' });
         return await handleAgent(req, res, url);
@@ -822,7 +822,7 @@ ${VORK_HELP}`;
     }
   });
 
-  // Listen; in ADE mode try the next ports if busy, then publish the address for mcp.mjs.
+  // Listen; in ADE mode try the next ports if busy, then publish the address for mcp.mts.
   const listen = (port) => new Promise((ok, bad) => { server.once('error', bad); server.listen(port, '127.0.0.1', () => { server.off('error', bad); ok(); }); });
   for (let attempt = 0; ; attempt++) {
     try { await listen(PORT); break; }

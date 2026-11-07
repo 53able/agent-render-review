@@ -1,4 +1,4 @@
-// Integration test: a real MCP client drives mcp.mjs (which starts Director in ADE mode) and a
+// Integration test: a real MCP client drives mcp.mts (which starts Director in ADE mode) and a
 // simulated human uses the Director HTTP API with the UI cookie. Requires vork on PATH.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -10,8 +10,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 process.env.VORK_DIRECTOR_IMPORT = '1';
-const { reportFromAudit } = await import('../server.mjs');
-delete process.env.VORK_DIRECTOR_IMPORT; // must not leak into the Director that mcp.mjs starts
+const { reportFromAudit } = await import('../server.mts');
+delete process.env.VORK_DIRECTOR_IMPORT; // must not leak into the Director that mcp.mts starts
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vd-int-')));
@@ -28,7 +28,7 @@ async function check(name, fn) {
 
 const PAIR = crypto.randomBytes(16).toString('hex'); // test-only: lets the simulated human pair without a real browser opener
 const client = new Client({ name: 'integration-test', version: '1.0.0' });
-await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(ROOT, 'mcp.mjs'), '--project', PROJECT], stderr: 'pipe', env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR } }));
+await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(ROOT, 'mcp.mts'), '--project', PROJECT], stderr: 'pipe', env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR } }));
 const tool = async (name, args = {}) => client.callTool({ name, arguments: args });
 const textOf = (r) => JSON.parse(r.content.find((c) => c.type === 'text').text);
 
@@ -203,7 +203,7 @@ await check('AC-07 approval pins the scene: editing scene.json after approval is
 
 await check('one Director per project: a second instance refuses to start', async () => {
   const { spawnSync } = await import('node:child_process');
-  const r = spawnSync(process.execPath, [path.join(ROOT, 'server.mjs'), '--project', PROJECT], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1' }, encoding: 'utf8', timeout: 20000 });
+  const r = spawnSync(process.execPath, [path.join(ROOT, 'server.mts'), '--project', PROJECT], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1' }, encoding: 'utf8', timeout: 20000 });
   assert.equal(r.status, 3, r.stderr + r.stdout); assert.match(r.stderr, /already running/);
 });
 
@@ -232,7 +232,7 @@ await check('AC-10 report: fixture gives exact numbers; live project counts matc
   ];
   assert.deepEqual(reportFromAudit(fixture), { proposals: 2, feedbackRounds: 1, discards: 1, adoptionRequests: 1, adoptions: 1, adoptionRejections: 0, minutesFirstProposalToAdoption: 12.5 });
   const { execFileSync } = await import('node:child_process');
-  const live = JSON.parse(execFileSync(process.execPath, [path.join(ROOT, 'server.mjs'), '--report', PROJECT], { encoding: 'utf8' }));
+  const live = JSON.parse(execFileSync(process.execPath, [path.join(ROOT, 'server.mts'), '--report', PROJECT], { encoding: 'utf8' }));
   assert.equal(live.proposals, 1); assert.equal(live.feedbackRounds, 2); assert.equal(live.adoptions, 2); assert.equal(live.adoptionRequests, 5);
   assert.ok(live.minutesFirstProposalToAdoption >= 0);
 });
