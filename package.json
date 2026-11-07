@@ -10,7 +10,7 @@
     "mcp": "node mcp.mts",
     "typecheck": "tsc -p . && tsc -p tsconfig.public.json",
     "test": "npm run test:unit && node test/integration.mts",
-    "test:unit": "node server.mts --selftest && node test/director.mts && node test/review-model.mts",
+    "test:unit": "node server.mts --selftest && node test/director.mts && node test/review-model.mts && node test/log.mts",
     "test:e2e": "node test/e2e.mts",
     "report": "node server.mts --report"
   },
@@ -18,6 +18,8 @@
     "node": ">=22.18"
   },
   "dependencies": {
+    "@logtape/file": "2.4.2",
+    "@logtape/logtape": "2.4.2",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "playwright-core": "^1.56.1",
     "zod": "^4.6.7"
