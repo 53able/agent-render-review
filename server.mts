@@ -91,6 +91,8 @@ const PROFILES: Record<Profile, string> = { previs: 'std/previs', draft: 'std/dr
 const MAX_W = 1920, MAX_H = 1080;
 const SAFE_FILE_EXT = /\.(glb|png|jpe?g|hdr|exr|tiff?)$/i;
 const SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/;
+// Own keys only: a plain PROFILES[x] lookup would also accept inherited keys such as toString or constructor.
+const isProfile = (x: unknown): x is Profile => typeof x === 'string' && Object.hasOwn(PROFILES, x);
 const DEFAULT_CONFIG: Config = { assetDir: 'public/vork', pageUrl: null, assetUrlPattern: null };
 
 const argv = process.argv.slice(2);
@@ -648,9 +650,9 @@ ${VORK_HELP}`;
       return send(res, 200, { version: v.id, status: v.status, head: state.head, render: draft.ok ? renderSummary(draft.info) : null, renderError: draft.ok ? null : draft.log, diff: diffScenes(sceneOf(baseId!), b.scene), flags: check.policy.flags });
     }
     if (url.pathname === '/api/agent/render' && req.method === 'GET') {
-      const v = getV(url.searchParams.get('version') || state.head); const profile = url.searchParams.get('profile') as Profile | null || 'draft';
+      const v = getV(url.searchParams.get('version') || state.head); const profile = url.searchParams.get('profile') || 'draft';
       if (!v) return send(res, 404, { error: 'no such version' });
-      if (!PROFILES[profile]) return send(res, 400, { error: 'profile must be previs, draft or final' });
+      if (!isProfile(profile)) return send(res, 400, { error: 'profile must be previs, draft or final' });
       if (!v.renders[profile]) {
         if (profile === 'final') return send(res, 403, { error: 'final renders need human approval in Director' });
         const r = await renderVersion(newJob('agent-render', v.id), v, profile);
@@ -727,8 +729,8 @@ ${VORK_HELP}`;
       }
 
       if (req.method === 'POST' && url.pathname === '/api/render') {
-        const { versionId, profile, ticket } = await readBody<{ versionId: string; profile: Profile; ticket: string }>(req); const v = getV(versionId);
-        if (!v || !PROFILES[profile]) return send(res, 400, { error: 'bad version or profile' });
+        const { versionId, profile, ticket } = await readBody<{ versionId: string; profile: unknown; ticket: string }>(req); const v = getV(versionId);
+        if (!v || !isProfile(profile)) return send(res, 400, { error: 'bad version or profile' });
         if (profile === 'final') {
           const t = takeTicket(ticket, 'final');
           if (!t || t.versionId !== versionId) return send(res, 403, { error: 'final render needs a fresh approval for this exact scene' });
@@ -865,10 +867,11 @@ ${VORK_HELP}`;
       }
 
       if (req.method === 'POST' && url.pathname === '/api/preview') {
-        const { versionId, profile } = await readBody<{ versionId: string; profile?: Profile }>(req); const v = getV(versionId);
+        const { versionId, profile = 'draft' } = await readBody<{ versionId: string; profile?: unknown }>(req); const v = getV(versionId);
         if (!v) return send(res, 400, { error: 'bad version' });
-        const r = await pagePreview(v, profile || 'draft');
-        if (r.ok) { v.pagePreviews = { ...(v.pagePreviews || {}), [profile || 'draft']: r }; save(); }
+        if (!isProfile(profile)) return send(res, 400, { error: 'profile must be previs, draft or final' });
+        const r = await pagePreview(v, profile);
+        if (r.ok) { v.pagePreviews = { ...(v.pagePreviews || {}), [profile]: r }; save(); }
         return send(res, 200, r);
       }
 
@@ -880,10 +883,11 @@ ${VORK_HELP}`;
         const allowed: Record<string, ['mat' | 'light', (x: unknown) => boolean] | undefined> = { base_color: ['mat', isRGB], emission_luminance: ['mat', num(0, 1000)], specular_roughness: ['mat', num(0, 1)], energy: ['light', num(0, 100000)], color: ['light', isRGB] };
         const baseV = getV(baseId);
         if (!baseV || baseV.status !== 'accepted') return send(res, 400, { error: 'direct edits start from an accepted version' });
-        if (!allowed[field] || !allowed[field][1](value)) return send(res, 400, { error: 'unsupported edit or value out of range' });
+        const spec = typeof field === 'string' && Object.hasOwn(allowed, field) ? allowed[field] : undefined;
+        if (!spec || !spec[1](value)) return send(res, 400, { error: 'unsupported edit or value out of range' });
         const scene = sceneOf(baseId); const n = scene.nodes.find((x) => x.name === node);
         if (!n) return send(res, 400, { error: 'no such node' });
-        if (allowed[field][0] === 'light') { if (n.type !== 'light') return send(res, 400, { error: 'not a light' }); n[field] = value; }
+        if (spec[0] === 'light') { if (n.type !== 'light') return send(res, 400, { error: 'not a light' }); n[field] = value; }
         else { if (n.type !== 'mesh') return send(res, 400, { error: 'not a mesh' }); n.materials ||= [{}]; n.materials[0] ||= {}; n.materials[0].inputs ||= {}; n.materials[0].inputs[field] = value; }
         const pol = policyCheck(scene); if (pol.blockers.length) return send(res, 409, { error: pol.blockers.join('; ') });
         const v = addVersion({ parent: baseId, scene, origin: 'human', instruction: `${node}.${field} = ${JSON.stringify(value)}`, status: 'accepted' });

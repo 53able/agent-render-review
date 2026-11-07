@@ -266,6 +266,17 @@ await check('#4 adoption-request needs a string slug; propose needs { node, what
   assert.equal((await human('/api/adopt/plan', { requestId: pending.id, slug: ['hero'] })).status, 400);
 });
 
+await check('#2 inherited keys (toString, constructor, __proto__) are not valid profiles or edit fields', async () => {
+  const accepted = (await state()).versions.find((v: Json) => v.status === 'accepted').id;
+  for (const key of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+    assert.equal((await raw(`/api/agent/render?version=${accepted}&profile=${key}`, '', { agent: true, method: 'GET' })).status, 400, `agent render ${key}`);
+    assert.equal((await human('/api/render', { versionId: accepted, profile: key })).status, 400, `render ${key}`);
+    assert.equal((await human('/api/preview', { versionId: accepted, profile: key })).status, 400, `preview ${key}`);
+    const edit = await raw('/api/edit', `{"baseId":"${accepted}","node":"vase","field":"${key}","value":1}`);
+    assert.equal(edit.status, 400, `edit ${key}`); assert.match(edit.json.error, /unsupported edit/);
+  }
+});
+
 await check('AC-10 report: fixture gives exact numbers; live project counts match', async () => {
   const fixture = [
     { t: '2026-01-01T10:00:00.000Z', event: 'init' }, { t: '2026-01-01T10:02:00.000Z', event: 'proposed' },
