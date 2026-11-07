@@ -98,6 +98,10 @@ const arg = (name: string): string | undefined => { const i = argv.indexOf(name)
 
 // ---------- pure helpers (no state; used by tests) ----------
 
+/** A client error whose message is safe to return as a 400 response. */
+class BadRequest extends Error {}
+const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
+
 const sha256 = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex');
 
 // Policy enforced outside the model. Everything an agent proposes passes through here before vork sees it.
@@ -586,7 +590,16 @@ ${VORK_HELP}`;
     res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...headers });
     res.end(type === 'application/json' ? JSON.stringify(body) : body);
   };
-  const readBody = <T,>(req: http.IncomingMessage): Promise<T> => new Promise((ok, bad) => { let b = ''; req.on('data', (d) => { b += d; if (b.length > 4e6) req.destroy(); }); req.on('end', () => { try { ok(b ? JSON.parse(b) : {}); } catch (e) { bad(e); } }); });
+  // The type argument is not checked at run time; each endpoint still validates the fields it reads.
+  const readBody = <T,>(req: http.IncomingMessage): Promise<T> => new Promise((ok, bad) => {
+    let b = ''; req.on('data', (d) => { b += d; if (b.length > 4e6) req.destroy(); });
+    req.on('end', () => {
+      let parsed: unknown;
+      try { parsed = b ? JSON.parse(b) : {}; } catch { return bad(new BadRequest('request body is not valid JSON')); }
+      if (!isPlainObject(parsed)) return bad(new BadRequest('request body must be a JSON object'));
+      ok(parsed as T);
+    });
+  });
   const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.bin': 'application/octet-stream', '.json': 'application/json' };
   const SESSION_COOKIE = () => `vd_${PORT}`;
   const hasSession = (req: http.IncomingMessage) => { const c = cookie(req, SESSION_COOKIE()); return typeof c === 'string' && sessions.has(c); };
@@ -897,7 +910,8 @@ ${VORK_HELP}`;
         return send(res, 404, 'not found', 'text/plain');
       return send(res, 200, fs.readFileSync(real), MIME[path.extname(real)] || 'application/octet-stream');
     } catch (e: any) {
-      console.error(e); return send(res, 500, { error: String(e.message || e) });
+      if (e instanceof BadRequest) return send(res, 400, { error: e.message });
+      console.error(e); return send(res, 500, { error: 'internal error' });
     }
   });
 

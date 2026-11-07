@@ -230,6 +230,24 @@ await check('AC-08 bad slugs and a symlinked asset dir escaping the project are 
   fs.rmSync(path.join(PROJECT, 'public/vork')); fs.renameSync(path.join(PROJECT, 'public/vork-real'), path.join(PROJECT, 'public/vork'));
 });
 
+// raw requests: the body is sent as given, so tests can send JSON that is not an object
+const agentToken = (): string => JSON.parse(fs.readFileSync(path.join(PROJECT, '.vork', 'server.json'), 'utf8')).agentToken;
+const raw = async (route: string, body: string, { agent = false, method = 'POST' }: { agent?: boolean; method?: string } = {}): Promise<{ status: number; json: Json }> => {
+  const headers: Record<string, string> = { 'content-type': 'application/json', ...(agent ? { authorization: `Bearer ${agentToken()}` } : { cookie: uiCookie }) };
+  const r = await fetch(`${BASE}${route}`, { method, headers, body: method === 'GET' ? undefined : body });
+  return { status: r.status, json: await r.json().catch(() => ({})) };
+};
+
+await check('#3 a body that is not a JSON object gets 400 without internal error text', async () => {
+  for (const body of ['null', '1', '"x"', '[]', 'true', '{not json']) {
+    for (const [route, agent] of [['/api/edit', false], ['/api/render', false], ['/api/agent/adoption-request', true], ['/api/agent/propose', true]] as const) {
+      const r = await raw(route, body, { agent });
+      assert.equal(r.status, 400, `${route} ${body}`);
+      assert.doesNotMatch(r.json.error, /Cannot|undefined|null \(reading/, `${route} ${body}`);
+    }
+  }
+});
+
 await check('AC-10 report: fixture gives exact numbers; live project counts match', async () => {
   const fixture = [
     { t: '2026-01-01T10:00:00.000Z', event: 'init' }, { t: '2026-01-01T10:02:00.000Z', event: 'proposed' },
