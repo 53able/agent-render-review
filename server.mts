@@ -9,34 +9,16 @@ import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { ChildProcess } from 'node:child_process';
+import { LIMITS, PROFILES, SLUG, isProfile, DEFAULT_CONFIG, MAX_REASON, MAX_ASSUMPTIONS, MAX_ASSUMPTION, MAX_PENDING_ADOPTIONS, MAX_INTERPRETATION, MAX_CLAIMED, MAX_CLAIMED_NODE, MAX_CLAIMED_TEXT,
+  isPlainObject, isClaimedChange, sha256, policyCheck, diffScenes, resolveInside, reportFromAudit, applyDirectEdit, adoptionRels } from './src/policy.mts';
+import type { Profile, SceneNode, Scene, PolicyResult, AuditEvent, Config, Exposure, RenderInfo, AgentOutput, Proposal, VersionStatus, PagePreviewResult,
+  Version, AgentEventBody, DirectorState } from './src/policy.mts';
+// Kept importable from here: test/integration.mts and older callers import them from server.mts.
+export { policyCheck, diffScenes, resolveInside, reportFromAudit } from './src/policy.mts';
 
 // ---------- types (erased at runtime) ----------
-type Profile = 'previs' | 'draft' | 'final';
-interface Material { inputs?: Record<string, unknown>; [k: string]: unknown }
-interface SceneNode { type?: string; name?: string; materials?: Material[]; [k: string]: unknown }
-// vork scene (API v2). Untrusted input is typed as Scene at the JSON boundary; policyCheck still guards the shape.
-interface Scene {
-  version: number; nodes: SceneNode[]; programs?: Record<string, unknown>;
-  render?: { resolution?: number[]; background?: number[]; [k: string]: unknown }; [k: string]: unknown;
-}
-interface PolicyFlag { level: string; msg: string }
-interface PolicyResult { blockers: string[]; flags: PolicyFlag[] }
-interface DiffEntry { node: string; path: string; before: unknown; after: unknown }
-interface AuditEvent { t: string; event: string; [k: string]: unknown }
-interface AuditReport {
-  proposals: number; feedbackRounds: number; discards: number;
-  adoptionRequests: number; adoptions: number; adoptionRejections: number;
-  minutesFirstProposalToAdoption: number | null;
-}
-interface Config { assetDir: string; pageUrl: string | null; assetUrlPattern: string | null }
-interface Exposure { mean: number; clipped: number; near_black: number }
 // `<out>.meta.json` written by vork render
 interface VorkMeta { object_ids: unknown; exposure: Exposure; denoiser: unknown; settings: { integrator: unknown; samples: number } }
-interface RenderInfo {
-  profile: Profile; seconds: number; width: number; height: number; image: string; ids: string;
-  file: string; sha256: string; idsSha256?: string; sceneHash: string | null; objects: unknown; exposure: Exposure;
-  settings: { integrator: unknown; samples: number; denoiser: unknown }; warnings: string[];
-}
 type RenderResult =
   | { ok: true; info: RenderInfo; cancelled?: undefined; code?: undefined; timedOut?: undefined; log?: undefined }
   | { ok: false; cancelled: true; info?: undefined; code?: undefined; timedOut?: undefined; log?: undefined }
@@ -46,33 +28,6 @@ type ValidateResult =
   | { ok: false; kind: 'blocked'; policy: PolicyResult; log?: undefined }
   | { ok: false; kind: 'invalid'; policy: PolicyResult; log: string }
   | { ok: false; kind: 'cancelled'; policy?: undefined; log?: undefined };
-interface ClaimedChange { node: string; what: string; why: string }
-// Structured output of the built-in proposer (PROPOSAL_SCHEMA)
-interface AgentOutput { interpretation: string; assumptions: string[]; clarifying_question: string | null; claimed_changes: ClaimedChange[]; scene: Scene }
-interface Proposal {
-  interpretation: string; assumptions: string[]; claimed_changes: ClaimedChange[]; policy: PolicyResult; context: string[];
-  via: 'built-in' | 'mcp'; cost?: number; clarifying_question?: string | null; scene?: undefined; respondsTo?: unknown;
-}
-type VersionStatus = 'proposed' | 'accepted' | 'discarded';
-interface PagePreviewOk { ok: true; matched: number; image: string; warning: string | null; sha256?: string }
-type PagePreviewResult = { ok: false; reason: string } | PagePreviewOk;
-interface Version {
-  id: string; parent: string | null; origin: 'starter' | 'agent' | 'human'; instruction: string | null; proposal: Proposal | null;
-  status: VersionStatus; created: string; renders: Partial<Record<Profile, RenderInfo>>; pagePreviews?: Record<string, PagePreviewOk>;
-}
-interface AdoptionRequest { id: string; version: string; slug: string; reason: string; status: 'pending' | 'rejected' | 'adopted'; t: string }
-// Events the agent reads with wait_for_feedback
-type AgentEventBody =
-  | { type: 'feedback'; version: string; versionStatus: VersionStatus; selection: string[]; comment: string }
-  | { type: 'decision'; version: string; decision: string; head: string | null; comment: string | null }
-  | { type: 'checkout'; head: string }
-  | { type: 'adoption_rejected'; request: string; version: string; comment: string | null }
-  | { type: 'adopted'; request: string; version: string; slug: string; asset: string; manifest: string; sha256: string }
-  | { type: 'direct_edit'; version: string; parent: string; node: string; field: string; value: unknown; head: string | null };
-type AgentEvent = AgentEventBody & { seq: number; t: string };
-interface DirectorState {
-  versions: Version[]; head: string | null; audit: AuditEvent[]; events: AgentEvent[]; agentCursor: number; adoptionRequests: AdoptionRequest[];
-}
 interface JobStep { label: string; status: 'running' | 'done' | 'failed'; detail: string | null | undefined; t: number }
 interface Job {
   id: string; kind: string; versionId: string; status: 'running' | 'done' | 'failed' | 'cancelled'; steps: JobStep[];
@@ -86,14 +41,6 @@ type Ticket = TicketData & { expires: number };
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
-const LIMITS = { previs: 60_000, draft: 120_000, final: 900_000, agent: 180_000, page: 45_000 };
-const PROFILES: Record<Profile, string> = { previs: 'std/previs', draft: 'std/draft', final: 'std/final' };
-const MAX_W = 1920, MAX_H = 1080;
-const SAFE_FILE_EXT = /\.(glb|png|jpe?g|hdr|exr|tiff?)$/i;
-const SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/;
-// Own keys only: a plain PROFILES[x] lookup would also accept inherited keys such as toString or constructor.
-const isProfile = (x: unknown): x is Profile => typeof x === 'string' && Object.hasOwn(PROFILES, x);
-const DEFAULT_CONFIG: Config = { assetDir: 'public/vork', pageUrl: null, assetUrlPattern: null };
 
 const argv = process.argv.slice(2);
 const arg = (name: string): string | undefined => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
@@ -108,119 +55,6 @@ class PayloadTooLarge extends Error {
   drain = true;
 }
 const MAX_BODY = 4e6;
-// Agent text is kept in state.json (rewritten on every save) and shown to the human, so it is bounded.
-const MAX_REASON = 4000, MAX_ASSUMPTIONS = 20, MAX_ASSUMPTION = 1000, MAX_PENDING_ADOPTIONS = 20;
-const MAX_INTERPRETATION = 4000, MAX_CLAIMED = 50, MAX_CLAIMED_NODE = 200, MAX_CLAIMED_TEXT = 1000;
-const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
-const isClaimedChange = (x: unknown): x is ClaimedChange => isPlainObject(x) && typeof x.node === 'string' && typeof x.what === 'string' && typeof x.why === 'string';
-
-const sha256 = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex');
-
-// Policy enforced outside the model. Everything an agent proposes passes through here before vork sees it.
-export function policyCheck(scene: Scene | null | undefined): PolicyResult {
-  const blockers: string[] = []; const flags: PolicyFlag[] = [];
-  if (!scene || typeof scene !== 'object' || scene.version !== 2 || !Array.isArray(scene.nodes)) {
-    blockers.push('scene must be an object with version 2 and a nodes array');
-    return { blockers, flags };
-  }
-  const walk = (val: unknown, p: string): void => {
-    if (Array.isArray(val)) return val.forEach((x, i) => walk(x, `${p}[${i}]`));
-    if (val && typeof val === 'object') {
-      for (const [k, x] of Object.entries(val)) {
-        if (k === 'file') {
-          if (typeof x !== 'string' || path.isAbsolute(x) || x.split(/[\\/]/).includes('..') || /^[a-z]+:/i.test(x))
-            blockers.push(`${p}.file ${JSON.stringify(x)}: only relative files inside the project folder are allowed`);
-          else if (!SAFE_FILE_EXT.test(x))
-            blockers.push(`${p}.file "${x}": only ${SAFE_FILE_EXT.source} files (no .gltf: external buffer URIs are not checked)`);
-          else flags.push({ level: 'R2', msg: `${p}.file references "${x}" (must exist locally; no downloads)` });
-        }
-        if (k === 'source' || k === 'code' || k === 'slang') blockers.push(`${p}.${k}: custom shader code is not allowed in this prototype`);
-        if (k === 'resolution') {
-          const ok = Array.isArray(x) && x.length === 2 && x.every(Number.isInteger) && x[0] >= 1 && x[1] >= 1 && x[0] <= MAX_W && x[1] <= MAX_H;
-          if (!ok) blockers.push(`${p}.resolution ${JSON.stringify(x)}: must be [w,h] integers within ${MAX_W}x${MAX_H}`);
-        }
-        walk(x, `${p}.${k}`);
-      }
-    }
-  };
-  walk(scene, 'scene');
-  if (scene.programs && Object.keys(scene.programs).length) blockers.push('custom programs are not allowed in this prototype');
-  // The diff a human reviews pairs nodes by name, so every node needs its own name. '#' is reserved for diff keys.
-  const names: string[] = [];
-  scene.nodes.forEach((n, i) => {
-    const name = isPlainObject(n) ? n.name : undefined;
-    if (typeof name !== 'string' || !name) blockers.push(`scene.nodes[${i}]: every node needs a non-empty string "name"`);
-    else if (name.startsWith('#')) blockers.push(`scene.nodes[${i}].name ${JSON.stringify(name)}: names starting with "#" are reserved`);
-    else names.push(name);
-  });
-  const dup = names.filter((n, i) => names.indexOf(n) !== i);
-  if (dup.length) blockers.push(`duplicate node names: ${[...new Set(dup)].join(', ')}`);
-  return { blockers, flags };
-}
-
-// Diff computed from data, not from the model's description.
-export function diffScenes(a: Scene, b: Scene): DiffEntry[] {
-  const out: DiffEntry[] = [];
-  // A Map keyed by name: no inherited keys, and a key that is already taken never hides a node.
-  const byName = (s: Scene) => {
-    const m = new Map<string, unknown>();
-    (Array.isArray(s.nodes) ? s.nodes : []).forEach((n, i) => {
-      const name = isPlainObject(n) ? n.name : undefined;
-      let key = typeof name === 'string' && name ? name : `#${i}`;
-      while (m.has(key)) key += `#${i}`;
-      m.set(key, n);
-    });
-    return m;
-  };
-  const A = byName(a), B = byName(b);
-  const own = (o: Record<string, unknown>, k: string) => (Object.hasOwn(o, k) ? o[k] : undefined);
-  const rec = (x: unknown, y: unknown, p: string, node: string): void => {
-    if (JSON.stringify(x) === JSON.stringify(y)) return;
-    const numArr = (v: unknown) => Array.isArray(v) && v.every((n) => typeof n === 'number');
-    if (isPlainObject(x) && isPlainObject(y)) {
-      for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) rec(own(x, k), own(y, k), p ? `${p}.${k}` : k, node);
-    } else if (Array.isArray(x) && Array.isArray(y) && !numArr(x) && x.length === y.length) {
-      x.forEach((_, i) => rec(x[i], y[i], `${p}[${i}]`, node));
-    } else out.push({ node, path: p, before: x, after: y });
-  };
-  for (const n of new Set([...A.keys(), ...B.keys()])) {
-    if (!A.has(n)) out.push({ node: n, path: '(node)', before: undefined, after: 'added' });
-    else if (!B.has(n)) out.push({ node: n, path: '(node)', before: 'present', after: 'removed' });
-    else rec(A.get(n), B.get(n), '', n);
-  }
-  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
-    if (k === 'nodes') continue;
-    rec(own(a, k), own(b, k), k, '(scene)');
-  }
-  return out;
-}
-
-// Resolve a project-relative path for writing. Rejects absolute paths, '..', and anything whose
-// nearest existing ancestor (after resolving symlinks) or the target itself escapes the project.
-export function resolveInside(projectDir: string, rel: unknown): string {
-  if (typeof rel !== 'string' || !rel || path.isAbsolute(rel) || rel.split(/[\\/]/).includes('..') || /^[a-z]+:/i.test(rel))
-    throw new Error(`path ${JSON.stringify(rel)} must be relative and stay inside the project`);
-  const root = fs.realpathSync(projectDir);
-  const target = path.resolve(root, rel);
-  let probe = target;
-  while (!fs.existsSync(probe)) probe = path.dirname(probe);
-  const real = fs.realpathSync(probe);
-  if (real !== root && !real.startsWith(root + path.sep)) throw new Error(`path ${JSON.stringify(rel)} resolves outside the project`);
-  if (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink()) throw new Error(`path ${JSON.stringify(rel)} is a symlink`);
-  return target;
-}
-
-// Measurements for the experiment: read an audit log, no vork needed.
-export function reportFromAudit(auditLog: AuditEvent[]): AuditReport {
-  const at = (e: string) => auditLog.find((a) => a.event === e)?.t;
-  const count = (e: string) => auditLog.filter((a) => a.event === e).length;
-  const firstProposal = at('proposed'), firstAdoption = at('adopted');
-  return {
-    proposals: count('proposed'), feedbackRounds: count('feedback'), discards: count('discard'),
-    adoptionRequests: count('adoption_requested'), adoptions: count('adopted'), adoptionRejections: count('adoption_rejected'),
-    minutesFirstProposalToAdoption: firstProposal && firstAdoption ? +((Date.parse(firstAdoption) - Date.parse(firstProposal)) / 60000).toFixed(1) : null,
-  };
-}
 
 // 16-bit grayscale PNG decode (object_index channel)
 function decodeGray16(buf: Buffer): { w: number; h: number; data: Buffer } {
@@ -639,9 +473,7 @@ ${VORK_HELP}`;
   function adoptionTargets(slug: unknown) {
     if (!PROJECT) throw new Error('adoption needs --project');
     if (typeof slug !== 'string' || !SLUG.test(slug)) throw new Error('slug must match [a-z0-9][a-z0-9-]{0,63}');
-    const assetDir = String(readConfig().assetDir || DEFAULT_CONFIG.assetDir);
-    const assetRel = path.posix.join(assetDir.replace(/\\/g, '/'), `${slug}.png`);
-    const manifestRel = path.posix.join('.vork', 'adopted', `${slug}.json`);
+    const { assetRel, manifestRel } = adoptionRels(slug, String(readConfig().assetDir || DEFAULT_CONFIG.assetDir));
     return { slug, assetRel, manifestRel, asset: resolveInside(PROJECT, assetRel), manifest: resolveInside(PROJECT, manifestRel) };
   }
 
@@ -1060,18 +892,10 @@ ${VORK_HELP}`;
       // Direct manipulation: human edits produce a version without the model.
       if (req.method === 'POST' && url.pathname === '/api/edit') {
         const { baseId, node, field, value } = await readBody<{ baseId: string; node: string; field: string; value: unknown }>(req);
-        const isRGB = (x: unknown) => Array.isArray(x) && x.length === 3 && x.every((c) => typeof c === 'number' && Number.isFinite(c) && c >= 0 && c <= 1);
-        const num = (lo: number, hi: number) => (x: unknown) => typeof x === 'number' && Number.isFinite(x) && x >= lo && x <= hi;
-        const allowed: Record<string, ['mat' | 'light', (x: unknown) => boolean] | undefined> = { base_color: ['mat', isRGB], emission_luminance: ['mat', num(0, 1000)], specular_roughness: ['mat', num(0, 1)], energy: ['light', num(0, 100000)], color: ['light', isRGB] };
         const baseV = getV(baseId);
         if (!baseV || baseV.status !== 'accepted') return send(res, 400, { error: 'direct edits start from an accepted version' });
-        const spec = typeof field === 'string' && Object.hasOwn(allowed, field) ? allowed[field] : undefined;
-        if (!spec || !spec[1](value)) return send(res, 400, { error: 'unsupported edit or value out of range' });
-        if (typeof node !== 'string' || !node) return send(res, 400, { error: 'node must be a node name' });
-        const scene = sceneOf(baseId); const n = scene.nodes.find((x) => x.name === node);
-        if (!n) return send(res, 400, { error: 'no such node' });
-        if (spec[0] === 'light') { if (n.type !== 'light') return send(res, 400, { error: 'not a light' }); n[field] = value; }
-        else { if (n.type !== 'mesh') return send(res, 400, { error: 'not a mesh' }); n.materials ||= [{}]; n.materials[0] ||= {}; n.materials[0].inputs ||= {}; n.materials[0].inputs[field] = value; }
+        const scene = sceneOf(baseId); const refused = applyDirectEdit(scene, node, field, value);
+        if (refused) return send(res, 400, { error: refused });
         const pol = policyCheck(scene); if (pol.blockers.length) return send(res, 409, { error: pol.blockers.join('; ') });
         const v = addVersion({ parent: baseId, scene, origin: 'human', instruction: `${node}.${field} = ${JSON.stringify(value)}`, status: 'accepted' });
         audit('direct_edit', { version: v.id, node, field });
