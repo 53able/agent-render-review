@@ -346,6 +346,18 @@ await check('#19 /runs/ does not serve a hard link (to server.json); normal rend
   assert.equal((await fetch(`${BASE}/runs/${proposed}/draft.png`, { headers: { cookie: uiCookie } })).status, 200);
 });
 
+await check('#19 a FIFO under /runs/ or public/ gets 404 and does not block the server', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const fifos = [path.join(PROJECT, '.vork', 'v001', 'page-previs.png'), path.join(ROOT, 'public', `int-${process.pid}.js`)];
+  for (const f of fifos) execFileSync('mkfifo', [f]);
+  try {
+    for (const url of [`${BASE}/runs/v001/page-previs.png`, `${BASE}/int-${process.pid}.js`]) {
+      const r = await fetch(url, { headers: { cookie: uiCookie }, signal: AbortSignal.timeout(5000) });
+      assert.equal(r.status, 404, url);
+    }
+  } finally { for (const f of fifos) fs.rmSync(f, { force: true }); }
+});
+
 await check('#10 a static .json file is served as its contents, not as a serialized Buffer', async () => {
   // public/ holds no .json file of its own (#22), so the check places one for the duration of the test.
   const name = `int-${process.pid}.json`; const file = path.join(ROOT, 'public', name);
@@ -421,6 +433,7 @@ const standalone = await (async () => {
   const port = await new Promise<number>((ok) => { const srv = net.createServer().listen(0, '127.0.0.1', () => { const p = (srv.address() as { port: number }).port; srv.close(() => ok(p)); }); });
   const runs = path.join(tmp, 'standalone-runs');
   const proc = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env: { ...process.env, PATH: `${FAKE_BIN}${path.delimiter}${PATH_WITH_GATE}`, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR, VORK_DIRECTOR_RUNS: runs }, stdio: 'ignore' });
+  process.on('exit', () => proc.kill('SIGTERM')); // also when a later step throws at top level
   for (let i = 0; i < 100 && !fs.existsSync(path.join(runs, 'server.json')); i++) await sleep(150);
   const url = `http://127.0.0.1:${port}`;
   const pr = await fetch(`${url}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: PAIR }) });
@@ -500,6 +513,18 @@ await check('#18 a declared content-length past the drain limit gets 413 before 
     pump();
   });
   assert.match(got, /^413 .*larger than/);
+  // A client that keeps sending gets the 413 at once and is cut off after the discard window (5 s), not at requestTimeout.
+  const t0 = Date.now();
+  const slow = await new Promise<{ status: number | null; closedAfter: number }>((ok) => {
+    let status: number | null = null; let timer: NodeJS.Timeout;
+    const req = http.request({ host: u.hostname, port: u.port, path: '/api/agent/propose', method: 'POST', headers: { host: u.host, 'content-type': 'application/json', authorization: `Bearer ${agentToken()}`, 'content-length': String(1e12) } }, (res) => { status = res.statusCode!; res.resume(); });
+    const done = () => { clearInterval(timer); ok({ status, closedAfter: Date.now() - t0 }); };
+    req.on('error', done); req.on('close', done);
+    timer = setInterval(() => req.write('x'.repeat(1e4)), 50);
+    setTimeout(() => { req.destroy(); }, 15000);
+  });
+  assert.equal(slow.status, 413);
+  assert.ok(slow.closedAfter >= 4000 && slow.closedAfter < 9000, `closed after ${slow.closedAfter} ms`);
   assert.equal((await raw('/api/agent/status', '', { agent: true, method: 'GET' })).status, 200);
 });
 
@@ -531,6 +556,21 @@ await check('#15 a final ticket for a version discarded after planning is refuse
   assert.equal((await human('/api/decide', { versionId: id, decision: 'discard' })).status, 200);
   const r = await human('/api/render', { versionId: id, profile: 'final', ticket: plan.json.ticket });
   assert.equal(r.status, 409, JSON.stringify(r.json)); assert.match(r.json.error, /discarded/);
+  assert.equal((await versionOf(id)).renders.final, undefined);
+});
+
+await check('#15 a final render of a version discarded while it runs is not kept', async () => {
+  const id = await newProposal();
+  const plan = await human('/api/final/plan', { versionId: id });
+  holdRenders();
+  let jobId: string;
+  try {
+    jobId = (await human('/api/render', { versionId: id, profile: 'final', ticket: plan.json.ticket })).json.id;
+    await renderWaiting();
+    assert.equal((await human('/api/decide', { versionId: id, decision: 'discard' })).status, 200);
+  } finally { releaseRenders(); }
+  const job = await waitJob(jobId);
+  assert.equal(job.status, 'failed', JSON.stringify(job));
   assert.equal((await versionOf(id)).renders.final, undefined);
 });
 
@@ -630,6 +670,12 @@ await check('#20 reason and assumptions are bounded; one pending request per ver
     assert.equal(r.status, 400); assert.match(r.json.error, /assumptions/);
   }
   assert.equal((await state()).versions.length, versions);
+  const cc = { node: 'vase', what: 'x', why: 'x' };
+  for (const extra of [{ interpretation: 'x'.repeat(4001) }, { claimed_changes: Array(51).fill(cc) }, { claimed_changes: [{ ...cc, node: 'n'.repeat(201) }] }, { claimed_changes: [{ ...cc, why: 'y'.repeat(1001) }] }]) {
+    const r = await raw('/api/agent/propose', JSON.stringify({ interpretation: 'x', claimed_changes: [], scene: base, ...extra }), { agent: true });
+    assert.equal(r.status, 400, Object.keys(extra)[0]); assert.match(r.json.error, /interpretation|claimed_changes/);
+  }
+  assert.equal((await state()).versions.length, versions);
   const long = await raw('/api/agent/adoption-request', JSON.stringify({ version: 'v001', slug: 'long', reason: 'x'.repeat(4001) }), { agent: true });
   assert.equal(long.status, 400); assert.match(long.json.error, /reason/);
   const first = await requestAdoption('v001', 'dup');
@@ -677,7 +723,7 @@ await check('#16 open-tab is limited to one call per 30 seconds', async () => {
   assert.equal(second.status, 429); assert.match(second.json.error, /30 seconds/);
 });
 
-await check('#16 cancelling a job stops its vork process and the render is not stored', async () => {
+await check('#16 cancelling a job kills its render process and the render is not stored', async () => {
   const before = JSON.stringify((await versionOf('v001')).renders);
   holdRenders();
   try {
@@ -687,7 +733,7 @@ await check('#16 cancelling a job stops its vork process and the render is not s
     assert.equal(c.json.status, 'cancelled');
     let gone = false;
     for (let i = 0; i < 40 && !gone; i++) { try { process.kill(pid, 0); await sleep(50); } catch { gone = true; } }
-    assert.ok(gone, `vork (pid ${pid}) is still running after cancel`);
+    assert.ok(gone, `the render process (pid ${pid}, the gate wrapper that execs vork) is still running after cancel`);
     releaseRenders(); await sleep(1000);
     assert.equal((await human(`/api/jobs/${job.id}`)).json.status, 'cancelled');
     assert.equal(JSON.stringify((await versionOf('v001')).renders), before);

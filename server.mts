@@ -110,6 +110,7 @@ class PayloadTooLarge extends Error {
 const MAX_BODY = 4e6;
 // Agent text is kept in state.json (rewritten on every save) and shown to the human, so it is bounded.
 const MAX_REASON = 4000, MAX_ASSUMPTIONS = 20, MAX_ASSUMPTION = 1000, MAX_PENDING_ADOPTIONS = 20;
+const MAX_INTERPRETATION = 4000, MAX_CLAIMED = 50, MAX_CLAIMED_NODE = 200, MAX_CLAIMED_TEXT = 1000;
 const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
 const isClaimedChange = (x: unknown): x is ClaimedChange => isPlainObject(x) && typeof x.node === 'string' && typeof x.what === 'string' && typeof x.why === 'string';
 
@@ -477,6 +478,8 @@ async function main() {
       objects: meta.object_ids, exposure: meta.exposure,
       settings: { integrator: meta.settings.integrator, samples: meta.settings.samples, denoiser: meta.denoiser }, warnings,
     };
+    // A final render of a version discarded while it ran is not kept (#15).
+    if (profile === 'final' && !liveV(v.id)) return { ok: false, log: `${v.id} was discarded during the render; the final render was not kept` };
     if (!scene) { v.renders[profile] = info; save(); }
     return { ok: true, info };
   }
@@ -717,6 +720,10 @@ ${VORK_HELP}`;
       if (!liveV(baseId)) return send(res, 400, { error: 'base must be an existing, not discarded version' });
       if (typeof b.interpretation !== 'string' || !b.interpretation.trim() || !Array.isArray(b.claimed_changes)) return send(res, 400, { error: 'interpretation and claimed_changes are required' });
       if (!b.claimed_changes.every(isClaimedChange)) return send(res, 400, { error: 'each claimed_changes item must be { node, what, why } with string values' });
+      // interpretation is stored three times (instruction, proposal, audit), so it is bounded like reason.
+      if (b.interpretation.length > MAX_INTERPRETATION) return send(res, 400, { error: `interpretation must be at most ${MAX_INTERPRETATION} characters` });
+      if (b.claimed_changes.length > MAX_CLAIMED || b.claimed_changes.some((c) => c.node.length > MAX_CLAIMED_NODE || c.what.length > MAX_CLAIMED_TEXT || c.why.length > MAX_CLAIMED_TEXT))
+        return send(res, 400, { error: `claimed_changes: at most ${MAX_CLAIMED} items; node at most ${MAX_CLAIMED_NODE}, what and why at most ${MAX_CLAIMED_TEXT} characters` });
       // Checked before validateScene so a bad field does not cost a vork render.
       if (b.assumptions != null && !(Array.isArray(b.assumptions) && b.assumptions.every((a) => typeof a === 'string'))) return send(res, 400, { error: 'assumptions must be an array of strings' });
       if (Array.isArray(b.assumptions) && (b.assumptions.length > MAX_ASSUMPTIONS || b.assumptions.some((a: string) => a.length > MAX_ASSUMPTION))) return send(res, 400, { error: `assumptions: at most ${MAX_ASSUMPTIONS} items of at most ${MAX_ASSUMPTION} characters` });
@@ -806,7 +813,7 @@ ${VORK_HELP}`;
         return send(res, 200, {
           mode: MODE, project: PROJECT, config: readConfig(), head: state.head, vork: VORK_VERSION, model: MODEL,
           versions: state.versions.map(versionView), audit: state.audit.slice(-60),
-          adoptionRequests: state.adoptionRequests.map((a) => (adoptionJobs.has(a.id) ? { ...a, status: 'adopting' } : a)), events: state.events.slice(-30), agentCursor: state.agentCursor,
+          adoptionRequests: state.adoptionRequests.map((a) => (adoptionJobs.has(a.id) ? { ...a, status: 'adopting', job: adoptionJobs.get(a.id)!.id } : a)), events: state.events.slice(-30), agentCursor: state.agentCursor,
         });
 
       if (req.method === 'GET' && url.pathname.startsWith('/api/jobs/')) {
@@ -1036,10 +1043,14 @@ ${VORK_HELP}`;
       // Read from the descriptor that was checked, not the path again: O_NOFOLLOW refuses a symlink swapped in
       // after the check. A render file must have one link only: a hard link to server.json passes every path check.
       let fd: number;
-      try { fd = fs.openSync(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch { return send(res, 404, 'not found', 'text/plain'); }
+      // O_NONBLOCK: opening a FIFO would otherwise block the whole server until a writer appears; fstat below refuses it.
+      try { fd = fs.openSync(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); } catch { return send(res, 404, 'not found', 'text/plain'); }
       try {
         const st = fs.fstatSync(fd);
         if (!st.isFile() || (root === RUNS && st.nlink !== 1)) return send(res, 404, 'not found', 'text/plain');
+        // O_NOFOLLOW covers the last component only: the opened file must still be the one at the checked path.
+        const at = fs.lstatSync(real);
+        if (at.dev !== st.dev || at.ino !== st.ino || fs.realpathSync.native(real) !== want) return send(res, 404, 'not found', 'text/plain');
         return send(res, 200, fs.readFileSync(fd), MIME[path.extname(real)] || 'application/octet-stream');
       } finally { fs.closeSync(fd); }
     } catch (e: any) {
