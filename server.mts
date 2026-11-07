@@ -318,13 +318,13 @@ if (argv[0] === '--report') {
 if (argv[0] && argv[0].startsWith('--') && !['--project', '--port'].includes(argv[0])) {
   console.error('usage: node server.mts [--project DIR] [--port N] | --selftest | --report DIR'); process.exit(2);
 }
-if (process.env.VORK_DIRECTOR_IMPORT) { /* imported by tests for the pure helpers only */ } else { await main(); }
+if (process.env.RENDER_DIRECTOR_IMPORT) { /* imported by tests for the pure helpers only */ } else { await main(); }
 
 // ---------- server ----------
 async function main() {
   const PROJECT = arg('--project') ? fs.realpathSync(path.resolve(arg('--project')!)) : null;
   const MODE = PROJECT ? 'ade' : 'standalone';
-  const RUNS = PROJECT ? path.join(PROJECT, '.vork') : path.resolve(process.env.VORK_DIRECTOR_RUNS || path.join(ROOT, 'runs'));
+  const RUNS = PROJECT ? path.join(PROJECT, '.vork') : path.resolve(process.env.RENDER_DIRECTOR_RUNS || path.join(ROOT, 'runs'));
   const MODEL = process.env.DIRECTOR_MODEL || 'sonnet';
   // Files under PUBLIC are served without a session, so RUNS (server.json, state.json) must not live there.
   // Checked before mkdir, on the real path of the nearest existing ancestor.
@@ -644,7 +644,7 @@ ${VORK_HELP}`;
   // still find ways around this; see README "安全境界".)
   const AGENT_TOKEN = crypto.randomBytes(24).toString('hex');
   const sessions = new Set();
-  let PAIR = process.env.VORK_DIRECTOR_PAIR_TOKEN || crypto.randomBytes(24).toString('hex'); // env: tests only
+  let PAIR = process.env.RENDER_DIRECTOR_PAIR_TOKEN || crypto.randomBytes(24).toString('hex'); // env: tests only
   let lastOpenTab = 0;
   const rotatePair = () => { PAIR = crypto.randomBytes(24).toString('hex'); };
   let PORT = Number(arg('--port') || process.env.PORT || 4747);
@@ -687,7 +687,7 @@ ${VORK_HELP}`;
   function openPairing() {
     const link = `http://127.0.0.1:${PORT}/#pair=${PAIR}`;
     if (process.stdout.isTTY) console.log(`Open Director (one-time link): ${link}`);
-    if (process.env.VORK_DIRECTOR_NO_OPEN === '1') return false;
+    if (process.env.RENDER_DIRECTOR_NO_OPEN === '1') return false;
     const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
     try { spawn(opener, [link], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref(); return true; } catch { return false; }
   }
