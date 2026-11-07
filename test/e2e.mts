@@ -14,7 +14,11 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-if (!fs.existsSync(CHROME)) { console.log('SKIP e2e: Chrome not found (set CHROME_PATH)'); process.exit(0); }
+// E2E_REQUIRED=1 (CI, refactoring sign-off): a missing Chrome is a failure, not a skip.
+if (!fs.existsSync(CHROME)) {
+  if (process.env.E2E_REQUIRED === '1') { console.log('FAIL e2e: Chrome not found (set CHROME_PATH); E2E_REQUIRED=1'); process.exit(1); }
+  console.log('SKIP e2e: Chrome not found (set CHROME_PATH)'); process.exit(0);
+}
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vd-e2e-')));
 interface SceneNode { name: string; energy?: number; materials?: { inputs: Record<string, number> }[] }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

@@ -637,6 +637,54 @@ await check('#20 reason and assumptions are bounded; one pending request per ver
   for (const requestId of [first, ...made]) assert.equal((await human('/api/adopt/reject', { requestId })).status, 200);
 });
 
+await check('#16 wrong Host gets 421, a cross-origin POST 403, a POST that is not application/json 415', async () => {
+  const http = await import('node:http'); const u = new URL(BASE);
+  const send = (headers: Record<string, string>, method = 'GET', body?: string) => new Promise<number>((ok, bad) => {
+    const req = http.request({ host: u.hostname, port: u.port, path: '/api/state', method, headers: { cookie: uiCookie, ...headers } }, (r) => { r.resume(); ok(r.statusCode!); });
+    req.on('error', bad); req.end(body);
+  });
+  assert.equal(await send({ host: `evil.example:${u.port}` }), 421);
+  assert.equal(await send({ host: `127.0.0.1:${Number(u.port) + 1}` }), 421);
+  assert.equal(await send({ host: u.host }), 200);
+  const json = { host: u.host, 'content-type': 'application/json' };
+  assert.equal(await send({ ...json, origin: 'http://evil.example' }, 'POST', '{}'), 403);
+  assert.equal(await send({ ...json, origin: `http://localhost:${Number(u.port) + 1}` }, 'POST', '{}'), 403);
+  for (const type of ['text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=x']) assert.equal(await send({ host: u.host, 'content-type': type }, 'POST', '{}'), 415, type);
+  assert.equal(await send({ host: u.host }, 'POST', '{}'), 415, 'no content-type');
+});
+
+await check('#16 /runs/ serves only render files by name, also with a session', async () => {
+  for (const name of [`${proposed}/scene.json`, `${proposed}/draft.png.meta.json`, `${proposed}/draft.object_index.png`, 'server.json', 'state.json', `${proposed}/../server.json`, 'v1/draft.png']) {
+    assert.ok(name.includes('..') || name === 'v1/draft.png' || fs.existsSync(path.join(PROJECT, '.vork', name)), `test needs ${name} on disk`);
+    const r = await fetch(`${BASE}/runs/${name}`, { headers: { cookie: uiCookie } });
+    assert.equal(r.status, 404, name); assert.doesNotMatch(await r.text(), /agentToken|versions/);
+  }
+});
+
+await check('#16 open-tab is limited to one call per 30 seconds', async () => {
+  const first = await raw('/api/agent/open-tab', '{}', { agent: true });
+  assert.equal(first.status, 200, JSON.stringify(first.json));
+  const second = await raw('/api/agent/open-tab', '{}', { agent: true });
+  assert.equal(second.status, 429); assert.match(second.json.error, /30 seconds/);
+});
+
+await check('#16 cancelling a job stops its vork process and the render is not stored', async () => {
+  const before = JSON.stringify((await versionOf('v001')).renders);
+  holdRenders();
+  try {
+    const job = (await human('/api/render', { versionId: 'v001', profile: 'previs' })).json;
+    const pid = await renderWaiting();
+    const c = await human(`/api/jobs/${job.id}/cancel`, {});
+    assert.equal(c.json.status, 'cancelled');
+    let gone = false;
+    for (let i = 0; i < 40 && !gone; i++) { try { process.kill(pid, 0); await sleep(50); } catch { gone = true; } }
+    assert.ok(gone, `vork (pid ${pid}) is still running after cancel`);
+    releaseRenders(); await sleep(1000);
+    assert.equal((await human(`/api/jobs/${job.id}`)).json.status, 'cancelled');
+    assert.equal(JSON.stringify((await versionOf('v001')).renders), before);
+  } finally { releaseRenders(); }
+});
+
 await check('AC-01 nothing new was written under vork-director/runs', async () => {
   const after = fs.existsSync(path.join(ROOT, 'runs')) ? JSON.stringify(fs.readdirSync(path.join(ROOT, 'runs'))) : '[]';
   assert.equal(after, runsBefore);
