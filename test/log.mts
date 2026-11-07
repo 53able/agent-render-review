@@ -26,14 +26,19 @@ await check('T6 a process that sets up logging writes nothing to stdout and only
     import { setupLogging, log } from ${JSON.stringify(path.join(ROOT, 'src', 'log.mts'))};
     setupLogging({ dir: ${JSON.stringify(dir)}, level: 'debug' });
     const L = log('child');
-    L.debug('t6.debug', 'debug line'); L.info('t6.info', 'info line'); L.warn('t6.warn', 'warn line'); L.error('t6.error', 'error line');
+    L.debug('t6.debug', 'debug line'); L.info('t6.info', 'info line'); L.warn('t6.warn', 'warn line');
+    L.error('t6.error', 'error line', { vorkLogTail: 'TAIL-ONLY-IN-FILE', stack: 'STACK-ONLY-IN-FILE', exitCode: 1 });
   `; // ends on its own, without process.exit
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', child], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout.length, 0, `stdout: ${r.stdout}`);
   const err = r.stderr.split('\n').filter(Boolean).map((l) => JSON.parse(l));
   assert.deepEqual(err.map((e) => [e.event, e.level]), [['t6.warn', 'WARN'], ['t6.error', 'ERROR']]);
-  assert.deepEqual(lines(dir).map((e) => e.event), ['t6.debug', 't6.info', 't6.warn', 't6.error']); // the last event is not left in a buffer
+  // server.log has no size limit: vorkLogTail and stack stay in the rotated file only.
+  assert.equal(err[1].exitCode, 1); assert.ok(!r.stderr.includes('ONLY-IN-FILE'), r.stderr);
+  const file = lines(dir);
+  assert.deepEqual(file.map((e) => e.event), ['t6.debug', 't6.info', 't6.warn', 't6.error']); // the last event is not left in a buffer
+  assert.deepEqual([file[3].vorkLogTail, file[3].stack], ['TAIL-ONLY-IN-FILE', 'STACK-ONLY-IN-FILE']);
 });
 
 await check('T7 with the production settings and maxSize 10000, 1000 events rotate into at most maxFiles + 1 files of JSON lines', async () => {
@@ -49,6 +54,89 @@ await check('T7 with the production settings and maxSize 10000, 1000 events rota
     for (const l of text.split('\n').filter(Boolean)) JSON.parse(l);
   }
   assert.equal(lines(dir).at(-1).i, 999);
+});
+
+await check('T7b deleting director.jsonl while logging neither throws nor writes to another descriptor, and rotation goes on', async () => {
+  const dir = newDir(); const maxFiles = 3; const logs = path.join(dir, 'logs');
+  setupLogging({ dir, level: 'info', stderrLevel: 'fatal', maxSize: 2000, maxFiles });
+  L.info('t7b.first', 'first');
+  fs.rmSync(path.join(logs, 'director.jsonl'));
+  // @logtape/file 2.4.2 closed its descriptor here, failed to rename the missing file and kept the closed number:
+  // a file opened next got that number, and the log went into it.
+  for (let i = 0; i < 30; i++) L.info('t7b.fill', 'fill', { i, pad: 'x'.repeat(100) });
+  const victim = path.join(dir, 'victim.txt'); const vfd = fs.openSync(victim, 'w');
+  try {
+    for (let i = 0; i < 60; i++) L.info('t7b.after', 'after', { i, pad: 'x'.repeat(100) });
+    fs.writeSync(vfd, 'mine\n');
+  } finally { fs.closeSync(vfd); }
+  assert.equal(fs.readFileSync(victim, 'utf8'), 'mine\n');
+  assert.doesNotThrow(() => shutdownLogging());
+  const files = fs.readdirSync(logs);
+  assert.ok(files.length <= maxFiles + 1, `too many files: ${files}`);
+  assert.ok(files.includes('director.jsonl.1'), `no rotation: ${files}`);
+  const last = lines(dir);
+  assert.ok(last.length > 0 && last.every((e) => e.event === 't7b.after'), JSON.stringify(last.map((e) => e.event)));
+  assert.equal(last.at(-1).i, 59);
+  for (const f of files) assert.ok(fs.statSync(path.join(logs, f)).size <= 2000, `${f} is over maxSize`);
+});
+
+await check('T7c a symlink put in place of director.jsonl is not followed; logging starts a new file', async () => {
+  const dir = newDir(); const logs = path.join(dir, 'logs');
+  setupLogging({ dir, level: 'info', stderrLevel: 'fatal' });
+  L.info('t7c.first', 'first');
+  const target = path.join(dir, 'outside.txt'); fs.writeFileSync(target, 'untouched\n');
+  fs.rmSync(path.join(logs, 'director.jsonl'));
+  fs.symlinkSync(target, path.join(logs, 'director.jsonl'));
+  assert.doesNotThrow(() => L.info('t7c.after', 'after'));
+  assert.doesNotThrow(() => shutdownLogging());
+  assert.equal(fs.readFileSync(target, 'utf8'), 'untouched\n');
+  const st = fs.lstatSync(path.join(logs, 'director.jsonl'));
+  assert.ok(st.isFile() && st.nlink === 1);
+  assert.deepEqual(lines(dir).map((e) => e.event), ['t7c.after']);
+});
+
+await check('T7d a hard link put in place of director.jsonl is not written through', async () => {
+  const dir = newDir(); const logs = path.join(dir, 'logs');
+  setupLogging({ dir, level: 'info', stderrLevel: 'fatal' });
+  L.info('t7d.first', 'first');
+  const target = path.join(dir, 'outside.txt'); fs.writeFileSync(target, 'untouched\n');
+  fs.rmSync(path.join(logs, 'director.jsonl'));
+  fs.linkSync(target, path.join(logs, 'director.jsonl'));
+  assert.doesNotThrow(() => L.info('t7d.after', 'after'));
+  assert.equal(fs.readFileSync(target, 'utf8'), 'untouched\n');
+  assert.deepEqual(lines(dir).map((e) => e.event), ['t7d.after']);
+  // logs/ itself replaced by a symlink: nothing is written into the folder it points at.
+  const elsewhere = path.join(dir, 'elsewhere'); fs.mkdirSync(elsewhere);
+  fs.rmSync(logs, { recursive: true }); fs.symlinkSync(elsewhere, logs);
+  assert.doesNotThrow(() => L.info('t7d.dir', 'dir'));
+  assert.doesNotThrow(() => shutdownLogging());
+  assert.deepEqual(fs.readdirSync(elsewhere), []);
+  assert.ok(fs.lstatSync(logs).isDirectory(), 'logs/ is made again as a folder');
+  assert.deepEqual(lines(dir).map((e) => e.event), ['t7d.dir']);
+});
+
+await check('T7f a FIFO in place of director.jsonl does not block; logs/ removed is made again', async () => {
+  const dir = newDir(); const logs = path.join(dir, 'logs');
+  setupLogging({ dir, level: 'info', stderrLevel: 'fatal' });
+  fs.rmSync(logs, { recursive: true });
+  L.info('t7f.recreated', 'recreated');
+  assert.deepEqual(lines(dir).map((e) => e.event), ['t7f.recreated']);
+  fs.rmSync(path.join(logs, 'director.jsonl'));
+  const r = spawnSync('mkfifo', [path.join(logs, 'director.jsonl')]);
+  assert.equal(r.status, 0, String(r.stderr));
+  const t0 = Date.now();
+  L.info('t7f.after', 'after');
+  assert.ok(Date.now() - t0 < 2000, 'logging blocked on the FIFO');
+  shutdownLogging();
+  assert.deepEqual(lines(dir).map((e) => e.event), ['t7f.after']);
+});
+
+await check('T7e maxFiles below 1 is treated as 1, so at most two files exist', async () => {
+  const dir = newDir(); const logs = path.join(dir, 'logs');
+  setupLogging({ dir, level: 'info', stderrLevel: 'fatal', maxSize: 500, maxFiles: 0 });
+  for (let i = 0; i < 50; i++) L.info('t7e', 'fill', { i, pad: 'x'.repeat(100) });
+  shutdownLogging();
+  assert.deepEqual(fs.readdirSync(logs).sort(), ['director.jsonl', 'director.jsonl.1']);
 });
 
 await check('T8 a property named message is renamed to x_message and does not replace the message', async () => {
@@ -101,6 +189,14 @@ await check('errFields keeps only type, message and stack, and message: false re
   assert.ok(f.stack && f.stack.includes(' at '), String(f.stack)); assert.ok(!f.stack.includes('UNIQUE-INSTR') && !f.stack.includes('second line'));
   assert.equal(errFields(new Error('m'.repeat(3000))).error!.length, 2000);
   assert.deepEqual(errFields('plain', { message: false }), { errorType: 'string' });
+  // A message line that looks like a stack frame is not a frame.
+  const frameLike = errFields(new Error('UNIQUE-FIRST\n    at night UNIQUE-SECOND'), { message: false });
+  assert.ok(frameLike.stack && frameLike.stack.includes(' at '), String(frameLike.stack));
+  assert.ok(!frameLike.stack.includes('UNIQUE'), frameLike.stack);
+  // Real V8 frame forms are kept, including Promise.all's "(index N)".
+  const forms = ['    at async fn (file:///a.mts:1:2)', '    at new X (/a.mts:3:4)', '    at file:///a.mts:10:5', '    at Array.map (<anonymous>)', '    at async Promise.all (index 0)', '    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)'];
+  const built = Object.assign(new Error('m'), { stack: ['Error: m', ...forms].join('\n') });
+  assert.equal(errFields(built, { message: false }).stack, forms.join('\n'));
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

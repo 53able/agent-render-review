@@ -85,5 +85,6 @@ if (argv[0] && argv[0].startsWith('--') && !['--project', '--port'].includes(arg
 }
 if (process.env.RENDER_DIRECTOR_IMPORT) { /* imported by tests for the pure helpers only */ } else {
   // The exit code and the stack Node prints stay as they were; the event is written first (a no-op before setupLogging).
-  await main(argv).catch((e) => { log('main').fatal('director.fatal', 'Director failed to start', { origin: 'main', ...errFields(e) }); shutdownLogging(); throw e; });
+  // A SyntaxError comes from JSON.parse of a file such as state.json, and its message can quote the file: no message.
+  await main(argv).catch((e) => { log('main').fatal('director.fatal', 'Director failed to start', { origin: 'main', ...errFields(e, { message: !(e instanceof SyntaxError) }) }); shutdownLogging(); throw e; });
 }
