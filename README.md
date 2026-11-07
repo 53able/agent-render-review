@@ -1,6 +1,6 @@
 # Render Director
 
-vork で描画するエージェントのための、非公式のレビュー画面です。旧称は vork Director、agent-render-review です。
+vork で描画するエージェントのための、非公式のレビュー画面です。
 
 本プロジェクトは独立した非公式の連携ツールです。Voyager / Nullframe が提供・承認する製品ではなく、同社との提携関係もありません。
 
