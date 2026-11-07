@@ -68,6 +68,15 @@
         <button id="finalBtn" class="ghost">Plan final render…</button>
       </div>
       <p id="finalBusy" class="hint" hidden></p>
+      <section id="finalPlanBox" class="planbox" hidden aria-labelledby="h-fplan">
+        <h3 id="h-fplan" tabindex="-1">Final render</h3>
+        <p class="hint">Uses GPU time and writes a file. The approval covers this exact scene; switching versions closes the plan.</p>
+        <dl id="finalPlan" class="plan"></dl>
+        <div class="btnrow">
+          <button type="button" id="finalApprove" class="primary">Approve and render</button>
+          <button type="button" id="finalCancel" class="ghost">Cancel</button>
+        </div>
+      </section>
       <ul id="vrequests" class="alist" hidden aria-label="Adoption requests for this version"></ul>
       <div id="err-review" class="errs"></div>
       <div id="err-final" class="errs"></div>
@@ -111,17 +120,6 @@
     </section>
   </aside>
 </main>
-
-<dialog id="finalDlg" aria-labelledby="h-dlg">
-  <form method="dialog">
-    <h2 id="h-dlg">Approve final render?</h2>
-    <dl id="finalPlan" class="plan"></dl>
-    <div class="dlgbtns">
-      <button value="cancel" class="ghost" autofocus>Cancel</button>
-      <button value="approve" class="primary" id="approveBtn">Approve and render</button>
-    </div>
-  </form>
-</dialog>
 
 <dialog id="adoptDlg" aria-labelledby="h-adlg">
   <form method="dialog">

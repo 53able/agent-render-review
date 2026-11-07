@@ -75,11 +75,25 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     assert.equal(await page.locator('#wipe').isVisible(), true);
     await page.uncheck('#compareToggle');
   });
-  await check('AC-11 standalone: final render needs dialog approval, then shows final', async () => {
-    await page.click('#finalBtn'); await sleep(300);
-    assert.equal(await page.locator('#finalDlg').evaluate<boolean, HTMLDialogElement>((d) => d.open), true);
-    await page.keyboard.press('Escape'); await sleep(200);
-    await page.click('#finalBtn'); await sleep(300); await page.click('#finalDlg button[value=approve]');
+  await check('#57 the final render plan opens inline: the wipe works meanwhile, and switching versions closes it', async () => {
+    const head = await page.evaluate(() => document.querySelector('.headmark')!.closest('button')!.getAttribute('data-id'));
+    await page.click('#finalBtn'); await page.waitForSelector('#finalPlanBox:not([hidden])');
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'h-fplan', 'focus moves to the plan');
+    assert.equal(await page.locator('dialog[open]').count(), 0, 'no modal');
+    await page.check('#compareToggle'); await page.waitForSelector('#wipe:not([hidden])');
+    await page.locator('#wipe').fill('20'); await page.uncheck('#compareToggle');
+    assert.equal(await page.locator('#finalPlanBox').isVisible(), true, 'the plan stays open while comparing');
+    await page.keyboard.press('Escape'); // focus is not in the plan: Escape there only
+    await page.focus('#finalApprove'); await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#finalPlanBox').isHidden(), true);
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'finalBtn', 'focus returns to Plan final render');
+    await page.click('#finalBtn'); await page.waitForSelector('#finalPlanBox:not([hidden])');
+    await page.click('button[data-id="v001"]'); await sleep(200);
+    assert.equal(await page.locator('#finalPlanBox').isHidden(), true, 'a plan for another version closes');
+    await page.click(`button[data-id="${head}"]`); await page.waitForSelector(`#canvas[data-ready="${head}:draft"]`);
+  });
+  await check('AC-11 standalone: final render needs approval, then shows final', async () => {
+    await page.click('#finalBtn'); await page.waitForSelector('#finalPlanBox:not([hidden])'); await page.click('#finalApprove');
     await page.waitForFunction(() => document.querySelector('[data-profile="final"]')!.getAttribute('aria-checked') === 'true', null, { timeout: 120000 });
     assert.match(await page.textContent('#measure') as string, /final/);
   });
@@ -202,7 +216,7 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     fs.writeFileSync(GATE, '');
     try {
       await page.click(`button[data-id="${vid}"]`); await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`);
-      await page.click('#finalBtn'); await sleep(300); await page.click('#finalDlg button[value=approve]');
+      await page.click('#finalBtn'); await page.waitForSelector('#finalPlanBox:not([hidden])'); await page.click('#finalApprove');
       await page.waitForSelector(`#jobList [data-status="running"][data-version="${vid}"]`, { timeout: 10000 });
       assert.equal(await page.locator('#finalBtn').isDisabled(), true, 'no second final render of the same version');
       assert.match(await page.textContent('#finalBusy') as string, new RegExp(`${vid} has a running job`));

@@ -632,6 +632,7 @@ function renderReview() {
 const STATUS_TEXT = /** @type {Record<string, string>} */ ({ proposed: 'Proposal — not applied yet', accepted: 'Accepted', discarded: 'Discarded' });
 function renderInspector() {
   const v = viewV();
+  if (finalPlan && finalPlan.versionId !== v.id) closeFinalPlan();
   $('#h-insp').textContent = `${v.id} · ${v.origin === 'starter' ? 'Starter scene' : STATUS_TEXT[v.status] || v.status}`;
   $('#vstate').innerHTML = [
     v.id === S.data.head ? '<b>HEAD</b>' : v.status === 'accepted' ? 'accepted, not HEAD' : '',
@@ -715,12 +716,24 @@ function renderUndo() {
 const discarding = (id) => pendingDiscard?.id === id;
 
 // ---------- final render ----------
+// The plan opens inline in the inspector, not in a modal (#57): the render and the wipe stay usable while deciding.
+// A final render writes only into the version's folder (it replaces that version's previous final) and can be made
+// again, so nothing needs to lock the page. The approval stays explicit and bound to the scene hash by the server.
+/** @type {{ versionId: string, ticket: string } | null} */
+let finalPlan = null;
+/** @param {boolean} [refocus] */
+function closeFinalPlan(refocus = false) {
+  if (!finalPlan && $('#finalPlanBox').hidden) return;
+  finalPlan = null; $('#finalPlanBox').hidden = true; $('#finalPlan').innerHTML = '';
+  if (refocus) $('#finalBtn').focus();
+}
 $('#finalBtn').addEventListener('click', async () => {
   const v = viewV();
   if (v.status === 'discarded') return fail('final', `${v.id} is discarded; discarded versions cannot be rendered at final quality.`);
   /** @type {FinalPlan} */
   let plan;
   try { plan = await api('/api/final/plan', { versionId: v.id }); } catch (e) { return fail('final', `Cannot plan a final render of ${v.id}: ${why(e)}`); }
+  if (S.viewId !== v.id) return; // the human moved on while the plan was requested
   clearFails('final');
   const rows = [
     ['version', `${plan.versionId}${v.status === 'proposed' ? ' (unaccepted proposal)' : ''}`], ['scene hash', plan.hash], ['profile', plan.profile],
@@ -729,14 +742,22 @@ $('#finalBtn').addEventListener('click', async () => {
   ];
   $('#finalPlan').innerHTML = rows.map(([k, x]) => `<dt>${k}</dt><dd>${esc(x)}</dd>`).join('') +
     (plan.flags.length ? `<dt class="flag">attention</dt><dd>${plan.flags.map((f) => esc(f.msg)).join('<br>')}</dd>` : '');
-  /** @type {HTMLDialogElement} */ const dlg = $('#finalDlg'); dlg.returnValue = ''; dlg.showModal();
-  dlg.onclose = async () => {
-    if (dlg.returnValue !== 'approve') { say('Final render not started'); return; }
-    try {
-      const job = await api('/api/render', { versionId: v.id, profile: 'final', ticket: plan.ticket });
-      trackJob(job, async (j) => { await load(); if (j.status === 'done') { /** @type {HTMLElement} */ (document.querySelector('[data-profile="final"]')).click(); } });
-    } catch (e) { fail('final', `Final render of ${v.id} refused: ${why(e)}. Plan it again.`, { retry: () => $('#finalBtn').click(), retryLabel: 'Plan again…' }); }
-  };
+  $('#h-fplan').textContent = `Final render of ${plan.versionId}`;
+  finalPlan = { versionId: plan.versionId, ticket: plan.ticket };
+  $('#finalPlanBox').hidden = false; $('#h-fplan').focus();
+  say(`Final render plan for ${plan.versionId}. Approve and render, or cancel.`);
+});
+$('#finalCancel').addEventListener('click', () => { closeFinalPlan(true); say('Final render not started'); });
+$('#finalPlanBox').addEventListener('keydown', (e) => { if (/** @type {KeyboardEvent} */ (e).key === 'Escape') { closeFinalPlan(true); say('Final render not started'); } });
+$('#finalApprove').addEventListener('click', async () => {
+  const plan = finalPlan;
+  // The plan is for the version on screen only; the inspector closes it when the view changes.
+  if (!plan || plan.versionId !== S.viewId) return closeFinalPlan(true);
+  closeFinalPlan(true);
+  try {
+    const job = await api('/api/render', { versionId: plan.versionId, profile: 'final', ticket: plan.ticket });
+    trackJob(job, async (j) => { await load(); if (j.status === 'done' && S.viewId === plan.versionId) { /** @type {HTMLElement} */ (document.querySelector('[data-profile="final"]')).click(); } });
+  } catch (e) { fail('final', `Final render of ${plan.versionId} refused: ${why(e)}. Plan it again.`, { retry: () => $('#finalBtn').click(), retryLabel: 'Plan again…' }); }
 });
 
 function renderAudit() {
