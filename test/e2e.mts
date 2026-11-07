@@ -92,6 +92,11 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
       assert.doesNotMatch(await page.textContent('#viewing') as string, /proposed/);
     });
   }
+  await check('#53 standalone: when Director stops, the page says so instead of showing stale data silently', async () => {
+    procs[0].kill('SIGTERM');
+    await page.waitForSelector('#conn:not([hidden])', { timeout: 10000 });
+    assert.match(await page.textContent('#conn') as string, /Director is not responding/);
+  });
   await check('AC-11 standalone: no page errors', async () => assert.deepEqual(page.errors, []));
   await page.close();
 }
@@ -190,10 +195,15 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.click(`button[data-id="${vid}"]`); await sleep(500);
     await page.click('[data-profile="previs"]'); await sleep(300); // no cached page preview for previs yet
     await page.click('#pageBtn');
-    await page.waitForFunction(() => document.querySelector('#alert')!.textContent!.includes('unavailable'), null, { timeout: 60000 });
-    await sleep(3000);
+    await page.waitForFunction(() => document.querySelector('#err-view')!.textContent!.includes('unavailable'), null, { timeout: 60000 });
+    await sleep(5000);
+    // #53: the reason stays on screen (not only for screen readers) next to the render shown instead
+    assert.equal(await page.locator('#err-view .err[role=alert]').isVisible(), true);
     assert.doesNotMatch(await page.textContent('#viewing') as string, /on page/);
     assert.equal(await page.locator('#pageBtn').getAttribute('aria-pressed'), 'false');
+    await page.focus('#pageBtn'); await page.click('#err-view .err button[aria-label=Dismiss]');
+    assert.equal(await page.locator('#err-view .err').count(), 0);
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'pageBtn', 'dismissing returns focus to the control');
     await page.click('[data-profile="draft"]');
   });
 

@@ -44,8 +44,31 @@ const api = async (url, body) => {
 };
 /** @param {string} msg */
 const say = (msg) => { $('#live').textContent = ''; setTimeout(() => ($('#live').textContent = msg), 30); };
-/** @param {string} msg */
-const alertMsg = (msg) => { $('#alert').textContent = msg; };
+/**
+ * A failure stays on screen next to what failed until it is dismissed or the same action succeeds (#53). Each one is
+ * role=alert, so screen readers announce it too. Dismissing it returns focus to the control that failed.
+ * @param {'view' | 'adopt' | 'ask' | 'review' | 'final' | 'edit'} scope the .errs container: #err-<scope>
+ * @param {string} msg
+ * @param {{ retry?: () => unknown, retryLabel?: string }} [opts]
+ */
+function fail(scope, msg, opts = {}) {
+  const box = $(`#err-${scope}`); const back = /** @type {HTMLElement | null} */ (document.activeElement);
+  for (const old of /** @type {NodeListOf<HTMLElement>} */ (box.querySelectorAll('.err'))) if (old.dataset.msg === msg) old.remove();
+  const el = document.createElement('div'); el.className = 'err'; el.setAttribute('role', 'alert'); el.dataset.msg = msg;
+  el.innerHTML = `<span class="msg">${esc(msg)}</span>`;
+  const close = () => { el.remove(); if (back?.isConnected && !back.closest('[hidden]')) back.focus(); };
+  if (opts.retry) {
+    const again = document.createElement('button'); again.type = 'button'; again.className = 'ghost'; again.textContent = opts.retryLabel || 'Try again';
+    again.onclick = () => { close(); opts.retry?.(); }; el.append(again);
+  }
+  const x = document.createElement('button'); x.type = 'button'; x.className = 'ghost'; x.textContent = '✕'; x.setAttribute('aria-label', 'Dismiss');
+  x.onclick = close; el.append(x);
+  box.append(el);
+}
+/** @param {'view' | 'adopt' | 'ask' | 'review' | 'final' | 'edit'} scope */
+const clearFails = (scope) => { $(`#err-${scope}`).innerHTML = ''; };
+/** @param {unknown} e */
+const why = (e) => /** @type {Error} */ (e).message;
 /** @param {unknown} s */
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, /** @param {string} c */ (c) => (/** @type {Record<string, string>} */ ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }))[c]);
 /**
@@ -116,7 +139,7 @@ function renderAdoptions() {
   // Cancelling the adopt job makes the request pending again (also after a reload, when the job is no longer tracked here).
   $('#adoptList').querySelectorAll('button[data-cancel]').forEach((b) => (/** @type {HTMLButtonElement} */ (b).onclick = async () => {
     try { await api(`/api/jobs/${/** @type {HTMLButtonElement} */ (b).dataset.cancel}/cancel`, {}); say('Adoption cancelled; the request is pending again'); }
-    catch (e) { alertMsg(`Cannot cancel: ${/** @type {Error} */ (e).message}`); }
+    catch (e) { fail('adopt', `Cannot cancel: ${why(e)}`); }
     await load();
   }));
 }
@@ -124,7 +147,8 @@ function renderAdoptions() {
 async function reviewAdoption(requestId) {
   /** @type {AdoptPlan} */
   let plan;
-  try { plan = await api('/api/adopt/plan', { requestId }); } catch (e) { return alertMsg(`Cannot adopt: ${/** @type {Error} */ (e).message}`); }
+  try { plan = await api('/api/adopt/plan', { requestId }); } catch (e) { return fail('adopt', `Cannot adopt ${requestId}: ${why(e)}`); }
+  clearFails('adopt');
   S.viewId = plan.versionId; renderVersions(); renderObjects(); renderReview(); await drawViewport();
   const rows = [
     ['version', `${plan.versionId} (${plan.versionStatus})${plan.acceptsProposal ? ' — approving also accepts this proposal as HEAD' : ''}`],
@@ -138,12 +162,18 @@ async function reviewAdoption(requestId) {
   dlg.onclose = async () => {
     if (dlg.returnValue === 'reject') {
       try { await api('/api/adopt/reject', { requestId }); say(`Rejected ${requestId}`); }
-      catch (e) { alertMsg(`Cannot reject: ${/** @type {Error} */ (e).message}`); }
+      catch (e) { fail('adopt', `Cannot reject ${requestId}: ${why(e)}`); }
       return load();
     }
     if (dlg.returnValue !== 'approve') return say('Nothing written');
-    try { const job = await api('/api/adopt', { ticket: plan.ticket }); trackJob(job, async (j) => { await load(); say(j.status === 'done' ? `Wrote ${j.result.asset}` : j.status === 'cancelled' ? 'Adoption cancelled; the request is pending again' : `Adoption failed: ${j.error}`); }); }
-    catch (e) { alertMsg(`Adoption refused: ${/** @type {Error} */ (e).message}`); }
+    try {
+      const job = await api('/api/adopt', { ticket: plan.ticket });
+      trackJob(job, async (j) => {
+        await load();
+        if (j.status === 'done') say(`Wrote ${j.result.asset}`); else if (j.status === 'cancelled') say('Adoption cancelled; the request is pending again');
+        else if (j.status === 'failed') fail('adopt', `Adoption of ${requestId} failed: ${j.error}. Nothing was written; the request is pending again.`, { retry: () => reviewAdoption(requestId), retryLabel: 'Review again…' });
+      });
+    } catch (e) { fail('adopt', `Adoption refused: ${why(e)}`, { retry: () => reviewAdoption(requestId), retryLabel: 'Review again…' }); }
   };
 }
 const BASE_TITLE = document.title;
@@ -161,12 +191,20 @@ function notify(id) {
   dismiss.onclick = close;
   say(`New proposal ${id} from your agent. Press View to open it.`);
 }
+/** Shows, while polling fails, that Director does not answer: nothing on screen is current then (#53). @param {boolean} ok */
+function connection(ok) {
+  const bar = $('#conn');
+  if (ok) { bar.hidden = true; delete bar.dataset.since; return; }
+  bar.dataset.since ||= new Date().toLocaleTimeString();
+  bar.hidden = false; bar.textContent = `Director is not responding (since ${bar.dataset.since}). What you see may be out of date; retrying every few seconds. If it stopped, start it again or ask your agent to call director_status.`;
+}
 // Agents act from outside the page: poll for new proposals, requests and reads.
 setInterval(async () => {
   // Also while the tab is hidden: the "(1)" title mark is how a hidden tab shows a new proposal (browsers slow this timer down there).
   if (!S.data || S.job || document.querySelector('dialog[open]')) return;
   /** @type {Data | null} */
   const d = await api('/api/state').catch(() => null);
+  connection(!!d);
   if (d && signature(d) !== S.sig) {
     const fresh = d.versions.filter((v) => !V(v.id) && v.origin === 'agent');
     await load(); // keeps the version you are viewing; never switches under your cursor
@@ -199,6 +237,7 @@ const /** @type {HTMLCanvasElement} */ cv = $('#canvas'), /** @type {HTMLCanvasE
  */
 const loadImg = (src) => new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = src; });
 
+/** @returns {Promise<void>} */
 async function drawViewport() {
   if (S.onPage) return drawPage();
   const v = viewV(); const r = v.renders[S.profile];
@@ -220,6 +259,7 @@ async function drawViewport() {
   cv.dataset.ready = `${v.id}:${S.profile}`;
 }
 // The real page with the candidate substituted (server-side headless Chrome; project files untouched).
+/** @returns {Promise<void>} */
 async function drawPage() {
   delete cv.dataset.ready;
   const v = viewV(); const prof = v.renders[S.profile] ? S.profile : 'draft';
@@ -232,8 +272,15 @@ async function drawPage() {
     pv = /** @type {PagePreview} */ (await api('/api/preview', { versionId: v.id, profile: prof }).catch((e) => ({ ok: false, reason: e.message })));
     if (pv.ok) (v.pagePreviews ||= {})[prof] = pv;
   }
-  if (!pv.ok) { $('#empty').textContent = `Page preview unavailable: ${pv.reason}. Showing render only.`; S.onPage = false; $('#pageBtn').setAttribute('aria-pressed', 'false'); alertMsg(`Page preview unavailable: ${pv.reason}`); setTimeout(() => { $('#empty').textContent = 'No render at this quality yet.'; drawViewport(); }, 2500); return; }
-  $('#empty').hidden = true; $('#empty').textContent = 'No render at this quality yet.';
+  $('#empty').textContent = 'No render at this quality yet.';
+  if (!pv.ok) {
+    // The render is shown instead; the reason stays above the viewport with a retry (#53).
+    S.onPage = false; $('#pageBtn').setAttribute('aria-pressed', 'false');
+    fail('view', `Page preview of ${v.id} unavailable: ${pv.reason}. Showing the render instead.`, { retry: () => { S.onPage = true; $('#pageBtn').setAttribute('aria-pressed', 'true'); return drawViewport(); } });
+    return drawViewport();
+  }
+  clearFails('view');
+  $('#empty').hidden = true;
   const img = await loadImg(pv.image);
   for (const c of [cv, ov]) { c.width = img.width; c.height = img.height; }
   $('#viewport').style.aspectRatio = `${img.width} / ${img.height}`;
@@ -320,7 +367,7 @@ function renderMeasure(r) {
   const again = /** @type {HTMLButtonElement | null} */ (m.querySelector('#rerender'));
   if (again) again.onclick = async () => {
     try { trackJob(await api('/api/render', { versionId: S.viewId, profile: r.profile }), () => load()); }
-    catch (e) { alertMsg(`Could not start: ${/** @type {Error} */ (e).message}`); }
+    catch (e) { fail('view', `Could not start the render: ${why(e)}`); }
   };
 }
 
@@ -393,13 +440,13 @@ function renderQuick(scene) {
  * @param {unknown} value
  */
 async function directEdit(node, field, value) {
-  if (S.job || S.editing) return alertMsg('Wait for the current job to finish or cancel it.');
+  if (S.job || S.editing) return fail('edit', 'Wait for the current job to finish or cancel it, then edit again.');
   S.editing = true; // set synchronously so a second change event cannot fork a duplicate version
   try {
     const r = await api('/api/edit', { baseId: S.viewId, node, field, value });
-    S.viewId = r.version; await load(); say(`Created ${r.version}`);
+    clearFails('edit'); S.viewId = r.version; await load(); say(`Created ${r.version}`);
     trackJob(r.job, () => load());
-  } catch (e) { alertMsg(`Edit failed: ${/** @type {Error} */ (e).message}`); }
+  } catch (e) { fail('edit', `Edit of ${node}.${field} failed: ${why(e)}`); }
   finally { S.editing = false; }
 }
 
@@ -417,25 +464,25 @@ $('#askForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const instruction = /** @type {HTMLTextAreaElement} */ ($('#instruction')).value.trim(); if (!instruction) return $('#instruction').focus();
   if (ADE()) {
-    try { await api('/api/feedback', { versionId: S.viewId, selection: [...S.selection], comment: instruction }); /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = ''; say('Sent to your agent'); await load(); }
-    catch (err) { alertMsg(`Could not send: ${/** @type {Error} */ (err).message}`); }
+    try { await api('/api/feedback', { versionId: S.viewId, selection: [...S.selection], comment: instruction }); /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = ''; clearFails('ask'); say('Sent to your agent'); await load(); }
+    catch (err) { fail('ask', `Could not send: ${why(err)}. Your text is kept.`); }
     return;
   }
-  if (S.job) return alertMsg('A job is already running.');
+  if (S.job) return fail('ask', 'A job is already running. Wait for it or cancel it, then propose again.');
   const v = viewV(); const baseId = v.status === 'discarded' ? S.data.head : v.id;
   try {
     const job = await api('/api/propose', {
       baseId, instruction, selection: [...S.selection],
       context: { selection: /** @type {HTMLInputElement} */ ($('#ctxSelection')).checked, exposure: /** @type {HTMLInputElement} */ ($('#ctxExposure')).checked, history: /** @type {HTMLInputElement} */ ($('#ctxHistory')).checked },
     });
-    say(`Proposal requested from ${baseId}`);
+    clearFails('ask'); say(`Proposal requested from ${baseId}`);
     trackJob(job, async (j) => {
       S.lastResult = j;
       await load();
       if (j.status === 'done' && j.result?.kind === 'proposal') { S.viewId = j.result.versionId; renderVersions(); renderObjects(); await drawViewport(); }
       renderReview();
     });
-  } catch (err) { alertMsg(`Could not start: ${/** @type {Error} */ (err).message}`); }
+  } catch (err) { fail('ask', `Could not start: ${why(err)}. Your request is kept.`); }
 });
 
 // ---------- jobs ----------
@@ -559,7 +606,8 @@ function renderReview() {
 async function decide(decision) {
   const id = S.viewId;
   try { await api('/api/decide', { versionId: id, decision }); }
-  catch (e) { return alertMsg(`Cannot ${decision}: ${/** @type {Error} */ (e).message}`); }
+  catch (e) { return fail('review', `Cannot ${decision} ${id}: ${why(e)}`); }
+  clearFails('review');
   if (decision === 'discard') S.viewId = /** @type {string} */ (/** @type {Version} */ (V(id)).parent);
   /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = '';
   await load(); say(decision === 'accept' ? `${id} is now HEAD` : `${id} discarded`);
@@ -568,9 +616,11 @@ async function decide(decision) {
 // ---------- final render ----------
 $('#finalBtn').addEventListener('click', async () => {
   const v = viewV();
-  if (v.status === 'discarded') return alertMsg('Discarded versions cannot be rendered at final quality.');
+  if (v.status === 'discarded') return fail('final', `${v.id} is discarded; discarded versions cannot be rendered at final quality.`);
   /** @type {FinalPlan} */
-  const plan = await api('/api/final/plan', { versionId: v.id });
+  let plan;
+  try { plan = await api('/api/final/plan', { versionId: v.id }); } catch (e) { return fail('final', `Cannot plan a final render of ${v.id}: ${why(e)}`); }
+  clearFails('final');
   const rows = [
     ['version', `${plan.versionId}${v.status === 'proposed' ? ' (unaccepted proposal)' : ''}`], ['scene hash', plan.hash], ['profile', plan.profile],
     ['resolution', plan.resolution.join(' × ')], ['writes', plan.output + (plan.overwrites ? ' (replaces previous final)' : '')],
@@ -584,7 +634,7 @@ $('#finalBtn').addEventListener('click', async () => {
     try {
       const job = await api('/api/render', { versionId: v.id, profile: 'final', ticket: plan.ticket });
       trackJob(job, async (j) => { await load(); if (j.status === 'done') { /** @type {HTMLElement} */ (document.querySelector('[data-profile="final"]')).click(); } });
-    } catch (e) { alertMsg(`Final render refused: ${/** @type {Error} */ (e).message}`); }
+    } catch (e) { fail('final', `Final render of ${v.id} refused: ${why(e)}. Plan it again.`, { retry: () => $('#finalBtn').click(), retryLabel: 'Plan again…' }); }
   };
 });
 

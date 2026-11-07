@@ -127,3 +127,10 @@ dialog h2 { font-size: 15px; text-transform: none; letter-spacing: 0; color: var
 .notice { position: fixed; top: 52px; /* below the 43px header, so the project name stays readable */ right: 16px; z-index: 10; max-width: calc(100vw - 32px); background: var(--panel); border: 1px solid var(--agent); border-radius: 6px; padding: 6px 10px; display: flex; gap: 10px; align-items: center; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
 .unpaired { grid-column: 1 / -1; max-width: 640px; margin: 80px auto; padding: 0 16px; }
 .unpaired h2 { font-size: 18px; text-transform: none; letter-spacing: 0; color: var(--text); }
+.errs { display: grid; gap: 6px; }
+.errs:empty { display: none; }
+.err { display: flex; gap: 8px; align-items: flex-start; border: 1px solid var(--bad); background: #2a1416; border-radius: 6px; padding: 6px 8px; }
+.err .msg { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
+.err button { flex: none; padding: 2px 8px; }
+.conn { background: #2a1416; border-bottom: 1px solid var(--bad); padding: 6px 16px; }
+#err-view { margin-bottom: 8px; }

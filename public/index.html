@@ -12,6 +12,7 @@
   <div class="brand"><span class="dot" aria-hidden="true"></span> Render Director</div>
   <div class="meta" id="meta">loading…</div>
 </header>
+<div id="conn" class="conn" role="alert" hidden></div>
 
 <main class="layout">
   <!-- Versions -->
@@ -35,6 +36,7 @@
       <span id="viewing" class="viewing"></span>
       <div id="notice" class="notice" role="status" hidden></div>
     </div>
+    <div id="err-view" class="errs"></div>
     <div class="viewport" id="viewport">
       <canvas id="canvas" width="960" height="540" aria-label="Render. Hover to identify objects, click to select. Object list on the right offers the same selection by keyboard."></canvas>
       <canvas id="overlay" width="960" height="540" aria-hidden="true"></canvas>
@@ -54,12 +56,14 @@
       <ul id="objectList" class="olist"></ul>
       <p id="objectMore" class="hint" hidden></p>
       <div id="quick" class="quick"></div>
+      <div id="err-edit" class="errs"></div>
     </section>
 
     <section id="adoptBox" class="adopt" hidden aria-labelledby="h-adopt">
       <h2 id="h-adopt">Adoption requests</h2>
       <ul id="adoptList" class="alist"></ul>
     </section>
+    <div id="err-adopt" class="errs"></div>
 
     <section aria-labelledby="h-ask" class="ask">
       <h2 id="h-ask">Direct the agent</h2>
@@ -78,6 +82,7 @@
         </fieldset>
         <button type="submit" id="askBtn" class="primary">Propose change</button>
       </form>
+      <div id="err-ask" class="errs"></div>
       <ol id="eventList" class="events" hidden aria-label="Messages to the agent"></ol>
     </section>
 
@@ -88,11 +93,13 @@
     </section>
 
     <section id="review" class="review" hidden aria-labelledby="h-review"></section>
+    <div id="err-review" class="errs"></div>
 
     <section class="final" aria-labelledby="h-final">
       <h2 id="h-final">Final render</h2>
       <p class="hint">Uses GPU time and writes a file. Requires approval for the exact scene shown.</p>
       <button id="finalBtn" class="ghost">Plan final render…</button>
+      <div id="err-final" class="errs"></div>
     </section>
 
     <details class="auditbox">
@@ -126,7 +133,6 @@
 </dialog>
 
 <div id="live" class="sr-only" aria-live="polite"></div>
-<div id="alert" class="sr-only" role="alert"></div>
 <script type="module" src="/app.js"></script>
 </body>
 </html>
