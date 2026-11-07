@@ -66,14 +66,25 @@ const renderText = (r: RenderSummary | null | undefined) => r && {
 };
 
 const MAX_SCENE_FILE = 4e6; // Director's request body limit
-/** A scene file inside the project: the same path rules as an adoption target (no absolute path, no '..', no symlink out). */
+/** A scene file inside the project: the path rules of an adoption target (no absolute path, no '..', no symlink), one link. */
 function readSceneFile(rel: string): Record<string, unknown> {
   const file = resolveInside(PROJECT, rel);
-  const st = fs.lstatSync(file, { throwIfNoEntry: false });
-  if (!st || !st.isFile()) throw new Error(`${JSON.stringify(rel)} is not a file`);
-  if (st.size > MAX_SCENE_FILE) throw new Error(`${JSON.stringify(rel)} is larger than ${MAX_SCENE_FILE / 1e6} MB`);
+  // Opened without following a symlink and checked on the descriptor (plain file, one link, size), then read from that
+  // descriptor: a hard link to a file outside the project, or a swap after the path check, is refused.
+  let fd: number;
+  try { fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
+  catch { throw new Error(`${JSON.stringify(rel)} is not a file`); }
+  let text: string;
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new Error(`${JSON.stringify(rel)} is not a file`);
+    if (st.nlink !== 1) throw new Error(`${JSON.stringify(rel)} has more than one link`);
+    if (st.size > MAX_SCENE_FILE) throw new Error(`${JSON.stringify(rel)} is larger than ${MAX_SCENE_FILE / 1e6} MB`);
+    text = fs.readFileSync(fd, 'utf8');
+  } finally { fs.closeSync(fd); }
   let scene: unknown;
-  try { scene = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e: any) { throw new Error(`${JSON.stringify(rel)} is not valid JSON (${e.message})`); }
+  // The parser's message quotes the file's first characters; the file may not be a scene, so they are not passed on.
+  try { scene = JSON.parse(text); } catch { throw new Error(`${JSON.stringify(rel)} is not valid JSON`); }
   if (!scene || typeof scene !== 'object' || Array.isArray(scene)) throw new Error(`${JSON.stringify(rel)} must hold a JSON object`);
   return scene as Record<string, unknown>;
 }

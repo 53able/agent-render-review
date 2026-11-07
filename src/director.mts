@@ -297,7 +297,10 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     // What would be replaced, so the human can see it next to the new image (#58). Read through the same checks as
     // a /runs/ file; null when it cannot be shown (not a plain file with one link).
     const old = overwrites ? readPlainFile(t.asset) : null;
-    const existing = overwrites ? { bytes: old?.data.length ?? null, modified: old?.mtime ?? null, viewable: !!old } : null;
+    // A file that cannot be read this way (a hard link, a FIFO, …) is neither shown nor replaced: the approval would
+    // not be bound to its contents, and writing through a hard link changes the file it links to.
+    if (overwrites && !old) throw new Refusal('conflict', `${t.assetRel} exists but is not a plain file with a single link; Director does not replace it`);
+    const existing = old ? { bytes: old.data.length, modified: old.mtime, viewable: true } : null;
     const reusable = finalMatches(v, hash); const { slug } = t;
     const ticket = issueTicket({ kind: 'adopt', versionId: v.id, hash, requestId, slug, sceneText, assetRel: t.assetRel, overwrites, existingSha256: old ? sha256(old.data) : null });
     return {
@@ -317,7 +320,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     const t = tickets.get(ticketId);
     if (!t || t.kind !== 'adopt' || t.expires < clock() || !t.existingSha256) return null;
     let asset: string;
-    try { asset = adoptionTargets(t.slug).asset; } catch { return null; }
+    try { asset = resolveInside(PROJECT!, t.assetRel); } catch { return null; } // the path the plan was made for
     const now = readPlainFile(asset);
     return now && sha256(now.data) === t.existingSha256 ? now.data : null;
   }
@@ -364,7 +367,9 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
         if (sha256(png) !== v.renders.final!.sha256) throw new Error('final.png changed after rendering; plan again');
         fs.mkdirSync(path.dirname(targets.asset), { recursive: true }); fs.mkdirSync(path.dirname(targets.manifest), { recursive: true });
         const overwrote = fs.existsSync(targets.asset);
-        fs.writeFileSync(targets.asset, png);
+        // Write a new file and rename it into place: the old file's inode (and anything linked to it) is never written.
+        const tmp = `${targets.asset}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, png, { flag: 'wx' }); fs.renameSync(tmp, targets.asset);
         const pngSha = sha256(png);
         const manifest = {
           slug: t.slug, asset: targets.assetRel, sha256: pngSha, version: v.id, sceneHash: t.hash, vork: renderer.version, profile: PROFILES.final,

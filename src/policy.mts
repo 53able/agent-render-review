@@ -253,7 +253,12 @@ export function normalizeState(raw: Partial<DirectorState>): DirectorState {
   const state = raw as DirectorState;
   state.versions ||= []; state.head ??= null; state.audit ||= []; state.events ||= []; state.agentCursor ||= 0; state.adoptionRequests ||= [];
   for (const v of state.versions) {
-    for (const r of Object.values(v.renders || {})) if (r) for (const k of ['image', 'ids', 'file']) delete (r as unknown as Record<string, unknown>)[k];
+    v.renders ||= {};
+    for (const [k, r] of Object.entries(v.renders)) {
+      // a render without a hash of its PNG cannot be served (#26, #43); it is made again when needed
+      if (!r || typeof r.sha256 !== 'string') { delete v.renders[k as Profile]; continue; }
+      for (const f of ['image', 'ids', 'file']) delete (r as unknown as Record<string, unknown>)[f];
+    }
     if (!v.pagePreviews) continue;
     for (const [k, p] of Object.entries(v.pagePreviews)) {
       const old = p as PagePreviewOk & { image?: unknown };

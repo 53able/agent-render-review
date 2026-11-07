@@ -115,15 +115,19 @@ await check('AC-03 policy violations create no version', async () => {
 await check('#51 a bad scene_file is refused before Director sees it, and creates no version', async () => {
   fs.writeFileSync(path.join(PROJECT, 'bad.json'), '{ not json'); fs.writeFileSync(path.join(tmp, 'outside.json'), JSON.stringify(base));
   fs.symlinkSync(path.join(tmp, 'outside.json'), path.join(PROJECT, 'link.json'));
+  fs.linkSync(path.join(tmp, 'outside.json'), path.join(PROJECT, 'hard.json'));
+  fs.writeFileSync(path.join(PROJECT, 'secret.json'), 'AWS_SECRET=abc');
   try {
     for (const [args, why] of [
       [{ scene: base, scene_file: 'scene.json' }, /exactly one/], [{}, /exactly one/], [{ scene_file: '../outside.json' }, /inside the project/],
-      [{ scene_file: path.join(tmp, 'outside.json') }, /inside the project/], [{ scene_file: 'link.json' }, /outside the project|symlink/], [{ scene_file: 'bad.json' }, /not valid JSON/], [{ scene_file: 'missing.json' }, /not a file/],
+      [{ scene_file: path.join(tmp, 'outside.json') }, /inside the project/], [{ scene_file: 'link.json' }, /outside the project|symlink/], [{ scene_file: 'bad.json' }, /not valid JSON/], [{ scene_file: 'missing.json' }, /not a file/], [{ scene_file: 'hard.json' }, /more than one link/],
     ] as const) {
       const r = await tool('propose_scene', { ...args, interpretation: 'file', claimed_changes: [] });
       assert.equal(r.isError, true, JSON.stringify(args)); assert.match(r.content[0].text, why); assert.match(r.content[0].text, /No version was created/);
     }
-  } finally { for (const f of ['bad.json', 'link.json']) fs.rmSync(path.join(PROJECT, f), { force: true }); }
+    const leak = await tool('propose_scene', { scene_file: 'secret.json', interpretation: 'file', claimed_changes: [] });
+    assert.doesNotMatch(leak.content[0].text, /AWS_SECRET/, 'a parse error does not quote the file');
+  } finally { for (const f of ['bad.json', 'link.json', 'hard.json', 'secret.json']) fs.rmSync(path.join(PROJECT, f), { force: true }); }
   assert.equal((await state()).versions.length, versionsBefore);
 });
 

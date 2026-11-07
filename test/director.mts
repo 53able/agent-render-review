@@ -79,10 +79,11 @@ await check('#42 loading an older state.json drops stored URLs and paths and kee
   fs.writeFileSync(path.join(runs, 'v001', 'scene.json'), JSON.stringify(starter));
   const draft = { profile: 'draft', seconds: 1, width: 2, height: 1, image: '/runs/v001/draft.png?1', ids: '/runs/v001/draft.ids.bin?1', file: '/elsewhere/v001/draft.png', sha256: 'a', idsSha256: 'b', sceneHash: null, objects: [], exposure: { mean: 0, clipped: 0, near_black: 0 }, settings: { integrator: null, samples: 1, denoiser: null }, warnings: [] };
   const pagePreviews = { final: { ok: true, matched: 1, image: '/runs/v001/page-draft.png?9', warning: null, sha256: 'c' }, previs: { ok: true, matched: 1, image: 'nonsense', warning: null, sha256: 'd' }, draft: { ok: true, matched: 1, image: '/runs/v001/page-draft.png?1', warning: null } };
-  fs.writeFileSync(path.join(runs, 'state.json'), JSON.stringify({ versions: [{ id: 'v001', parent: null, origin: 'starter', instruction: null, proposal: null, status: 'accepted', created: 'x', renders: { draft }, pagePreviews }] }));
+  fs.writeFileSync(path.join(runs, 'state.json'), JSON.stringify({ versions: [{ id: 'v001', parent: null, origin: 'starter', instruction: null, proposal: null, status: 'accepted', created: 'x', renders: { draft, previs: { profile: 'previs' } }, pagePreviews }] }));
   const d = createDirector({ runs, project: null, renderer: fakeRenderer().renderer, starter });
   const v = d.getV('v001')!;
   assert.deepEqual(Object.keys(v.renders.draft!).filter((k) => ['image', 'ids', 'file'].includes(k)), []);
+  assert.equal(v.renders.previs, undefined, 'a render without a PNG hash is dropped');
   assert.deepEqual(v.pagePreviews, { final: { ok: true, matched: 1, warning: null, sha256: 'c', source: 'draft' } }, 'a preview whose source cannot be read, or that has no hash (#43), is dropped');
   assert.equal(d.renderFile('v001', 'draft'), path.join(runs, 'v001', 'draft.png'));
 });
@@ -301,12 +302,21 @@ await check('#58 an adoption plan shows what it overwrites; the write needs that
   const job = await waitJob(d.startAdoption(plan.ticket));
   assert.equal(job.status, 'failed'); assert.match(String(job.error), /existing file changed since approval/);
   assert.equal(fs.readFileSync(asset, 'utf8'), 'other hero', 'nothing was written');
-  // a hard link (e.g. to server.json) is neither shown nor read
+  // a hard link (e.g. to state.json) is neither shown nor replaced
   fs.rmSync(asset); fs.linkSync(path.join(d.runs, 'state.json'), asset);
-  const linked = d.planAdoption({ requestId });
-  assert.equal(linked.existing!.viewable, false); assert.equal(d.existingOfPlan(linked.ticket), null);
+  await refused('conflict', () => d.planAdoption({ requestId }), /not a plain file with a single link/);
   fs.rmSync(asset);
   const fresh = d.planAdoption({ requestId }); assert.equal(fresh.overwrites, false); assert.equal(fresh.existing, null);
+  // a hard link made after planning is caught before writing; the linked file keeps its bytes
+  fs.writeFileSync(asset, 'old again');
+  const again = d.planAdoption({ requestId }); const keep = path.join(project!, 'keep.png');
+  fs.linkSync(asset, keep);
+  const linked = await waitJob(d.startAdoption(again.ticket));
+  assert.equal(linked.status, 'failed'); assert.equal(fs.readFileSync(keep, 'utf8'), 'old again');
+  fs.rmSync(keep);
+  const done = await waitJob(d.startAdoption(d.planAdoption({ requestId }).ticket));
+  assert.equal(done.status, 'done', JSON.stringify(done)); assert.ok(fs.readFileSync(asset).toString().startsWith('png final'));
+  assert.deepEqual(fs.readdirSync(path.dirname(asset)).filter((f) => f.endsWith('.tmp')), [], 'no temporary file is left');
 });
 
 await check('#14 #27 while an adoption renders, discard is refused; discarding later rejects pending requests', async () => {
@@ -361,6 +371,15 @@ await check('#49 withGpuLock runs one render at a time, in this process and acro
     assert.equal(await withGpuLock(async () => Date.now() - t0, { file, onWait: () => { waited = true; } }).then((ms) => (ms! >= 250 ? 'after' : 'before')), 'after');
     assert.ok(waited);
   } finally { holder.kill(); }
+  // a caller queued behind another one in this process stops waiting when it is cancelled
+  let release!: () => void; const holding = withGpuLock(() => new Promise<void>((r) => (release = r)), { file });
+  const qc = new AbortController(); const queued = withGpuLock(async () => 'ran', { file, signal: qc.signal });
+  await tick(); qc.abort(); assert.equal(await queued, null, 'gave up its place'); release(); await holding;
+  // a lock that cannot be read is retried with a pause, not in a busy loop (the event loop keeps running)
+  fs.mkdirSync(file); let ticks = 0; const timer = setInterval(() => ticks++, 5);
+  const ac2 = new AbortController(); setTimeout(() => ac2.abort(), 100);
+  assert.equal(await withGpuLock(async () => 'ran', { file, signal: ac2.signal }), null); clearInterval(timer); fs.rmdirSync(file);
+  assert.ok(ticks > 3, `timers ran ${ticks} times while waiting`);
   fs.writeFileSync(file, String(process.ppid)); // a live process that is not us
   const ac = new AbortController(); setTimeout(() => ac.abort(), 50);
   assert.equal(await withGpuLock(async () => 'ran', { file, signal: ac.signal }), null);
