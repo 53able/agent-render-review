@@ -1,4 +1,4 @@
-import { isWildcard, checkClaims, groupDiff, nameRuns, describeNames } from './review-model.js';
+import { isWildcard, checkClaims, groupDiff, nameRuns, describeNames, visibleObjects } from './review-model.js';
 
 // ---------- types (JSDoc only; no runtime effect) ----------
 /** @typedef {{ pass_index: number, name: string }} RenderObject */
@@ -326,23 +326,29 @@ function renderMeasure(r) {
 
 // ---------- objects & direct manipulation ----------
 const OBJECT_CAP = 200;
+let objPins = { base: '', names: /** @type {Set<string>} */ (new Set()) };
 // Rebuilds the list only when the version or the filter changes; a selection change only updates the rows already shown.
 function renderObjects() {
   const scene = viewV().scene; const list = $('#objectList');
   const filter = /** @type {HTMLInputElement} */ ($('#objectFilter')).value.trim().toLowerCase();
   for (const s of [...S.selection]) if (!scene.nodes.some((n) => n.name === s)) S.selection.delete(s);
-  const key = `${S.viewId}\n${filter}`;
+  // An object selected past the cap is listed first (#46) and stays listed, also once deselected, until the version or
+  // the filter changes: a row does not vanish under the pointer.
+  const base = `${S.viewId}\n${filter}`;
+  if (base !== objPins.base) objPins = { base, names: new Set() };
+  for (const s of S.selection) objPins.names.add(s);
+  const { shown, pinned, rest, matches } = visibleObjects(scene.nodes, filter, objPins.names, OBJECT_CAP);
+  const key = `${base}\n${pinned.join()}`;
   if (key !== S.objKey) {
     S.objKey = key; list.innerHTML = '';
-    const matches = scene.nodes.filter((n) => n.name && n.name.toLowerCase().includes(filter));
-    for (const n of matches.slice(0, OBJECT_CAP)) {
+    for (const n of shown) {
       const li = document.createElement('li'); li.dataset.name = n.name;
       li.innerHTML = `<label><input type="checkbox"> ${esc(n.name)} <span class="kind">${esc(n.type)}${n.type === 'light' ? ' ' + esc(n.shape) : ''}</span></label>`;
       /** @type {HTMLInputElement} */ (li.querySelector('input')).onchange = () => toggleSel(n.name, true);
       list.append(li);
     }
-    const more = $('#objectMore'); const rest = matches.length - OBJECT_CAP;
-    more.hidden = matches.length ? rest <= 0 : !filter; more.textContent = matches.length ? `${rest} more — type to filter` : 'No objects match';
+    const more = $('#objectMore');
+    more.hidden = matches ? rest <= 0 : !filter; more.textContent = matches ? `${rest} more — type to filter` : 'No objects match';
   }
   for (const li of /** @type {HTMLCollectionOf<HTMLElement>} */ (list.children)) {
     const sel = S.selection.has(/** @type {string} */ (li.dataset.name));
@@ -507,7 +513,7 @@ function renderReview() {
   /** @param {Diff[]} ds */
   const unclaimedNote = (ds) => { const u = ds.filter((d) => !isClaimed(d)).length; return u ? ` <span class="flag">· ⚠ ${u} not mentioned</span>` : ''; };
   const CAP = 200; const hidden = rest.slice(CAP);
-  const diffRows = groupList.map(({ type, kind, ds }, i) => `<tr class="group"><td colspan="3"><details data-group="${i}"><summary>${ds.length} ${esc(type)} node${ds.length > 1 ? 's' : ''} ${esc(kind)} (${esc(ds[0].node)}${ds.length > 1 ? ` … ${esc(ds.at(-1)?.node)}` : ''})${unclaimedNote(ds)}</summary><table class="difftable"><tbody></tbody></table></details></td></tr>`).join('')
+  const diffRows = groupList.map(({ type, kind, ds }, i) => `<tr class="group"><td colspan="3"><details data-group="${i}"><summary>${ds.length} ${esc(type)} node${ds.length > 1 ? 's' : ''} ${esc(kind)}: ${esc(describeNames(ds.map((d) => d.node)))}${unclaimedNote(ds)}</summary><table class="difftable"><tbody></tbody></table></details></td></tr>`).join('')
     + rest.slice(0, CAP).map(row).join('')
     + (hidden.length ? `<tr class="group"><td colspan="3"><button type="button" class="ghost" id="moreDiff">Show remaining ${hidden.length} rows</button>${unclaimedNote(hidden)}</td></tr>` : '');
   // The poll re-renders this panel; keep what the human opened in the diff while it shows the same version.

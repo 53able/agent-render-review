@@ -235,7 +235,7 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
   });
   await check('#37 the added nodes collapse into one row that stays open across the 2.5 s refresh', async () => {
     const summary = page.locator('#review details[data-group] summary').first();
-    assert.match(await summary.textContent() as string, new RegExp(`^${BIRDS} mesh nodes added`));
+    assert.match(await summary.textContent() as string, new RegExp(`^${BIRDS} mesh nodes added: b0 … b${BIRDS - 1} \\(${BIRDS}\\)`));
     await summary.click();
     await page.waitForFunction((n) => document.querySelectorAll('#review details[data-group] tbody tr').length === n, BIRDS, { timeout: 5000 });
     // a new agent version changes the state signature, so the poll re-renders the review panel
@@ -251,7 +251,13 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.locator('#objectList li[data-name="b391"] input').check();
     assert.match(await page.textContent('#selCount') as string, /b391/);
     assert.equal(await page.locator('#objectList label.sel').count(), 1);
-    await page.locator('#objectList li[data-name="b391"] input').uncheck(); await page.fill('#objectFilter', ''); await sleep(100);
+    await page.fill('#objectFilter', ''); await sleep(100);
+    // #46: the selected object is past the first 200, so it is listed first
+    assert.equal(await page.locator('#objectList li').first().getAttribute('data-name'), 'b391');
+    assert.equal(await page.locator('#objectList li[data-name="b391"] label.sel').count(), 1);
+    await page.locator('#objectList li[data-name="b391"] input').uncheck(); await sleep(100);
+    assert.equal(await page.locator('#objectList li').first().getAttribute('data-name'), 'b391', 'a deselected row stays where it was');
+    assert.equal(await page.locator('#objectList label.sel').count(), 0);
   });
   await check('#37 more than 200 changed fields: the rest is behind "Show remaining", which stays shown across the refresh', async () => {
     const scene: { nodes: { name: string; materials?: { inputs: Record<string, unknown> }[] }[] } = (await agent('GET', `/api/agent/scene?version=${flock}`)).scene;

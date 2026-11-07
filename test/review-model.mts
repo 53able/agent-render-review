@@ -1,7 +1,7 @@
 // Unit tests of the review panel's checks (public/review-model.js): claimed changes against the diff, the grouping of
 // large diffs, the object list. No browser needed (#48).
 import assert from 'node:assert/strict';
-import { isWildcard, keyOf, checkClaims, groupDiff, nameStem, nameRuns, describeNames } from '../public/review-model.js';
+import { isWildcard, keyOf, checkClaims, groupDiff, nameStem, nameRuns, describeNames, visibleObjects } from '../public/review-model.js';
 
 let pass = 0, failures = 0;
 async function check(name: string, fn: () => unknown) {
@@ -45,6 +45,20 @@ await check('#47 the nodes a prefix claim matched are listed by name stem, so an
   assert.equal(describeNames(names), 'b0 … b3999 (4000), backdrop, background_light');
   assert.equal(nameStem('hill_12'), 'hill_'); assert.equal(nameStem('42'), '');
   assert.equal(describeNames(['a1', 'b1', 'c1', 'd1', 'e1', 'e2', 'f1'], 4), 'a1, b1, c1, d1, +3 more');
+});
+
+await check('#35 #46 the object list shows 200 matches; a selected object past them is listed first', () => {
+  const nodes = Array.from({ length: 500 }, (_, i) => ({ name: `b${i}` }));
+  const all = visibleObjects(nodes, '', new Set(), 200);
+  assert.equal(all.shown.length, 200); assert.equal(all.rest, 300); assert.deepEqual(all.pinned, []);
+  const sel = visibleObjects(nodes, '', new Set(['b450', 'b3']), 200);
+  assert.deepEqual(sel.shown.slice(0, 3).map((n) => n.name), ['b450', 'b0', 'b1'], 'a selected object inside the first 200 keeps its place'); assert.equal(sel.shown.length, 201); assert.equal(sel.rest, 299); assert.deepEqual(sel.pinned, ['b450']);
+  const f = visibleObjects(nodes, ' B49 ', new Set(['b450']), 200);
+  assert.deepEqual(f.shown.map((n) => n.name), ['b49', ...Array.from({ length: 10 }, (_, i) => `b49${i}`)]); assert.equal(f.rest, 0);
+});
+
+await check('#46 a group of added nodes names its runs, not one range across different names', () => {
+  assert.equal(describeNames([...Array.from({ length: 4000 }, (_, i) => `b${i}`), ...Array.from({ length: 6 }, (_, i) => `hill_${i}`)]), 'b0 … b3999 (4000), hill_0 … hill_5 (6)');
 });
 
 console.log(`\n${pass} passed, ${failures} failed`);
