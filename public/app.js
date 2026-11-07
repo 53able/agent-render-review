@@ -437,6 +437,8 @@ function fmt(v) {
   const s = esc(JSON.stringify(v));
   return isColor(v) ? `<span class="swatch" style="background:${linToHex(v)}"></span>${s}` : s;
 }
+/** @param {string} c */
+const isWildcard = (c) => c.length > 1 && c.endsWith('*');
 function renderReview() {
   const box = $('#review'); const v = viewV(); const r = S.lastResult;
   // failure / question states from the last agent job (not tied to a version)
@@ -454,13 +456,18 @@ function renderReview() {
   }
   if (v.origin !== 'agent') { box.hidden = true; return; }
   const p = v.proposal; const claimedNodes = new Set(p.claimed_changes.map((c) => c.node));
+  // "b*" claims every changed node whose name starts with "b"; a bare "*" stays a literal name so one claim cannot cover everything
+  const prefixes = [...claimedNodes].filter(isWildcard).map((c) => c.slice(0, -1));
   // scene-level keys (render, animation, …) appear in the diff as "(scene)" with the key as path head
   /** @param {Diff} d */
   const keyOf = (d) => (d.node === '(scene)' ? d.path.split(/[.[]/)[0] : d.node);
   /** @param {Diff} d */
-  const isClaimed = (d) => claimedNodes.has(d.node) || claimedNodes.has(keyOf(d)) || (d.node === '(scene)' && claimedNodes.has('scene'));
+  const isClaimed = (d) => claimedNodes.has(d.node) || claimedNodes.has(keyOf(d)) || (d.node === '(scene)' && claimedNodes.has('scene')) || (d.node !== '(scene)' && prefixes.some((x) => d.node.startsWith(x)));
   const changedKeys = new Set(v.diff.map(keyOf));
-  const ghost = [...claimedNodes].filter((n) => !changedKeys.has(n) && !(n === 'scene' && v.diff.some((d) => d.node === '(scene)')));
+  const changedNodes = [...new Set(v.diff.map((d) => d.node).filter((n) => n !== '(scene)'))];
+  /** @type {Map<string, number>} */
+  const wildCount = new Map([...claimedNodes].filter(isWildcard).map((c) => [c, changedNodes.filter((n) => n.startsWith(c.slice(0, -1))).length]));
+  const ghost = [...claimedNodes].filter((n) => (isWildcard(n) ? !wildCount.get(n) : !changedKeys.has(n) && !(n === 'scene' && v.diff.some((d) => d.node === '(scene)'))));
   box.hidden = false;
   box.style.borderColor = v.status === 'proposed' ? 'var(--warn)' : 'var(--line)';
   box.innerHTML = `
@@ -469,7 +476,7 @@ function renderReview() {
     <div><h3>Request</h3>${esc(v.instruction)}</div>
     <div><h3>Agent's reading</h3><p class="interp">${esc(p.interpretation)}</p>
       ${p.assumptions.length ? `<ul>${p.assumptions.map((a) => `<li>${esc(a)}</li>`).join('')}</ul>` : ''}</div>
-    <div><h3>What the agent says it changed</h3><ul>${p.claimed_changes.map((c) => `<li><b>${esc(c.node)}</b>: ${esc(c.what)} <span class="hint">— ${esc(c.why)}</span></li>`).join('')}</ul></div>
+    <div><h3>What the agent says it changed</h3><ul>${p.claimed_changes.map((c) => `<li><b>${esc(c.node)}</b>${isWildcard(c.node) ? ` <span class="hint">→ ${wildCount.get(c.node)} node${wildCount.get(c.node) === 1 ? '' : 's'}</span>` : ''}: ${esc(c.what)} <span class="hint">— ${esc(c.why)}</span></li>`).join('')}</ul></div>
     <div><h3>What actually changed (computed from the scene)</h3>
       <table class="difftable"><thead><tr><th>node.field</th><th>before</th><th>after</th></tr></thead><tbody>
       ${v.diff.map((d) => `<tr class="${isClaimed(d) ? '' : 'unclaimed'}"><td>${esc(d.node)}${d.path ? '.' + esc(d.path) : ''}</td><td>${fmt(d.before)}</td><td>${fmt(d.after)}</td></tr>`).join('') || '<tr><td colspan="3">No changes</td></tr>'}
