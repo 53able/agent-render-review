@@ -384,6 +384,15 @@ await check('#12 a body over 4 MB gets 413, with or without content-length; the 
     req.end();
   });
   assert.equal(chunked.status, 413, chunked.body);
+  // past the drain limit the server drops the connection rather than reading on
+  const endless = await new Promise<string>((ok) => {
+    const req = http.request({ host: u.hostname, port: u.port, path: '/api/agent/propose', method: 'POST', headers: { host: u.host, 'content-type': 'application/json', authorization: `Bearer ${agentToken()}`, 'transfer-encoding': 'chunked' } }, () => ok('response'));
+    req.on('error', () => ok('dropped'));
+    const chunk = 'x'.repeat(1e6); let sent = 0;
+    const pump = () => { while (sent < 40 && req.write(chunk)) sent++; if (sent < 40) req.once('drain', () => { sent++; pump(); }); else req.end(); };
+    pump();
+  });
+  assert.equal(endless, 'dropped');
   assert.equal((await raw('/api/agent/status', '', { agent: true, method: 'GET' })).status, 200);
 });
 

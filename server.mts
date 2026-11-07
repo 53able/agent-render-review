@@ -635,11 +635,18 @@ ${VORK_HELP}`;
   };
   // The type argument is not checked at run time; each endpoint still validates the fields it reads.
   // Over MAX_BODY: settle with PayloadTooLarge (413) and keep draining the rest, so the client can read the response.
+  // Draining stops at MAX_DRAIN: past that the connection is dropped instead of reading on until requestTimeout.
+  const MAX_DRAIN = 4 * MAX_BODY;
   const readBody = <T,>(req: http.IncomingMessage): Promise<T> => new Promise((ok, bad) => {
-    if (Number(req.headers['content-length']) > MAX_BODY) { req.resume(); return bad(new PayloadTooLarge()); }
     const chunks: Buffer[] = []; let size = 0; let settled = false;
     const fail = (e: Error) => { if (!settled) { settled = true; chunks.length = 0; bad(e); } };
-    req.on('data', (d: Buffer) => { if (settled) return; size += d.length; if (size > MAX_BODY) fail(new PayloadTooLarge()); else chunks.push(d); });
+    req.on('data', (d: Buffer) => {
+      size += d.length;
+      if (size > MAX_DRAIN) return void req.destroy();
+      if (settled) return;
+      if (size > MAX_BODY) fail(new PayloadTooLarge()); else chunks.push(d);
+    });
+    if (Number(req.headers['content-length']) > MAX_BODY) fail(new PayloadTooLarge());
     req.on('error', fail);
     req.on('close', () => fail(new Error('request closed before the body was read')));
     req.on('end', () => {
