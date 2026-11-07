@@ -316,6 +316,36 @@ await check('final render: needs a ticket for the exact scene; a ticket of a dis
   await refused('forbidden', () => d.agentRender(v.id, 'final'), /human approval/);
 });
 
+await check('#49 a render that failed with GPU device lost says the GPU was busy', async () => {
+  const { d, fake } = setup(); fake.fail('error: GPU device lost (Metal)');
+  const job = await waitJob(d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }));
+  assert.equal(job.status, 'failed'); assert.match(String(job.error), /GPU was busy.*render again/);
+  fake.fail('some other error');
+  const other = await waitJob(d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }));
+  assert.equal(other.error, 'vork exited 1');
+});
+
+await check('#49 withGpuLock runs one render at a time, in this process and across processes', async () => {
+  const { withGpuLock } = await import('../src/gpu-lock.mts');
+  const file = path.join(tmp, 'gpu.lock'); let running = 0, most = 0;
+  const work = () => withGpuLock(async () => { running++; most = Math.max(most, running); await tick(); running--; return 'ok'; }, { file });
+  assert.deepEqual(await Promise.all([work(), work(), work()]), ['ok', 'ok', 'ok']); assert.equal(most, 1);
+  assert.ok(!fs.existsSync(file), 'released');
+  // Another process holds the lock: a render waits, and a cancelled wait gives up without running.
+  const { spawn } = await import('node:child_process');
+  const holder = spawn(process.execPath, ['-e', `require('fs').writeFileSync(${JSON.stringify(file)}, String(process.pid)); setTimeout(() => require('fs').rmSync(${JSON.stringify(file)}), 400)`]);
+  try {
+    for (let i = 0; i < 100 && !fs.existsSync(file); i++) await tick();
+    let waited = false; const t0 = Date.now();
+    assert.equal(await withGpuLock(async () => Date.now() - t0, { file, onWait: () => { waited = true; } }).then((ms) => (ms! >= 250 ? 'after' : 'before')), 'after');
+    assert.ok(waited);
+  } finally { holder.kill(); }
+  fs.writeFileSync(file, String(process.ppid)); // a live process that is not us
+  const ac = new AbortController(); setTimeout(() => ac.abort(), 50);
+  assert.equal(await withGpuLock(async () => 'ran', { file, signal: ac.signal }), null);
+  fs.rmSync(file);
+});
+
 await check('#17 policy.mts and director.mts do not load node:http, node:child_process or playwright-core, also through their imports', async () => {
   const forbidden = /^(node:)?(http|child_process)$|^playwright-core(\/|$)/;
   // Runtime imports only: `import type` is erased, so it loads nothing.

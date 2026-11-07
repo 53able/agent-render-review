@@ -79,6 +79,14 @@ export const MAX_INTERPRETATION = 4000, MAX_CLAIMED = 50, MAX_CLAIMED_NODE = 200
 export const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
 export const isClaimedChange = (x: unknown): x is ClaimedChange => isPlainObject(x) && typeof x.node === 'string' && typeof x.what === 'string' && typeof x.why === 'string';
 
+/**
+ * Why a failed vork render failed, in words a human can act on. "GPU device lost" is what vork reports when another
+ * render took the GPU at the same time (#29, #49): nothing is wrong with the scene, and rendering again usually works.
+ */
+export const renderFailure = (r: { timedOut?: boolean; code?: number | null; log?: string }, timeoutSec: number): string =>
+  /device lost/i.test(r.log || '') ? 'the GPU was busy with another render (GPU device lost); render again'
+    : r.timedOut ? `timed out after ${timeoutSec}s` : `vork exited ${r.code}`;
+
 export const sha256 = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex');
 
 // Policy enforced outside the model. Everything an agent proposes passes through here before vork sees it.

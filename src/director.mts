@@ -5,7 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   LIMITS, PROFILES, SLUG, DEFAULT_CONFIG, MAX_REASON, MAX_ASSUMPTIONS, MAX_ASSUMPTION, MAX_PENDING_ADOPTIONS, MAX_INTERPRETATION, MAX_CLAIMED, MAX_CLAIMED_NODE, MAX_CLAIMED_TEXT,
-  isProfile, isPlainObject, isClaimedChange, sha256, policyCheck, resolveInside, applyDirectEdit, adoptionRels,
+  isProfile, isPlainObject, isClaimedChange, sha256, renderFailure, policyCheck, resolveInside, applyDirectEdit, adoptionRels,
   isLive, nextVersionId, nextRequestId, acceptVersion, discardVersion, checkoutVersion, settleRequest, requestsOfDiscarded, normalizeState,
 } from './policy.mts';
 import type { Profile, Scene, PolicyResult, Config, RenderInfo, AgentOutput, Proposal, VersionStatus, Version, AgentEvent, AgentEventBody, DirectorState, PagePreviewOk } from './policy.mts';
@@ -204,7 +204,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     step(job, 'Rendering draft preview of the proposal');
     const draft = await renderVersion(job, v, 'draft');
     if (draft.cancelled) return { v, draft };
-    if (!draft.ok) step(job, 'Draft render failed (previs is still available)', 'failed', draft.log);
+    if (!draft.ok) step(job, `Draft render failed: ${renderFailure(draft, LIMITS.draft / 1000)} (previs is still available)`, 'failed', draft.log);
     else await renderVersion(job, v, 'previs');
     audit('proposed', { version: v.id, parent: baseId, instruction, cost: proposal.cost ?? null, flags: proposal.policy.flags.length, via: proposal.via });
     return { v, draft };
@@ -313,7 +313,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
         if (!finalMatches(v, t.hash)) {
           step(job, 'vork render std/final (approved scene)');
           const r = await renderVersion(job, v, 'final', { pinnedText: t.sceneText }); if (job.status === 'cancelled') return;
-          if (!r.ok) throw new Error(`final render failed: ${r.log?.slice(-400)}`);
+          if (!r.ok) throw new Error(`final render failed: ${r.log && /device lost/i.test(r.log) ? renderFailure(r, LIMITS.final / 1000) : r.log?.slice(-400)}`);
           audit('final_rendered', { version: v.id, seconds: r.info.seconds });
         }
         step(job, 'Writing into the project');
@@ -444,7 +444,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     if (!v.renders[profile]) {
       if (profile === 'final') throw new Refusal('forbidden', 'final renders need human approval in Director');
       const r = await renderVersion(newJob('agent-render', v.id, { listed: false }), v, profile);
-      if (!r.ok) throw new Refusal('failed', 'render failed', { log: r.log });
+      if (!r.ok) throw new Refusal('failed', `render failed: ${renderFailure(r, LIMITS[profile] / 1000)}`, { log: r.log });
     }
     return { v, render: v.renders[profile]! };
   }
@@ -462,7 +462,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     renderVersion(job, v, profile).then((r) => {
       if (job.status === 'cancelled') return;
       if (r.ok) { step(job, 'Done', 'done'); job.status = 'done'; job.result = r.info; if (profile === 'final') audit('final_rendered', { version: versionId, seconds: r.info.seconds }); }
-      else { job.status = 'failed'; job.error = r.timedOut ? `timed out after ${LIMITS[profile] / 1000}s` : `vork exited ${r.code}`; step(job, job.error, 'failed', r.log); }
+      else { job.status = 'failed'; job.error = renderFailure(r, LIMITS[profile] / 1000); step(job, job.error, 'failed', r.log); }
     }).catch((e) => failJob(job, e));
     return job;
   }
@@ -517,7 +517,8 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     renderVersion(job, v, 'draft').then(async (r) => {
       if (r.ok && job.status !== 'cancelled') await renderVersion(job, v, 'previs');
       if (job.status === 'cancelled') return;
-      job.status = r.ok ? 'done' : 'failed'; job.result = r.info; step(job, r.ok ? 'Done' : 'Render failed', r.ok ? 'done' : 'failed', r.log);
+      job.status = r.ok ? 'done' : 'failed'; job.result = r.info; if (!r.ok) job.error = renderFailure(r, LIMITS.draft / 1000);
+      step(job, r.ok ? 'Done' : `Render failed: ${job.error}`, r.ok ? 'done' : 'failed', r.log);
     }).catch((e) => failJob(job, e));
     return { v, job };
   }
