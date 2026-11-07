@@ -39,17 +39,27 @@ async function director() {
   log('starting Director for', PROJECT);
   fs.mkdirSync(path.dirname(SERVER_FILE), { recursive: true });
   const LOG = path.join(PROJECT, '.vork', 'server.log');
-  // Not through a symlink put in place of the log: the child's output would be appended to the file it points to.
-  // O_NONBLOCK: a FIFO put there would otherwise block open, and with it this process (src/log.mts does the same).
-  const out = fs.openSync(LOG, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 0o600);
-  // Checked on the open file: a hard link (or anything but a plain file) put in place of the log would share its data
-  // with another file. Our own name of it is removed, which leaves that file as it was; the next call starts a new log.
+  // server.log must be a plain file with one link: a symlink or a hard link put in its place would send the child's
+  // output to (and logTail would read back) another file, and a FIFO would make open fail or block. Our own name of it
+  // is removed (an empty folder too), which leaves the other file as it was; the next call starts a new log.
+  // Checked with lstat before open, as src/log.mts does, and again on the open file in case the name was swapped.
+  const replaced = () => {
+    try { fs.unlinkSync(LOG); } catch { try { fs.rmdirSync(LOG); } catch {} }
+    let gone = false; try { fs.lstatSync(LOG); } catch { gone = true; }
+    return !gone
+      ? new Error(`Director was not started: ${LOG} is not a plain file with one link and could not be removed. Remove it, then call the tool again.`)
+      : new Error(`Director was not started: ${LOG} was not a plain file with one link, so it was removed. Call the tool again.`);
+  };
+  let pre: fs.Stats | null = null;
+  try { pre = fs.lstatSync(LOG); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  if (pre && (!pre.isFile() || pre.nlink !== 1)) throw replaced();
+  // O_NOFOLLOW: not through a symlink. O_NONBLOCK: a FIFO put there after lstat would otherwise block open, and with
+  // it this process. Those (ELOOP, ENXIO) and a folder (EISDIR) are handled like what lstat catches.
+  let out: number;
+  try { out = fs.openSync(LOG, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 0o600); }
+  catch (e) { if (['ELOOP', 'ENXIO', 'EISDIR'].includes((e as NodeJS.ErrnoException).code ?? '')) throw replaced(); throw e; }
   const st = fs.fstatSync(out);
-  if (!st.isFile() || st.nlink !== 1) {
-    fs.closeSync(out);
-    try { fs.unlinkSync(LOG); } catch {}
-    throw new Error(`Director was not started: ${LOG} was not a plain file with one link, so it was removed. Call the tool again.`);
-  }
+  if (!st.isFile() || st.nlink !== 1) { fs.closeSync(out); throw replaced(); }
   const child = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--project', PROJECT], { detached: true, stdio: ['ignore', out, out] });
   fs.closeSync(out);
   const ended: { code: number | null; signal: NodeJS.Signals | null }[] = [];

@@ -203,6 +203,29 @@ await check('mcp.mts: server.log as a FIFO does not block the MCP process', asyn
   assert.ok(r, `no answer in ${Date.now() - t0} ms`);
   assert.equal(r.isError, true, textOf(r));
   assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0} ms`);
+  // The FIFO is removed with the same instruction as a hard link, so the next call gets past the log (and fails only
+  // because this vork is missing).
+  assert.match(textOf(r), /not a plain file with one link, so it was removed\. Call the tool again/);
+  assert.equal(fs.existsSync(path.join(p, '.vork', 'server.log')), false, 'the FIFO is gone');
+  const r2 = (await mcpCall(p, { ...ENV, PATH: `${path.join(tmp, 'bin-novork')}${path.delimiter}${ENV.PATH}` })).result;
+  assert.equal(r2.isError, true, textOf(r2)); assert.match(textOf(r2), /exit 1/); assert.match(textOf(r2), /vork not found/);
+});
+
+await check('mcp.mts: server.log as a symlink or an empty folder is removed with the same instruction; the next call gets past it', async () => {
+  realDist();
+  const env = { ...ENV, PATH: `${path.join(tmp, 'bin-novork')}${path.delimiter}${ENV.PATH}` };
+  const target = path.join(tmp, 'symlink-target.txt'); fs.writeFileSync(target, 'target\n');
+  for (const [name, make] of [['symlink', (f: string) => fs.symlinkSync(target, f)], ['folder', (f: string) => fs.mkdirSync(f)]] as const) {
+    const p = path.join(tmp, `proj-log-${name}`); fs.mkdirSync(path.join(p, '.vork'), { recursive: true });
+    const log = path.join(p, '.vork', 'server.log'); make(log);
+    const r = (await mcpCall(p, env)).result;
+    assert.equal(r.isError, true, textOf(r));
+    assert.match(textOf(r), /not a plain file with one link, so it was removed\. Call the tool again/, `${name}: ${textOf(r)}`);
+    assert.equal(fs.lstatSync(log, { throwIfNoEntry: false }), undefined, `${name}: our name of it is gone`);
+    const r2 = (await mcpCall(p, env)).result;
+    assert.equal(r2.isError, true, textOf(r2)); assert.match(textOf(r2), /exit 1/, `${name}: ${textOf(r2)}`); assert.match(textOf(r2), /vork not found/);
+  }
+  assert.equal(fs.readFileSync(target, 'utf8'), 'target\n', 'the symlink target is untouched');
 });
 
 await check('the runs folder check ignores letter case on macOS and Windows (dist/ missing, DEV)', async () => {
@@ -220,10 +243,30 @@ await check('the runs folder may not be inside dist.tmp or dist.old either (the 
     const runs = path.join(T, d, 'x');
     try {
       const r = await director(['--port', String(await freePort())], { ...ENV, RENDER_DIRECTOR_RUNS: runs }, runs);
-      try { assert.equal(r.code, 2, r.stderr); assert.match(r.stderr, new RegExp(`is inside .*${d.replace('.', '\\.')}, which is served without a session`)); }
+      try {
+        assert.equal(r.code, 2, r.stderr);
+        // The risk is the next build, not serving: dist.tmp is emptied and becomes dist, dist.old is deleted.
+        assert.match(r.stderr, new RegExp(`is inside .*${d.replace('.', '\\.')}, which the next build (empties|deletes)`));
+        assert.doesNotMatch(r.stderr, /which is served without a session/);
+      }
       finally { await stop(r.proc); }
     } finally { fs.rmSync(path.join(T, d), { recursive: true, force: true }); }
   }
+});
+
+await check('RENDER_DIRECTOR_DEV=1: the runs folder may not be inside web/ or node_modules/ (vite dev serves them)', async () => {
+  realDist();
+  // node_modules/ in the copy is a symlink to the real one: the folder is not made there, the check runs before mkdir.
+  for (const d of ['web', 'node_modules']) {
+    const runs = path.join(T, d, 'rd-guard-runs');
+    const r = await director(['--port', String(await freePort())], { ...ENV, RENDER_DIRECTOR_RUNS: runs, RENDER_DIRECTOR_DEV: '1' }, runs);
+    try { assert.equal(r.code, 2, r.stderr); assert.match(r.stderr, new RegExp(`is inside .*${d}, which vite dev serves`)); assert.equal(fs.existsSync(runs), false); }
+    finally { await stop(r.proc); fs.rmSync(path.join(T, 'web', 'rd-guard-runs'), { recursive: true, force: true }); }
+  }
+  // Without DEV, web/ is not served: Director starts.
+  const runs = path.join(T, 'web', 'rd-guard-runs');
+  const r = await director(['--port', String(await freePort())], { ...ENV, RENDER_DIRECTOR_RUNS: runs }, runs);
+  try { assert.equal(r.code, null, r.stderr); } finally { await stop(r.proc); fs.rmSync(runs, { recursive: true, force: true }); }
 });
 
 await check('mcp.mts: a child that exits 3 (another Director holds the lock) is not a failure', async () => {

@@ -21,7 +21,8 @@ export async function main(argv: string[]) {
   const MODE = PROJECT ? 'ade' : 'standalone';
   const RUNS = PROJECT ? path.join(PROJECT, '.vork') : path.resolve(process.env.RENDER_DIRECTOR_RUNS || path.join(ROOT, 'runs'));
   const MODEL = process.env.DIRECTOR_MODEL || 'sonnet';
-  // Files under PUBLIC are served without a session, so RUNS (server.json, state.json) must not live there.
+  // Files under PUBLIC are served without a session, so RUNS (server.json, state.json) must not live there, nor where a
+  // build replaces it (see SERVED).
   // Checked before mkdir, on the real path of the nearest existing ancestor.
   // realpathSync.native returns the on-disk letter case, so PUBLIC/x is caught on case-insensitive file systems.
   const realish = (p: string): string => { let probe = p; while (!fs.existsSync(probe)) probe = path.dirname(probe); return path.join(fs.realpathSync.native(probe), path.relative(probe, p)); };
@@ -38,12 +39,20 @@ export async function main(argv: string[]) {
   // file systems of macOS and Windows the comparison ignores case. After mkdir RUNS exists and is checked again on its
   // real path, which also catches a folder swapped for a symlink in between.
   const fold = (p: string) => (process.platform === 'darwin' || process.platform === 'win32' ? p.toLowerCase() : p);
-  // dist.tmp becomes dist at the next build, and dist.old is dist between the two renames (scripts/swap-dist.mts).
-  const SERVED = [PUBLIC, path.join(ROOT, 'dist.tmp'), path.join(ROOT, 'dist.old')];
-  const servedBy = (runsReal: string) => SERVED.find((d) => { const r = fold(runsReal), pub = fold(realish(d)); return r === pub || r.startsWith(pub + path.sep); });
+  // Folders RUNS must not be inside, each with why. dist.tmp becomes dist at the next build, and dist.old is dist
+  // between the two renames (scripts/swap-dist.mts). Under RENDER_DIRECTOR_DEV, vite dev serves web/ and node_modules/.
+  const SERVED: [string, string][] = [
+    [PUBLIC, 'which is served without a session'],
+    [path.join(ROOT, 'dist.tmp'), 'which the next build empties and then serves as dist without a session'],
+    [path.join(ROOT, 'dist.old'), 'which the next build deletes'],
+    ...(process.env.RENDER_DIRECTOR_DEV === '1'
+      ? [[path.join(ROOT, 'web'), 'which vite dev serves without a session'], [path.join(ROOT, 'node_modules'), 'which vite dev serves without a session']] as [string, string][]
+      : []),
+  ];
+  const servedBy = (runsReal: string) => SERVED.find(([d]) => { const r = fold(runsReal), pub = fold(realish(d)); return r === pub || r.startsWith(pub + path.sep); });
   const checkRuns = (runsReal: string) => {
-    const d = servedBy(runsReal); if (!d) return;
-    console.error(`refusing to start: the runs folder ${RUNS} is inside ${d}, which is served without a session`); process.exit(2);
+    const hit = servedBy(runsReal); if (!hit) return;
+    console.error(`refusing to start: the runs folder ${RUNS} is inside ${hit[0]}, ${hit[1]}`); process.exit(2);
   };
   checkRuns(realish(RUNS));
   fs.mkdirSync(RUNS, { recursive: true });
