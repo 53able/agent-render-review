@@ -10,7 +10,7 @@ import {
 } from './policy.mts';
 import type { Profile, Scene, PolicyResult, Config, RenderInfo, AgentOutput, Proposal, VersionStatus, Version, AgentEvent, AgentEventBody, DirectorState, PagePreviewOk } from './policy.mts';
 import type { Renderer } from './vork.mts';
-import { log, errFields } from './log.mts';
+import { log, errFields, withJob } from './log.mts';
 
 export type RenderResult =
   | { ok: true; info: RenderInfo; cancelled?: undefined; code?: undefined; timedOut?: undefined; log?: undefined }
@@ -28,8 +28,9 @@ export interface Job {
 }
 /**
  * How a job ended, given to endJob. The caller has already written the job's last step, result and error.
- * err, render and refusal say why it failed (#81 logs them): the thrown value, the failed vork run, or a Refusal of
- * an awaited agent job.
+ * err and render say why it failed (#81 logs them in job.end): the thrown value or the failed vork run. refusal marks
+ * a failure that is the agent's, already answered or audited elsewhere: a Refusal of an awaited agent job, or a
+ * built-in proposal that failed (agent_error); it gets no job_failed audit.
  */
 export type JobOutcome =
   | { status: 'done' }
@@ -80,8 +81,9 @@ function auditLogFields(event: string, data: Record<string, unknown>): Record<st
   for (const [k, v] of Object.entries(data)) if (AUDIT_LOG_KEYS.has(k)) out[k] = v;
   if (typeof data.instruction === 'string') out.instructionLen = data.instruction.length;
   if (typeof data.reason === 'string' && AUDIT_SYSTEM_REASONS.has(data.reason)) out.reason = data.reason;
-  // kind here is the check result (blocked | invalid); as kind it would overwrite the job kind from withJob.
-  if (data.kind !== undefined) out.checkKind = data.kind;
+  // kind is the job kind in job_failed. Elsewhere (agent_proposal_rejected) it is the check result (blocked | invalid),
+  // and as kind it would overwrite the job kind from withJob.
+  if (data.kind !== undefined) out[event === 'job_failed' ? 'kind' : 'checkKind'] = data.kind;
   return out;
 }
 
@@ -159,14 +161,35 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     const prev = job.steps.at(-1); if (prev && prev.status === 'running') prev.status = 'done';
     job.steps.push({ label, status, detail, t: clock() - job.started });
   };
-  // The one place a job ends (#70). cancelled is what the cancel request does; it is not called for a finished job.
+  /**
+   * Runs a job's body with the job's keys on every event it logs (#81): jobId, kind and versionId, plus the reqId of
+   * the request that started it. job.start is its first event; newJob does not write it, so no start lacks an end.
+   */
+  const inJob = <T,>(job: Job, fn: () => T): T => withJob(job, () => {
+    L.info('job.start', 'Job started', { jobId: job.id, kind: job.kind, versionId: job.versionId });
+    return fn();
+  });
+  const ended = new WeakSet<Job>();
+  // The one place a job ends (#70), once. cancelled is what the cancel request does; it is not called for a finished job.
   const endJob = (job: Job, outcome: JobOutcome) => {
+    if (ended.has(job)) return;
+    ended.add(job);
     if (outcome.status === 'cancelled') {
       job.status = 'cancelled'; job.ac.abort(); step(job, 'Cancelled by director', 'failed'); audit('cancelled', { job: job.kind, version: job.versionId, jobId: job.id });
       for (const [rid, aj] of adoptionJobs) if (aj === job) adoptionJobs.delete(rid); // the request is pending again
-      return;
-    }
-    job.status = outcome.status;
+    } else job.status = outcome.status;
+    // The keys come from the job: cancelJob runs in the cancel request's context, not the job's.
+    const end = { jobId: job.id, kind: job.kind, versionId: job.versionId, status: outcome.status, ms: clock() - job.started };
+    if (outcome.status !== 'failed') { L.info('job.end', 'Job ended', end); return; }
+    const { err, render, refusal } = outcome;
+    // The built-in proposer's errors can quote the instruction (docs/logging.md section 6).
+    const cause: Record<string, unknown> = render ? { exitCode: render.code, timedOut: render.timedOut, vorkLogTail: render.log?.slice(-2000) }
+      : err !== undefined ? { ...errFields(err, { message: job.kind !== 'propose' }) } : {};
+    L.warn('job.end', 'Job failed', { ...end, ...cause });
+    if (refusal || jobs.get(job.id) !== job) return;
+    const failed: Record<string, unknown> = { jobId: job.id, kind: job.kind, version: job.versionId };
+    for (const k of ['errorType', 'exitCode', 'timedOut']) if (cause[k] !== undefined) failed[k] = cause[k];
+    audit('job_failed', failed);
   };
   const failedBy = (job: Job, e: Partial<Error> | null | undefined): JobOutcome => { job.error = String(e?.message || e); step(job, 'Failed', 'failed', job.error); return { status: 'failed', err: e }; };
   const failJob = (job: Job, e: Partial<Error> | null | undefined) => { if (job.status === 'cancelled') return; endJob(job, failedBy(job, e)); };
@@ -176,9 +199,9 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
    * cancelled meanwhile: cancelJob has already ended it.
    */
   function runJob<T>(job: Job, body: () => Promise<T>, end: (r: T) => JobOutcome, fail: (e: any) => JobOutcome = (e) => failedBy(job, e)) {
-    body()
+    inJob(job, () => body()
       .then((r) => { if (job.status === 'cancelled') return; endJob(job, end(r)); })
-      .catch((e) => { if (job.status === 'cancelled') return; endJob(job, fail(e)); });
+      .catch((e) => { if (job.status === 'cancelled') return; endJob(job, fail(e)); }));
   }
 
   // Renders of the same version are serialized: vork writes fixed output names per profile.
@@ -468,14 +491,21 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     if (b.responds_to != null && !Number.isInteger(b.responds_to)) throw new Refusal('invalid', 'responds_to must be an integer');
     const assumptions: string[] = (b.assumptions as string[] | null | undefined) ?? [];
     const respondsTo = (b.responds_to as number | null | undefined) ?? null;
+    const interpretation = b.interpretation, claimed = b.claimed_changes; // narrowed above; not inside the closure
     const job = newJob('agent-propose', baseId!, { listed: false });
-    const check = await validateScene(job, b.scene);
-    if (!check.ok) { audit('agent_proposal_rejected', { kind: check.kind, base: baseId }); throw new Refusal('unprocessable', check.kind === 'blocked' ? 'policy' : 'vork rejected the scene', { blockers: check.policy?.blockers || [], log: check.log || null, version: null }); }
-    // The human may have discarded the base during the validation render.
-    if (!liveV(baseId)) throw new Refusal('conflict', `base ${baseId} was discarded while the scene was being validated; no version was created`, { version: null });
-    const proposal: Proposal = { interpretation: b.interpretation, assumptions, claimed_changes: b.claimed_changes.map(({ node, what, why }) => ({ node, what, why })), policy: check.policy, context: respondsTo != null ? [`responds to feedback #${respondsTo}`] : [], via: 'mcp', respondsTo };
-    const { v, draft } = await createProposal(job, { baseId, scene: b.scene, instruction: b.interpretation, proposal });
-    return { v, draft, baseId: baseId!, flags: check.policy.flags };
+    // The agent gets the outcome as the HTTP answer; the job only records it (done, or failed as a refusal).
+    return inJob(job, async () => {
+      try {
+        const check = await validateScene(job, b.scene);
+        if (!check.ok) { audit('agent_proposal_rejected', { kind: check.kind, base: baseId }); throw new Refusal('unprocessable', check.kind === 'blocked' ? 'policy' : 'vork rejected the scene', { blockers: check.policy?.blockers || [], log: check.log || null, version: null }); }
+        // The human may have discarded the base during the validation render.
+        if (!liveV(baseId)) throw new Refusal('conflict', `base ${baseId} was discarded while the scene was being validated; no version was created`, { version: null });
+        const proposal: Proposal = { interpretation, assumptions, claimed_changes: claimed.map(({ node, what, why }) => ({ node, what, why })), policy: check.policy, context: respondsTo != null ? [`responds to feedback #${respondsTo}`] : [], via: 'mcp', respondsTo };
+        const { v, draft } = await createProposal(job, { baseId, scene: b.scene, instruction: interpretation, proposal });
+        endJob(job, { status: 'done' });
+        return { v, draft, baseId: baseId!, flags: check.policy.flags };
+      } catch (e) { endJob(job, { status: 'failed', err: e, refusal: true }); throw e; }
+    });
   }
 
   async function propose(job: Job, { baseId, instruction, selection, context }: {
@@ -530,8 +560,8 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     const job = newJob('propose', body.baseId);
     const instruction = body.instruction.trim();
     runJob(job, () => propose(job, { baseId: body.baseId, instruction, selection, context }),
-      (r) => { job.result = r; if (r && ['proposal', 'question'].includes(r.kind)) return { status: 'done' }; job.error = r?.kind || 'failed'; return { status: 'failed' }; },
-      (e) => { job.error = String(e.message || e); step(job, 'Agent call failed', 'failed', job.error); audit('agent_error', { error: job.error, jobId: job.id, errorType: errFields(e, { message: false }).errorType }); return { status: 'failed', err: e }; });
+      (r) => { job.result = r; if (r && ['proposal', 'question'].includes(r.kind)) return { status: 'done' }; job.error = r?.kind || 'failed'; return { status: 'failed', refusal: true }; },
+      (e) => { job.error = String(e.message || e); step(job, 'Agent call failed', 'failed', job.error); audit('agent_error', { error: job.error, jobId: job.id, errorType: errFields(e, { message: false }).errorType }); return { status: 'failed', err: e, refusal: true }; });
     return job;
   }
 
@@ -549,8 +579,16 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     if (!isProfile(profile)) throw new Refusal('invalid', 'profile must be previs, draft or final');
     if (!v.renders[profile]) {
       if (profile === 'final') throw new Refusal('forbidden', 'final renders need human approval in Director');
-      const r = await renderVersion(newJob('agent-render', v.id, { listed: false }), v, profile);
-      if (!r.ok) throw new Refusal('failed', `render failed: ${renderFailure(r, LIMITS[profile] / 1000)}`, { log: r.log });
+      const job = newJob('agent-render', v.id, { listed: false });
+      // As in agentPropose, the job only records the outcome the agent gets as the HTTP answer.
+      await inJob(job, async () => {
+        const r = await renderVersion(job, v, profile).catch((e) => { endJob(job, { status: 'failed', err: e, refusal: true }); throw e; });
+        if (!r.ok) {
+          endJob(job, { status: 'failed', render: { code: r.code, timedOut: r.timedOut, log: r.log }, refusal: true });
+          throw new Refusal('failed', `render failed: ${renderFailure(r, LIMITS[profile] / 1000)}`, { log: r.log });
+        }
+        endJob(job, { status: 'done' });
+      });
     }
     return { v, render: v.renders[profile]! };
   }
