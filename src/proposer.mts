@@ -25,7 +25,7 @@ Rules:
 - Never reference files, URLs or downloads. Do not add custom programs/shader code unless explicitly asked.
 - Unknown fields are errors in vork; use only fields documented below. Keep resolution unchanged unless asked.
 - If the request is ambiguous in a way that changes the result a lot, set clarifying_question and return the scene unchanged.
-- claimed_changes must describe every edit you made. The app compares them with the real diff and shows mismatches.
+- claimed_changes must describe every edit you made. The app compares them with the real diff and shows mismatches. For many nodes sharing a name prefix, one item with node "prefix*" covers all changed nodes starting with "prefix" (a bare "*" covers nothing).
 vork reference (from \`vork help\`, ${VORK_VERSION}):
 ${VORK_HELP}`;
 
