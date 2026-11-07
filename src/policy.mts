@@ -24,9 +24,11 @@ export interface AuditReport {
 }
 export interface Config { assetDir: string; pageUrl: string | null; assetUrlPattern: string | null }
 export interface Exposure { mean: number; clipped: number; near_black: number }
+/** An object of the scene as vork numbers it in the object index channel. */
+export interface RenderObject { pass_index: number; name: string }
 export interface RenderInfo {
   profile: Profile; seconds: number; width: number; height: number; image: string; ids: string;
-  file: string; sha256: string; idsSha256?: string; sceneHash: string | null; objects: unknown; exposure: Exposure;
+  file: string; sha256: string; idsSha256?: string; sceneHash: string | null; objects: RenderObject[]; exposure: Exposure;
   settings: { integrator: unknown; samples: number; denoiser: unknown }; warnings: string[];
 }
 export interface ClaimedChange { node: string; what: string; why: string }

@@ -10,6 +10,7 @@ import { spawn, execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { RenderSummary } from './src/contract.mts';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -57,8 +58,7 @@ async function call(method: string, route: string, body?: unknown) {
 const text = (t: unknown): TextContent => ({ type: 'text', text: typeof t === 'string' ? t : JSON.stringify(t, null, 2) });
 const image = (file: string): ImageContent => ({ type: 'image', data: fs.readFileSync(file).toString('base64'), mimeType: 'image/png' });
 const fail = (msg: string, extra?: unknown) => ({ isError: true, content: [text(extra ? `${msg}\n${JSON.stringify(extra, null, 2)}` : msg)] });
-interface RenderInfo { profile: string; seconds: number; width: number; height: number; exposure: { mean: number; clipped: number; near_black: number }; objects: string[]; warnings: string[]; file?: string }
-const renderText = (r: RenderInfo | null | undefined) => r && {
+const renderText = (r: RenderSummary | null | undefined) => r && {
   profile: r.profile, seconds: r.seconds, size: `${r.width}x${r.height}`,
   exposure: { mean: +r.exposure.mean.toFixed(3), clipped_pct: +(r.exposure.clipped * 100).toFixed(2), near_black_pct: +(r.exposure.near_black * 100).toFixed(2) },
   object_ids: r.objects, warnings: r.warnings,

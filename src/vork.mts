@@ -4,11 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { LIMITS, PROFILES } from './policy.mts';
-import type { Profile, Scene, Exposure, RenderInfo } from './policy.mts';
+import type { Profile, Scene, Exposure, RenderObject, RenderInfo } from './policy.mts';
 
 /** A finished render: dir/<profile>.png (file) and the object index of every pixel (ids, uint16 little endian). */
 export type RenderOutcome =
-  | { ok: true; file: string; seconds: number; width: number; height: number; ids: Buffer; objects: unknown; exposure: Exposure; settings: RenderInfo['settings']; warnings: string[] }
+  | { ok: true; file: string; seconds: number; width: number; height: number; ids: Buffer; objects: RenderObject[]; exposure: Exposure; settings: RenderInfo['settings']; warnings: string[] }
   | { ok: false; code: number | null; timedOut: boolean; log: string; seconds: number };
 export interface Renderer {
   /** Version string written into adoption manifests. */
@@ -44,7 +44,7 @@ export function vorkInstalled(): { help: string; version: string } | null {
 }
 
 // `<out>.meta.json` written by vork render
-interface VorkMeta { object_ids: unknown; exposure: Exposure; denoiser: unknown; settings: { integrator: unknown; samples: number } }
+interface VorkMeta { object_ids: RenderObject[]; exposure: Exposure; denoiser: unknown; settings: { integrator: unknown; samples: number } }
 
 // assetBase: the folder scene file references are relative to (the project, or scenes/ in standalone mode).
 export function createVorkRenderer({ assetBase, version }: { assetBase: string; version: string }): Renderer {

@@ -59,7 +59,7 @@ export interface DirectorOptions {
 export type Director = ReturnType<typeof createDirector>;
 
 export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter, proposer }: DirectorOptions) {
-  const MODE = PROJECT ? 'ade' : 'standalone';
+  const MODE: 'ade' | 'standalone' = PROJECT ? 'ade' : 'standalone';
 
   // project config
   const CONFIG_FILE = path.join(RUNS, 'config.json');
