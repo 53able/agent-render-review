@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vork Director</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="dot" aria-hidden="true"></span> vork Director</div>
+  <div class="meta" id="meta">loading…</div>
+</header>
+
+<main class="layout">
+  <!-- Versions -->
+  <aside class="panel versions" aria-labelledby="h-versions">
+    <h2 id="h-versions">Versions</h2>
+    <p class="hint">Every change is a version. Proposals stay separate until you accept them.</p>
+    <ol id="versionList" class="vlist"></ol>
+  </aside>
+
+  <!-- Viewport -->
+  <section class="stage" aria-labelledby="h-stage">
+    <h2 id="h-stage" class="sr-only">Render</h2>
+    <div class="stagebar">
+      <div class="seg" role="radiogroup" aria-label="Render quality shown">
+        <button role="radio" data-profile="draft" aria-checked="true">draft</button>
+        <button role="radio" data-profile="previs" aria-checked="false">previs</button>
+        <button role="radio" data-profile="final" aria-checked="false">final</button>
+      </div>
+      <label class="chk"><input type="checkbox" id="compareToggle"> Compare with parent</label>
+      <button type="button" id="pageBtn" class="ghost" aria-pressed="false" hidden>On page</button>
+      <span id="viewing" class="viewing"></span>
+      <div id="notice" class="notice" role="status" hidden></div>
+    </div>
+    <div class="viewport" id="viewport">
+      <canvas id="canvas" width="960" height="540" aria-label="Render. Hover to identify objects, click to select. Object list on the right offers the same selection by keyboard."></canvas>
+      <canvas id="overlay" width="960" height="540" aria-hidden="true"></canvas>
+      <div id="tip" class="tip" hidden></div>
+      <input type="range" id="wipe" min="0" max="100" value="50" aria-label="Compare wipe position" hidden>
+      <div id="empty" class="empty" hidden>No render at this quality yet.</div>
+    </div>
+    <dl class="measure" id="measure" aria-label="Measurements reported by vork"></dl>
+    <p class="hint">Numbers above come from vork's render metadata, not from the agent.</p>
+  </section>
+
+  <!-- Direction -->
+  <aside class="panel direct" aria-labelledby="h-direct">
+    <section aria-labelledby="h-objects">
+      <h2 id="h-objects">Objects</h2>
+      <ul id="objectList" class="olist"></ul>
+      <div id="quick" class="quick"></div>
+    </section>
+
+    <section id="adoptBox" class="adopt" hidden aria-labelledby="h-adopt">
+      <h2 id="h-adopt">Adoption requests</h2>
+      <ul id="adoptList" class="alist"></ul>
+    </section>
+
+    <section aria-labelledby="h-ask" class="ask">
+      <h2 id="h-ask">Direct the agent</h2>
+      <p id="adeHint" class="hint" hidden></p>
+      <form id="askForm">
+        <label for="instruction" class="sr-only">Instruction</label>
+        <textarea id="instruction" rows="3" placeholder="例: 選択した物体をマットな陶器にして、ライトを夕方の色に"></textarea>
+        <div class="starters" id="starters"></div>
+        <fieldset class="ctx">
+          <legend>Context sent with this request</legend>
+          <label class="chk always"><input type="checkbox" checked disabled> Current scene JSON (required)</label>
+          <label class="chk"><input type="checkbox" id="ctxSelection" checked> Selected objects <span id="selCount"></span></label>
+          <label class="chk"><input type="checkbox" id="ctxExposure" checked> Last exposure measurements</label>
+          <label class="chk"><input type="checkbox" id="ctxHistory"> Earlier requests in this branch</label>
+          <p class="hint">The image itself is not sent. The agent cannot run tools, read files or reach the network.</p>
+        </fieldset>
+        <button type="submit" id="askBtn" class="primary">Propose change</button>
+      </form>
+      <ol id="eventList" class="events" hidden aria-label="Messages to the agent"></ol>
+    </section>
+
+    <section id="jobBox" class="job" hidden aria-labelledby="h-job">
+      <h2 id="h-job">Working</h2>
+      <ol id="jobSteps" class="steps"></ol>
+      <div class="jobfoot"><span id="jobElapsed"></span><button id="cancelBtn" class="ghost">Cancel</button></div>
+    </section>
+
+    <section id="review" class="review" hidden aria-labelledby="h-review"></section>
+
+    <section class="final" aria-labelledby="h-final">
+      <h2 id="h-final">Final render</h2>
+      <p class="hint">Uses GPU time and writes a file. Requires approval for the exact scene shown.</p>
+      <button id="finalBtn" class="ghost">Plan final render…</button>
+    </section>
+
+    <details class="auditbox">
+      <summary>Audit log</summary>
+      <ol id="audit" class="audit"></ol>
+    </details>
+  </aside>
+</main>
+
+<dialog id="finalDlg" aria-labelledby="h-dlg">
+  <form method="dialog">
+    <h2 id="h-dlg">Approve final render?</h2>
+    <dl id="finalPlan" class="plan"></dl>
+    <div class="dlgbtns">
+      <button value="cancel" class="ghost" autofocus>Cancel</button>
+      <button value="approve" class="primary" id="approveBtn">Approve and render</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="adoptDlg" aria-labelledby="h-adlg">
+  <form method="dialog">
+    <h2 id="h-adlg">Write this image into the project?</h2>
+    <dl id="adoptPlan" class="plan"></dl>
+    <div class="dlgbtns">
+      <button value="cancel" class="ghost" autofocus>Cancel</button>
+      <button value="reject" class="ghost danger">Reject request</button>
+      <button value="approve" class="primary">Approve and write</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="live" class="sr-only" aria-live="polite"></div>
+<div id="alert" class="sr-only" role="alert"></div>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

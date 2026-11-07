@@ -1,0 +1,19 @@
+{"version":2,"nodes":[
+  {"type":"mesh","name":"pedestal","translation":[0,-0.35,0],"geometry":{"std":"rounded_box","size":[2.4,0.3,1.6],"radius":0.04},
+   "materials":[{"inputs":{"base_color":[0.45,0.43,0.4],"specular_roughness":0.55}}]},
+  {"type":"mesh","name":"vase","translation":[-0.55,-0.2,-0.1],
+   "geometry":{"std":"revolve","profile":[[0,0],[0.22,0],[0.3,0.25],[0.26,0.55],[0.13,0.8],[0.15,0.95],[0.13,0.95]],"segments":64},
+   "materials":[{"inputs":{"base_color":[0.75,0.32,0.18],"specular_roughness":0.25,"coat_weight":0.6}}]},
+  {"type":"mesh","name":"ring","translation":[0.45,0.08,0.15],"rotation":{"euler":[1.2,0,0.3]},
+   "geometry":{"std":"torus","radius":0.28,"tube":0.07},
+   "materials":[{"inputs":{"base_color":[0.95,0.72,0.35],"base_metalness":1,"specular_roughness":0.2}}]},
+  {"type":"mesh","name":"seed","translation":[0.45,-0.07,0.15],"geometry":{"std":"sphere","radius":0.13},
+   "materials":[{"inputs":{"base_color":[0.1,0.9,0.95],"emission_luminance":12,"emission_color":[0.2,0.95,1]}}]},
+  {"type":"mesh","name":"floor","translation":[0,-0.5,0],"geometry":{"std":"grid","size":[30,30]},
+   "materials":[{"inputs":{"base_color":[0.08,0.08,0.09],"specular_roughness":0.4}}]},
+  {"type":"mesh","name":"backdrop","translation":[0,2,-3],"geometry":{"std":"box","size":[30,6,0.1]},
+   "materials":[{"inputs":{"base_color":[0.18,0.2,0.24]}}]},
+  {"type":"light","name":"key","shape":"rectangle","translation":[-3,4,3],"target":[0,0,0],"energy":260,"size":3,"color":[1,0.9,0.78]},
+  {"type":"light","name":"rim","shape":"rectangle","translation":[3,2.5,-2],"target":[0,0,0],"energy":180,"size":2,"color":[0.6,0.75,1]},
+  {"type":"camera","name":"camera","translation":[0.5,1.5,5.4],"target":[0,0,0]}
+],"render":{"resolution":[960,540]}}

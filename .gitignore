@@ -1,0 +1,6 @@
+node_modules/
+runs/
+.omc/
+.vork/
+!examples/landing/public/vork/.gitkeep
+.DS_Store

@@ -1,0 +1,22 @@
+{
+  "name": "agent-render-review",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Review surface for ADE agents rendering with vork",
+  "scripts": {
+    "start": "node server.mjs",
+    "mcp": "node mcp.mjs",
+    "test": "node server.mjs --selftest && node test/integration.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "report": "node server.mjs --report"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "playwright-core": "^1.56.1",
+    "zod": "^4.6.7"
+  }
+}

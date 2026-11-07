@@ -1,0 +1,439 @@
+const $ = (s) => document.querySelector(s);
+const S = { data: null, viewId: null, profile: 'draft', selection: new Set(), hover: null, compare: false, job: null, ids: null, img: null, imgB: null, lastResult: null };
+
+const api = async (url, body) => {
+  const r = await fetch(url, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok && r.status !== 202) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+};
+const say = (msg) => { $('#live').textContent = ''; setTimeout(() => ($('#live').textContent = msg), 30); };
+const alertMsg = (msg) => { $('#alert').textContent = msg; };
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const V = (id) => S.data.versions.find((v) => v.id === id);
+const viewV = () => V(S.viewId);
+
+// linear <-> sRGB for colour pickers (vork colours are linear Rec.709)
+const toS = (c) => (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
+const toL = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+const linToHex = (rgb) => '#' + rgb.map((c) => Math.round(Math.min(1, Math.max(0, toS(c))) * 255).toString(16).padStart(2, '0')).join('');
+const hexToLin = (h) => [1, 3, 5].map((i) => +toL(parseInt(h.slice(i, i + 2), 16) / 255).toFixed(4));
+const isColor = (v) => Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === 'number' && n >= 0 && n <= 1.5);
+
+async function load(keepView = true) {
+  S.data = await api('/api/state');
+  if (!keepView || !V(S.viewId)) S.viewId = S.data.head;
+  S.sig = signature(S.data);
+  $('#meta').textContent = ADE()
+    ? `${S.data.vork} · ADE mode · project ${S.data.project} · proposals come from your agent via MCP · local only`
+    : `${S.data.vork} · agent: claude ${S.data.model} (no tools) · local only`;
+  applyMode(); renderVersions(); renderObjects(); renderReview(); renderAdoptions(); renderEvents(); renderAudit(); await drawViewport();
+}
+const ADE = () => S.data?.mode === 'ade';
+const signature = (d) => JSON.stringify([d.head, d.versions.length, d.versions.map((v) => v.status + Object.keys(v.renders).join()), d.adoptionRequests.map((a) => a.status), d.events.length, d.agentCursor]);
+
+// ---------- ADE mode ----------
+function applyMode() {
+  if (!ADE()) return;
+  $('#h-ask').textContent = 'Feedback to your agent';
+  $('#adeHint').hidden = false;
+  $('#adeHint').textContent = 'Your ADE agent writes the scenes. What you send here, with the selected objects and the version you are viewing, reaches it through wait_for_feedback.';
+  $('#starters').hidden = true; document.querySelector('.ctx').hidden = true;
+  $('#askBtn').textContent = 'Send to agent';
+  $('#instruction').placeholder = '例: 選択した物体をもっと小さく。見出しの右側に余白を残したい';
+  $('#pageBtn').hidden = false;
+}
+function renderEvents() {
+  const list = $('#eventList'); if (!ADE()) return;
+  const evs = S.data.events.filter((e) => ['feedback', 'decision', 'direct_edit', 'adopted', 'adoption_rejected'].includes(e.type)).slice(-6).reverse();
+  list.hidden = !evs.length;
+  list.innerHTML = evs.map((e) => {
+    const what = e.type === 'feedback' ? `${esc(e.comment)}${e.selection.length ? ` <span class="hint">[${e.selection.map(esc).join(', ')}]</span>` : ''}`
+      : e.type === 'decision' ? `${esc(e.decision)} ${esc(e.version)}` : e.type === 'adopted' ? `adopted → ${esc(e.asset)}`
+      : e.type === 'direct_edit' ? `edited ${esc(e.node)}.${esc(e.field)}` : `rejected adoption ${esc(e.request)}`;
+    const read = e.seq <= S.data.agentCursor;
+    return `<li>#${e.seq} ${esc(e.type)} · ${what} <span class="${read ? 'read' : 'unread'}">${read ? '· read by agent' : '· not read yet'}</span></li>`;
+  }).join('');
+}
+function renderAdoptions() {
+  const pending = (S.data.adoptionRequests || []).filter((a) => a.status === 'pending');
+  $('#adoptBox').hidden = !pending.length;
+  $('#adoptList').innerHTML = pending.map((a) => `<li><span><b>${esc(a.slug)}</b> from ${esc(a.version)}</span><button class="ghost" data-req="${esc(a.id)}">Review…</button><span class="why">${esc(a.reason)}</span></li>`).join('');
+  $('#adoptList').querySelectorAll('button').forEach((b) => (b.onclick = () => reviewAdoption(b.dataset.req)));
+}
+async function reviewAdoption(requestId) {
+  let plan;
+  try { plan = await api('/api/adopt/plan', { requestId }); } catch (e) { return alertMsg(`Cannot adopt: ${e.message}`); }
+  S.viewId = plan.versionId; renderVersions(); renderObjects(); renderReview(); await drawViewport();
+  const rows = [
+    ['version', `${plan.versionId} (${plan.versionStatus})${plan.acceptsProposal ? ' — approving also accepts this proposal as HEAD' : ''}`],
+    ['scene hash', plan.hash], ['agent says', plan.reason],
+    ['writes', plan.writes.join('\n') + (plan.overwrites ? '\n(replaces the existing image)' : '')],
+    ['final render', plan.needsFinalRender ? 'will run std/final first' : 'reuses the existing final render'],
+    ['approval valid', `${plan.expiresInSec / 60} min, this scene only`],
+  ];
+  $('#adoptPlan').innerHTML = rows.map(([k, x]) => `<dt>${k}</dt><dd style="white-space:pre-wrap">${esc(x)}</dd>`).join('');
+  const dlg = $('#adoptDlg'); dlg.returnValue = ''; dlg.showModal();
+  dlg.onclose = async () => {
+    if (dlg.returnValue === 'reject') { await api('/api/adopt/reject', { requestId }); say(`Rejected ${requestId}`); return load(); }
+    if (dlg.returnValue !== 'approve') return say('Nothing written');
+    try { const job = await api('/api/adopt', { ticket: plan.ticket }); trackJob(job, async (j) => { await load(); say(j.status === 'done' ? `Wrote ${j.result.asset}` : `Adoption failed: ${j.error}`); }); }
+    catch (e) { alertMsg(`Adoption refused: ${e.message}`); }
+  };
+}
+function notify(id) {
+  const n = $('#notice'); n.hidden = false;
+  n.innerHTML = `New proposal <b>${esc(id)}</b> from your agent <button type="button" class="ghost">View</button>`;
+  n.querySelector('button').onclick = async () => { n.hidden = true; S.viewId = id; renderVersions(); renderObjects(); renderReview(); await drawViewport(); };
+  say(`New proposal ${id} from your agent. Press View to open it.`);
+}
+// Agents act from outside the page: poll for new proposals, requests and reads.
+setInterval(async () => {
+  if (!S.data || S.job || document.visibilityState !== 'visible' || document.querySelector('dialog[open]')) return;
+  const d = await api('/api/state').catch(() => null);
+  if (d && signature(d) !== S.sig) {
+    const fresh = d.versions.filter((v) => !V(v.id) && v.origin === 'agent');
+    await load(); // keeps the version you are viewing; never switches under your cursor
+    if (fresh.length) notify(fresh.at(-1).id);
+  }
+}, 2500);
+
+// ---------- versions ----------
+function depth(v) { let d = 0, p = v; while (p?.parent && d < 3) { const parent = V(p.parent); if (parent && S.data.versions.filter((x) => x.parent === parent.id && x.status !== 'discarded').length > 1) d++; p = parent; } return d; }
+function renderVersions() {
+  const list = $('#versionList'); list.innerHTML = '';
+  for (const v of [...S.data.versions].reverse()) {
+    const li = document.createElement('li'); li.className = `st-${v.status} indent-${depth(v)}`;
+    const title = v.origin === 'starter' ? 'Starter scene' : v.instruction;
+    li.innerHTML = `<button aria-current="${v.id === S.viewId}" data-id="${v.id}">
+      <span class="vid">${v.id}${v.parent ? ` ← ${v.parent}` : ''} ${v.id === S.data.head ? '<span class="headmark">● HEAD</span>' : ''}</span>
+      <span class="badge ${v.origin}">${v.origin}</span>
+      <span class="vtitle">${esc(title)}</span></button>`;
+    li.querySelector('button').onclick = () => { S.viewId = v.id; renderVersions(); renderObjects(); renderReview(); drawViewport(); say(`Viewing ${v.id}, ${v.status}`); };
+    list.append(li);
+  }
+}
+
+// ---------- viewport ----------
+const cv = $('#canvas'), ov = $('#overlay'), ctx = cv.getContext('2d'), octx = ov.getContext('2d');
+const loadImg = (src) => new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = src; });
+
+async function drawViewport() {
+  if (S.onPage) return drawPage();
+  const v = viewV(); const r = v.renders[S.profile];
+  delete cv.dataset.ready; // clicks are ignored until this view's object ids are loaded
+  $('#viewing').textContent = `${v.id} · ${v.status}${v.status === 'accepted' && v.id !== S.data.head ? ' (not head)' : ''} · scene ${v.hash}`;
+  $('#empty').hidden = !!r;
+  renderMeasure(r);
+  if (!r) { ctx.clearRect(0, 0, cv.width, cv.height); octx.clearRect(0, 0, ov.width, ov.height); S.ids = null; return; }
+  S.img = await loadImg(r.image);
+  const p = v.parent && V(v.parent); const pr = p?.renders[S.profile];
+  S.imgB = S.compare && pr ? await loadImg(pr.image) : null;
+  $('#wipe').hidden = !S.imgB;
+  const buf = await (await fetch(r.ids)).arrayBuffer();
+  S.ids = { w: r.width, h: r.height, arr: new Uint16Array(buf), objects: Object.fromEntries(r.objects.map((o) => [o.pass_index, o.name])) };
+  for (const c of [cv, ov]) { c.width = r.width; c.height = r.height; }
+  $('#viewport').style.aspectRatio = `${r.width} / ${r.height}`;
+  paint();
+  cv.dataset.ready = `${v.id}:${S.profile}`;
+}
+// The real page with the candidate substituted (server-side headless Chrome; project files untouched).
+async function drawPage() {
+  delete cv.dataset.ready;
+  const v = viewV(); const prof = v.renders[S.profile] ? S.profile : 'draft';
+  $('#viewing').textContent = `${v.id} · on page · ${S.data.config.pageUrl || 'no pageUrl'}`;
+  octx.clearRect(0, 0, ov.width, ov.height); S.ids = null; $('#wipe').hidden = true;
+  let pv = v.pagePreviews?.[prof];
+  if (!pv) {
+    $('#empty').hidden = false; $('#empty').textContent = 'Opening the page with this candidate…';
+    pv = await api('/api/preview', { versionId: v.id, profile: prof }).catch((e) => ({ ok: false, reason: e.message }));
+    if (pv.ok) (v.pagePreviews ||= {})[prof] = pv;
+  }
+  if (!pv.ok) { $('#empty').textContent = `Page preview unavailable: ${pv.reason}. Showing render only.`; S.onPage = false; $('#pageBtn').setAttribute('aria-pressed', 'false'); alertMsg(`Page preview unavailable: ${pv.reason}`); setTimeout(() => { $('#empty').textContent = 'No render at this quality yet.'; drawViewport(); }, 2500); return; }
+  $('#empty').hidden = true; $('#empty').textContent = 'No render at this quality yet.';
+  const img = await loadImg(pv.image);
+  for (const c of [cv, ov]) { c.width = img.width; c.height = img.height; }
+  $('#viewport').style.aspectRatio = `${img.width} / ${img.height}`;
+  ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0);
+  $('#measure').innerHTML = `<div><dt>page</dt><dd>${esc(S.data.config.pageUrl)}</dd></div><div><dt>substituted requests</dt><dd class="${pv.matched ? '' : 'warn'}">${pv.matched}</dd></div>` + (pv.warning ? `<div><dd class="warn">${esc(pv.warning)}</dd></div>` : '');
+  if (pv.warning) say(pv.warning);
+}
+$('#pageBtn').addEventListener('click', () => {
+  S.onPage = !S.onPage; $('#pageBtn').setAttribute('aria-pressed', String(S.onPage)); drawViewport();
+});
+
+function paint() {
+  ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(S.img, 0, 0);
+  if (S.imgB) {
+    const x = Math.round(cv.width * $('#wipe').value / 100);
+    ctx.drawImage(S.imgB, 0, 0, x, cv.height, 0, 0, x, cv.height);
+    ctx.fillStyle = '#3ee6f0'; ctx.fillRect(x - 1, 0, 2, cv.height);
+    ctx.font = '600 14px system-ui'; ctx.fillStyle = '#fff';
+    ctx.fillText(`◀ ${viewV().parent}`, 10, 22); ctx.fillText(`${viewV().id} ▶`, cv.width - 70, 22);
+  }
+  paintOverlay();
+}
+function paintOverlay() {
+  octx.clearRect(0, 0, ov.width, ov.height); if (!S.ids) return;
+  const { w, h, arr, objects } = S.ids; const img = octx.createImageData(w, h); const d = img.data;
+  for (let i = 0; i < arr.length; i++) {
+    const name = objects[arr[i]]; if (!name) continue;
+    const sel = S.selection.has(name), hov = name === S.hover;
+    if (!sel && !hov) continue;
+    // edge test: draw a solid outline plus a light fill
+    const x = i % w, y = (i / w) | 0;
+    const edge = x === 0 || y === 0 || x === w - 1 || y === h - 1 || arr[i - 1] !== arr[i] || arr[i + 1] !== arr[i] || arr[i - w] !== arr[i] || arr[i + w] !== arr[i];
+    const o = i * 4;
+    if (sel) { d[o] = 62; d[o + 1] = 230; d[o + 2] = 240; d[o + 3] = edge ? 255 : 46; }
+    else { d[o] = 255; d[o + 1] = 255; d[o + 2] = 255; d[o + 3] = edge ? 200 : 22; }
+  }
+  octx.putImageData(img, 0, 0);
+}
+function pick(ev) {
+  if (!S.ids) return null;
+  const rect = cv.getBoundingClientRect();
+  const x = Math.floor((ev.clientX - rect.left) / rect.width * S.ids.w), y = Math.floor((ev.clientY - rect.top) / rect.height * S.ids.h);
+  return S.ids.objects[S.ids.arr[y * S.ids.w + x]] || null;
+}
+cv.addEventListener('mousemove', (ev) => {
+  const n = pick(ev); const tip = $('#tip');
+  if (n !== S.hover) { S.hover = n; paintOverlay(); }
+  tip.hidden = !n; if (n) { const r = $('#viewport').getBoundingClientRect(); tip.style.left = `${ev.clientX - r.left}px`; tip.style.top = `${ev.clientY - r.top}px`; tip.textContent = n + (S.selection.has(n) ? ' · selected' : ' · click to select'); }
+});
+cv.addEventListener('mouseleave', () => { S.hover = null; $('#tip').hidden = true; paintOverlay(); });
+cv.addEventListener('click', (ev) => { if (!cv.dataset.ready) return; const n = pick(ev); if (!n) { S.selection.clear(); } else toggleSel(n, ev.shiftKey || ev.metaKey); });
+$('#wipe').addEventListener('input', paint);
+$('#compareToggle').addEventListener('change', (e) => { S.compare = e.target.checked; drawViewport(); });
+document.querySelectorAll('.seg button').forEach((b) => b.addEventListener('click', () => {
+  S.profile = b.dataset.profile; document.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-checked', x === b)); drawViewport();
+}));
+
+function toggleSel(name, additive) {
+  if (additive) S.selection.has(name) ? S.selection.delete(name) : S.selection.add(name);
+  else { const only = S.selection.size === 1 && S.selection.has(name); S.selection.clear(); if (!only) S.selection.add(name); }
+  renderObjects(); paintOverlay(); say(S.selection.size ? `Selected: ${[...S.selection].join(', ')}` : 'Selection cleared');
+}
+
+function renderMeasure(r) {
+  const m = $('#measure');
+  if (!r) { m.innerHTML = ''; return; }
+  const e = r.exposure; const pct = (x) => `${(x * 100).toFixed(1)}%`;
+  m.innerHTML = [
+    ['render', `${r.profile} · ${r.seconds.toFixed(2)}s`], ['integrator', `${r.settings.integrator} · ${r.settings.samples} spp`],
+    ['mean', e.mean.toFixed(3)], ['clipped', pct(e.clipped), e.clipped > 0.01], ['near-black', pct(e.near_black), e.near_black > 0.05],
+    ['warnings', r.warnings.length, r.warnings.length > 0],
+  ].map(([k, v, w]) => `<div><dt>${k}</dt><dd class="${w ? 'warn' : ''}">${esc(v)}</dd></div>`).join('');
+}
+
+// ---------- objects & direct manipulation ----------
+function renderObjects() {
+  const scene = viewV().scene; const list = $('#objectList'); list.innerHTML = '';
+  for (const n of scene.nodes.filter((n) => n.name)) {
+    const li = document.createElement('li'); const sel = S.selection.has(n.name);
+    li.innerHTML = `<label class="${sel ? 'sel' : ''}"><input type="checkbox" ${sel ? 'checked' : ''}> ${esc(n.name)} <span class="kind">${esc(n.type)}${n.type === 'light' ? ' ' + esc(n.shape) : ''}</span></label>`;
+    li.querySelector('input').onchange = () => toggleSel(n.name, true);
+    list.append(li);
+  }
+  for (const s of [...S.selection]) if (!scene.nodes.some((n) => n.name === s)) S.selection.delete(s);
+  $('#selCount').textContent = S.selection.size ? `(${[...S.selection].join(', ')})` : '(none)';
+  renderQuick(scene);
+}
+function renderQuick(scene) {
+  const q = $('#quick'); q.innerHTML = '';
+  if (viewV().status !== 'accepted') { q.innerHTML = '<p class="hint">Direct edits start from an accepted version. Accept this proposal or open HEAD.</p>'; return; }
+  if (S.selection.size !== 1) { q.innerHTML = S.selection.size ? '' : '<p class="hint">Select one object to edit it directly, without the agent.</p>'; return; }
+  const n = scene.nodes.find((x) => x.name === [...S.selection][0]); if (!n) return;
+  const rows = [];
+  if (n.type === 'mesh') {
+    const inp = n.materials?.[0]?.inputs || {};
+    if (isColor(inp.base_color) || inp.base_color === undefined) rows.push(['base_color', 'Base colour', 'color', inp.base_color || [0.8, 0.8, 0.8]]);
+    rows.push(['specular_roughness', 'Roughness', 'range', inp.specular_roughness ?? 0.5, 0, 1, 0.01]);
+    rows.push(['emission_luminance', 'Emission (nits)', 'range', inp.emission_luminance ?? 0, 0, 100, 1]);
+  } else if (n.type === 'light') {
+    rows.push(['energy', n.shape === 'sun' ? 'Energy (W/m²)' : 'Energy (W)', 'range', n.energy ?? 100, 0, 3000, 10]);
+    if (isColor(n.color)) rows.push(['color', 'Colour', 'color', n.color]);
+  }
+  if (!rows.length) { q.innerHTML = '<p class="hint">No direct controls for this object type. Ask the agent instead.</p>'; return; }
+  q.insertAdjacentHTML('beforeend', `<p class="hint">Direct edit of <b>${esc(n.name)}</b> creates a new human version from ${viewV().id}. Changes apply on release.</p>`);
+  for (const [field, label, kind, val, min, max, stepv] of rows) {
+    const row = document.createElement('label'); row.className = 'row';
+    row.innerHTML = kind === 'color'
+      ? `<span>${label}</span><input type="color" value="${linToHex(val)}"><output>${val.map((c) => c.toFixed(2)).join(',')}</output>`
+      : `<span>${label}</span><input type="range" min="${min}" max="${max}" step="${stepv}" value="${esc(Number(val))}"><output>${esc(Number(val))}</output>`;
+    const input = row.querySelector('input'), out = row.querySelector('output');
+    input.addEventListener('input', () => (out.textContent = kind === 'color' ? hexToLin(input.value).map((c) => c.toFixed(2)).join(',') : input.value));
+    input.addEventListener('change', () => directEdit(n.name, field, kind === 'color' ? hexToLin(input.value) : Number(input.value)));
+    q.append(row);
+  }
+}
+async function directEdit(node, field, value) {
+  if (S.job || S.editing) return alertMsg('Wait for the current job to finish or cancel it.');
+  S.editing = true; // set synchronously so a second change event cannot fork a duplicate version
+  try {
+    const r = await api('/api/edit', { baseId: S.viewId, node, field, value });
+    S.viewId = r.version; await load(); say(`Created ${r.version}`);
+    trackJob(r.job, () => load());
+  } catch (e) { alertMsg(`Edit failed: ${e.message}`); }
+  finally { S.editing = false; }
+}
+
+// ---------- ask the agent ----------
+const STARTERS = [
+  '夜のシーンにして、seedの光だけで部屋を照らす',
+  '選択した物体をマットな陶器に変える',
+  'カメラを低くして見上げる構図にする',
+  'rimライトを強めて輪郭を際立たせる',
+];
+$('#starters').innerHTML = STARTERS.map((s) => `<button type="button">${esc(s)}</button>`).join('');
+$('#starters').querySelectorAll('button').forEach((b) => (b.onclick = () => { $('#instruction').value = b.textContent; $('#instruction').focus(); }));
+
+$('#askForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const instruction = $('#instruction').value.trim(); if (!instruction) return $('#instruction').focus();
+  if (ADE()) {
+    try { await api('/api/feedback', { versionId: S.viewId, selection: [...S.selection], comment: instruction }); $('#instruction').value = ''; say('Sent to your agent'); await load(); }
+    catch (err) { alertMsg(`Could not send: ${err.message}`); }
+    return;
+  }
+  if (S.job) return alertMsg('A job is already running.');
+  const v = viewV(); const baseId = v.status === 'discarded' ? S.data.head : v.id;
+  try {
+    const job = await api('/api/propose', {
+      baseId, instruction, selection: [...S.selection],
+      context: { selection: $('#ctxSelection').checked, exposure: $('#ctxExposure').checked, history: $('#ctxHistory').checked },
+    });
+    say(`Proposal requested from ${baseId}`);
+    trackJob(job, async (j) => {
+      S.lastResult = j;
+      await load();
+      if (j.status === 'done' && j.result?.kind === 'proposal') { S.viewId = j.result.versionId; renderVersions(); renderObjects(); await drawViewport(); }
+      renderReview();
+    });
+  } catch (err) { alertMsg(`Could not start: ${err.message}`); }
+});
+
+// ---------- jobs ----------
+function trackJob(job, onEnd) {
+  S.job = job; $('#jobBox').hidden = false; $('#askBtn').disabled = true; $('#finalBtn').disabled = true;
+  let lastCount = 0;
+  const tick = async () => {
+    const j = await api(`/api/jobs/${job.id}`).catch(() => null); if (!j) return;
+    $('#jobSteps').innerHTML = j.steps.map((s) => `<li class="${s.status}"><span class="ic" aria-hidden="true"></span><span>${esc(s.label)}</span><span class="t">${(s.t / 1000).toFixed(1)}s</span>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ''}</li>`).join('');
+    $('#jobElapsed').textContent = `elapsed ${(j.elapsed / 1000).toFixed(0)}s (no ETA: agent and GPU time vary)`;
+    if (j.steps.length !== lastCount) { lastCount = j.steps.length; say(j.steps.at(-1)?.label || ''); }
+    if (j.status === 'running') return setTimeout(tick, 500);
+    S.job = null; $('#askBtn').disabled = false; $('#finalBtn').disabled = false; $('#cancelBtn').hidden = true;
+    say(j.status === 'done' ? 'Finished' : `Stopped: ${j.error || j.status}`);
+    await onEnd?.(j);
+    setTimeout(() => { if (!S.job) $('#jobBox').hidden = j.status !== 'done' ? false : true; }, j.status === 'done' ? 1500 : 0);
+  };
+  $('#cancelBtn').hidden = false; $('#cancelBtn').onclick = () => api(`/api/jobs/${job.id}/cancel`, {});
+  tick();
+}
+
+// ---------- review ----------
+function fmt(v) {
+  if (v === undefined) return '<span class="hint">—</span>';
+  const s = esc(JSON.stringify(v));
+  return isColor(v) ? `<span class="swatch" style="background:${linToHex(v)}"></span>${s}` : s;
+}
+function renderReview() {
+  const box = $('#review'); const v = viewV(); const r = S.lastResult;
+  // failure / question states from the last agent job (not tied to a version)
+  if (r && r.result && ['question', 'blocked', 'invalid'].includes(r.result.kind) && r.versionId === S.viewId) {
+    const p = r.result.proposal || {};
+    box.hidden = false;
+    box.innerHTML = r.result.kind === 'question'
+      ? `<h3>Agent asks before changing anything</h3><p class="interp">${esc(p.clarifying_question)}</p><p class="hint">Your request is kept in the box below. Add the missing detail and propose again.</p>`
+      : `<h3 class="flag bad">No version was created</h3><p>${r.result.kind === 'blocked' ? 'The proposal broke a project rule enforced outside the model:' : 'vork rejected the scene twice. Last error:'}</p>
+         <pre class="hint" style="white-space:pre-wrap">${esc(r.result.kind === 'blocked' ? r.result.policy.blockers.join('\n') : r.result.log?.slice(-800))}</pre>
+         <p class="hint">Your request is kept. Try rephrasing, narrowing the selection, or edit directly.</p>`;
+    box.insertAdjacentHTML('beforeend', `<div class="btnrow"><button class="ghost" id="dismiss">Dismiss</button></div>`);
+    $('#dismiss').onclick = () => { S.lastResult = null; renderReview(); };
+    return;
+  }
+  if (v.origin !== 'agent') { box.hidden = true; return; }
+  const p = v.proposal; const claimedNodes = new Set(p.claimed_changes.map((c) => c.node));
+  // scene-level keys (render, animation, …) appear in the diff as "(scene)" with the key as path head
+  const keyOf = (d) => (d.node === '(scene)' ? d.path.split(/[.[]/)[0] : d.node);
+  const isClaimed = (d) => claimedNodes.has(d.node) || claimedNodes.has(keyOf(d)) || (d.node === '(scene)' && claimedNodes.has('scene'));
+  const changedKeys = new Set(v.diff.map(keyOf));
+  const ghost = [...claimedNodes].filter((n) => !changedKeys.has(n) && !(n === 'scene' && v.diff.some((d) => d.node === '(scene)')));
+  box.hidden = false;
+  box.style.borderColor = v.status === 'proposed' ? 'var(--warn)' : 'var(--line)';
+  box.innerHTML = `
+    <h3>${v.status === 'proposed' ? 'Proposal — not applied yet' : v.status === 'accepted' ? 'Accepted proposal' : 'Discarded proposal'} · ${v.id} from ${v.parent}</h3>
+    ${V(v.parent)?.status !== 'accepted' ? `<p class="flag">⚠ Built on ${esc(v.parent)}, which is ${esc(V(v.parent)?.status)}. Accepting this also accepts that version's changes (not shown in this diff).</p>` : ''}
+    <div><h3>Request</h3>${esc(v.instruction)}</div>
+    <div><h3>Agent's reading</h3><p class="interp">${esc(p.interpretation)}</p>
+      ${p.assumptions.length ? `<ul>${p.assumptions.map((a) => `<li>${esc(a)}</li>`).join('')}</ul>` : ''}</div>
+    <div><h3>What the agent says it changed</h3><ul>${p.claimed_changes.map((c) => `<li><b>${esc(c.node)}</b>: ${esc(c.what)} <span class="hint">— ${esc(c.why)}</span></li>`).join('')}</ul></div>
+    <div><h3>What actually changed (computed from the scene)</h3>
+      <table class="difftable"><thead><tr><th>node.field</th><th>before</th><th>after</th></tr></thead><tbody>
+      ${v.diff.map((d) => `<tr class="${isClaimed(d) ? '' : 'unclaimed'}"><td>${esc(d.node)}${d.path ? '.' + esc(d.path) : ''}</td><td>${fmt(d.before)}</td><td>${fmt(d.after)}</td></tr>`).join('') || '<tr><td colspan="3">No changes</td></tr>'}
+      </tbody></table>
+      ${ghost.length ? `<p class="flag">⚠ Claimed but not changed: ${ghost.map(esc).join(', ')}</p>` : ''}</div>
+    ${p.policy.flags.length ? `<div><h3>Needs attention</h3><ul>${p.policy.flags.map((f) => `<li class="flag">${f.level}: ${esc(f.msg)}</li>`).join('')}</ul></div>` : ''}
+    <details><summary class="hint">Context that was sent</summary><pre class="hint" style="white-space:pre-wrap">${esc(p.context.join('\n\n') || 'scene only')}</pre></details>
+    <p class="hint">${p.via === 'mcp' ? 'Proposed by your ADE agent via MCP' : `Agent cost ${p.cost ? '$' + p.cost.toFixed(3) : 'n/a'}`}. Judge the image, not the explanation.</p>
+    ${v.status === 'proposed' ? `<div class="btnrow">
+      <button class="primary" id="acceptBtn">Accept as new HEAD</button>
+      <button class="ghost" id="refineBtn">Refine from this</button>
+      <button class="ghost danger" id="discardBtn">Discard</button></div>` : ''}`;
+  if (v.status !== 'proposed') return;
+  $('#acceptBtn').onclick = () => decide('accept');
+  $('#discardBtn').onclick = () => decide('discard');
+  $('#refineBtn').onclick = () => { $('#instruction').value = ''; $('#instruction').placeholder = `Refine ${v.id}: what should differ?`; $('#instruction').focus(); };
+}
+async function decide(decision) {
+  const id = S.viewId;
+  await api('/api/decide', { versionId: id, decision });
+  if (decision === 'discard') S.viewId = V(id).parent;
+  $('#instruction').value = '';
+  await load(); say(decision === 'accept' ? `${id} is now HEAD` : `${id} discarded`);
+}
+
+// ---------- final render ----------
+$('#finalBtn').addEventListener('click', async () => {
+  const v = viewV();
+  if (v.status === 'discarded') return alertMsg('Discarded versions cannot be rendered at final quality.');
+  const plan = await api('/api/final/plan', { versionId: v.id });
+  const rows = [
+    ['version', `${plan.versionId}${v.status === 'proposed' ? ' (unaccepted proposal)' : ''}`], ['scene hash', plan.hash], ['profile', plan.profile],
+    ['resolution', plan.resolution.join(' × ')], ['writes', plan.output + (plan.overwrites ? ' (replaces previous final)' : '')],
+    ['time', `not predicted · ${plan.reference} · hard stop at ${plan.timeoutSec}s`], ['approval valid', `${plan.expiresInSec / 60} min, this scene only`],
+  ];
+  $('#finalPlan').innerHTML = rows.map(([k, x]) => `<dt>${k}</dt><dd>${esc(x)}</dd>`).join('') +
+    (plan.flags.length ? `<dt class="flag">attention</dt><dd>${plan.flags.map((f) => esc(f.msg)).join('<br>')}</dd>` : '');
+  const dlg = $('#finalDlg'); dlg.returnValue = ''; dlg.showModal();
+  dlg.onclose = async () => {
+    if (dlg.returnValue !== 'approve') { say('Final render not started'); return; }
+    try {
+      const job = await api('/api/render', { versionId: v.id, profile: 'final', ticket: plan.ticket });
+      trackJob(job, async (j) => { await load(); if (j.status === 'done') { document.querySelector('[data-profile="final"]').click(); } });
+    } catch (e) { alertMsg(`Final render refused: ${e.message}`); }
+  };
+});
+
+function renderAudit() {
+  $('#audit').innerHTML = [...S.data.audit].reverse().map((a) => `<li>${a.t.slice(11, 19)} ${esc(a.event)} ${esc(a.version || '')} ${a.instruction ? '· ' + esc(a.instruction).slice(0, 40) : ''}</li>`).join('');
+}
+
+// ---------- boot ----------
+// Pair this tab with Director using the one-time link Director opened, then drop the token from the URL.
+const pairMatch = location.hash.match(/^#pair=([0-9a-f]+)$/);
+if (pairMatch) {
+  await fetch('/api/pair', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: pairMatch[1] }) });
+  history.replaceState(null, '', location.pathname);
+}
+try { await load(false); }
+catch (e) {
+  document.querySelector('main').innerHTML = `<section class="unpaired" role="alert"><h2>This tab is not paired with Director</h2>
+    <p>Director opens a paired tab by itself when it starts. Ask your agent to call <code>open_review_tab</code>, or run <code>node server.mjs</code> in a terminal and open the one-time link it prints.</p>
+    <p class="hint">${esc(e.message)}</p></section>`;
+  throw e;
+}
+if (!viewV().renders.draft) {
+  const job = await api('/api/render', { versionId: S.viewId, profile: 'draft' });
+  trackJob(job, async () => { const j2 = await api('/api/render', { versionId: S.viewId, profile: 'previs' }); trackJob(j2, () => load()); });
+}
