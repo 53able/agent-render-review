@@ -577,7 +577,16 @@ ${VORK_HELP}`;
 
   // ---------- approval tickets (final render, adoption) bound to an exact scene hash ----------
   const tickets = new Map<string, Ticket>();
-  const issueTicket = (data: TicketData) => { const id = crypto.randomUUID(); tickets.set(id, { ...data, expires: Date.now() + 10 * 60_000 }); return id; };
+  const issueTicket = (data: TicketData) => {
+    // A new adoption plan replaces the older ones for the same request, so two tickets cannot both adopt it.
+    if (data.kind === 'adopt') for (const [id, t] of tickets) if (t.kind === 'adopt' && t.requestId === data.requestId) tickets.delete(id);
+    const id = crypto.randomUUID(); tickets.set(id, { ...data, expires: Date.now() + 10 * 60_000 }); return id;
+  };
+  // Adoption requests whose adopt job is running. Kept in memory only: a job does not survive a restart,
+  // so after one the request is simply pending again. While a job runs, plan, reject and discard answer 409.
+  const adoptionJobs = new Map<string, Job>();
+  const adoptingVersion = (versionId: string) => [...adoptionJobs.keys()].some((rid) => state.adoptionRequests.find((a) => a.id === rid)?.version === versionId);
+  const ADOPTION_RUNNING = 'an adoption of this request is running; cancel its job first';
   const finalMatches = (v: Version, hash: string) => {
     const f = v.renders.final; if (!f || f.sceneHash !== hash || !fs.existsSync(f.file)) return false;
     return sha256(fs.readFileSync(f.file)) === f.sha256;
@@ -783,7 +792,7 @@ ${VORK_HELP}`;
         return send(res, 200, {
           mode: MODE, project: PROJECT, config: readConfig(), head: state.head, vork: VORK_VERSION, model: MODEL,
           versions: state.versions.map(versionView), audit: state.audit.slice(-60),
-          adoptionRequests: state.adoptionRequests, events: state.events.slice(-30), agentCursor: state.agentCursor,
+          adoptionRequests: state.adoptionRequests.map((a) => (adoptionJobs.has(a.id) ? { ...a, status: 'adopting' } : a)), events: state.events.slice(-30), agentCursor: state.agentCursor,
         });
 
       if (req.method === 'GET' && url.pathname.startsWith('/api/jobs/')) {
@@ -791,7 +800,10 @@ ${VORK_HELP}`;
       }
       if (req.method === 'POST' && url.pathname.match(/^\/api\/jobs\/[^/]+\/cancel$/)) {
         const j = jobs.get(url.pathname.split('/')[3]); if (!j) return send(res, 404, { error: 'no job' });
-        if (j.status === 'running') { j.status = 'cancelled'; j.child?.kill('SIGTERM'); step(j, 'Cancelled by director', 'failed'); audit('cancelled', { job: j.kind, version: j.versionId }); }
+        if (j.status === 'running') {
+          j.status = 'cancelled'; j.child?.kill('SIGTERM'); step(j, 'Cancelled by director', 'failed'); audit('cancelled', { job: j.kind, version: j.versionId });
+          for (const [rid, aj] of adoptionJobs) if (aj === j) adoptionJobs.delete(rid); // the request is pending again
+        }
         return send(res, 200, publicJob(j));
       }
 
@@ -856,6 +868,7 @@ ${VORK_HELP}`;
       if (req.method === 'POST' && url.pathname === '/api/decide') {
         const { versionId, decision, comment } = await readBody<{ versionId: string; decision: string; comment?: unknown }>(req); const v = getV(versionId);
         if (!v || v.status !== 'proposed' || !['accept', 'discard'].includes(decision)) return send(res, 400, { error: 'only proposed versions can be decided' });
+        if (decision === 'discard' && adoptingVersion(v.id)) return send(res, 409, { error: 'this version is being adopted; cancel the adoption job first' });
         v.status = decision === 'accept' ? 'accepted' : 'discarded'; if (decision === 'accept') state.head = v.id;
         audit(decision, { version: v.id });
         pushEvent({ type: 'decision', version: v.id, decision, head: state.head, comment: typeof comment === 'string' ? comment.slice(0, 4000) : null });
@@ -871,6 +884,7 @@ ${VORK_HELP}`;
 
       if (req.method === 'POST' && url.pathname === '/api/adopt/plan') {
         const { requestId, slug: slugOverride } = await readBody<{ requestId: string; slug?: unknown }>(req);
+        if (adoptionJobs.has(requestId)) return send(res, 409, { error: ADOPTION_RUNNING });
         const ar = state.adoptionRequests.find((a) => a.id === requestId && a.status === 'pending');
         if (!ar) return send(res, 400, { error: 'no pending adoption request with that id' });
         const v = liveV(ar.version); if (!v) return send(res, 409, { error: 'version is gone or discarded' });
@@ -891,6 +905,7 @@ ${VORK_HELP}`;
 
       if (req.method === 'POST' && url.pathname === '/api/adopt/reject') {
         const { requestId, comment } = await readBody<{ requestId: string; comment?: unknown }>(req);
+        if (adoptionJobs.has(requestId)) return send(res, 409, { error: ADOPTION_RUNNING });
         const ar = state.adoptionRequests.find((a) => a.id === requestId && a.status === 'pending');
         if (!ar) return send(res, 400, { error: 'no pending adoption request with that id' });
         ar.status = 'rejected'; audit('adoption_rejected', { request: ar.id, version: ar.version });
@@ -903,38 +918,44 @@ ${VORK_HELP}`;
         const t = takeTicket(ticket, 'adopt');
         if (!t) return send(res, 403, { error: 'adoption needs a fresh approval for this exact scene' });
         const ar = state.adoptionRequests.find((a) => a.id === t.requestId);
-        if (!ar || ar.status !== 'pending') return send(res, 409, { error: 'request is no longer pending' });
-        const v = getV(t.versionId)!;
+        if (!ar || ar.status !== 'pending' || adoptionJobs.has(ar.id)) return send(res, 409, { error: 'request is no longer pending' });
+        const v = liveV(t.versionId);
+        if (!v) return send(res, 409, { error: 'the version was discarded after approval; nothing was written' });
         const job = newJob('adopt', v.id);
+        adoptionJobs.set(ar.id, job);
         (async () => {
-          // Render exactly the approved scene text unless an untouched final of that scene already exists.
-          if (!finalMatches(v, t.hash)) {
-            step(job, 'vork render std/final (approved scene)');
-            const r = await renderVersion(job, v, 'final', { pinnedText: t.sceneText }); if (job.status === 'cancelled') return;
-            if (!r.ok) throw new Error(`final render failed: ${r.log?.slice(-400)}`);
-            audit('final_rendered', { version: v.id, seconds: r.info.seconds });
-          }
-          step(job, 'Writing into the project');
-          const targets = adoptionTargets(t.slug); // re-resolve right before writing
-          if (targets.assetRel !== t.assetRel) throw new Error(`asset path changed since approval (${t.assetRel} → ${targets.assetRel}); plan again`);
-          if (fs.existsSync(targets.asset) !== t.overwrites) throw new Error('the target file appeared or disappeared since approval; plan again');
-          const png = fs.readFileSync(v.renders.final!.file);
-          if (sha256(png) !== v.renders.final!.sha256) throw new Error('final.png changed after rendering; plan again');
-          fs.mkdirSync(path.dirname(targets.asset), { recursive: true }); fs.mkdirSync(path.dirname(targets.manifest), { recursive: true });
-          const overwrote = fs.existsSync(targets.asset);
-          fs.writeFileSync(targets.asset, png);
-          const pngSha = sha256(png);
-          const manifest = {
-            slug: t.slug, asset: targets.assetRel, sha256: pngSha, version: v.id, sceneHash: t.hash, vork: VORK_VERSION, profile: PROFILES.final,
-            resolution: [v.renders.final!.width, v.renders.final!.height], reason: ar.reason, interpretation: v.proposal?.interpretation ?? v.instruction,
-            adoptedAt: new Date().toISOString(), approvedVia: 'vork Director UI', scene: JSON.parse(t.sceneText),
-          };
-          fs.writeFileSync(targets.manifest, JSON.stringify(manifest, null, 2));
-          if (v.status === 'proposed') { v.status = 'accepted'; state.head = v.id; audit('accept', { version: v.id, via: 'adoption' }); }
-          ar.status = 'adopted'; save();
-          audit('adopted', { request: ar.id, version: v.id, hash: t.hash, asset: targets.assetRel, sha256: pngSha, overwrote });
-          pushEvent({ type: 'adopted', request: ar.id, version: v.id, slug: t.slug, asset: targets.assetRel, manifest: targets.manifestRel, sha256: pngSha });
-          step(job, 'Adopted', 'done'); job.status = 'done'; job.result = { asset: targets.assetRel, manifest: targets.manifestRel, sha256: pngSha, overwrote };
+          try {
+            // Render exactly the approved scene text unless an untouched final of that scene already exists.
+            if (!finalMatches(v, t.hash)) {
+              step(job, 'vork render std/final (approved scene)');
+              const r = await renderVersion(job, v, 'final', { pinnedText: t.sceneText }); if (job.status === 'cancelled') return;
+              if (!r.ok) throw new Error(`final render failed: ${r.log?.slice(-400)}`);
+              audit('final_rendered', { version: v.id, seconds: r.info.seconds });
+            }
+            step(job, 'Writing into the project');
+            // Check again right before writing: the request is still ours and pending, the version not discarded.
+            if (job.status !== 'running' || adoptionJobs.get(ar.id) !== job || ar.status !== 'pending' || !liveV(v.id)) throw new Error('the request or the version changed since approval; nothing was written');
+            const targets = adoptionTargets(t.slug); // re-resolve right before writing
+            if (targets.assetRel !== t.assetRel) throw new Error(`asset path changed since approval (${t.assetRel} → ${targets.assetRel}); plan again`);
+            if (fs.existsSync(targets.asset) !== t.overwrites) throw new Error('the target file appeared or disappeared since approval; plan again');
+            const png = fs.readFileSync(v.renders.final!.file);
+            if (sha256(png) !== v.renders.final!.sha256) throw new Error('final.png changed after rendering; plan again');
+            fs.mkdirSync(path.dirname(targets.asset), { recursive: true }); fs.mkdirSync(path.dirname(targets.manifest), { recursive: true });
+            const overwrote = fs.existsSync(targets.asset);
+            fs.writeFileSync(targets.asset, png);
+            const pngSha = sha256(png);
+            const manifest = {
+              slug: t.slug, asset: targets.assetRel, sha256: pngSha, version: v.id, sceneHash: t.hash, vork: VORK_VERSION, profile: PROFILES.final,
+              resolution: [v.renders.final!.width, v.renders.final!.height], reason: ar.reason, interpretation: v.proposal?.interpretation ?? v.instruction,
+              adoptedAt: new Date().toISOString(), approvedVia: 'vork Director UI', scene: JSON.parse(t.sceneText),
+            };
+            fs.writeFileSync(targets.manifest, JSON.stringify(manifest, null, 2));
+            if (v.status === 'proposed') { v.status = 'accepted'; state.head = v.id; audit('accept', { version: v.id, via: 'adoption' }); }
+            ar.status = 'adopted'; save();
+            audit('adopted', { request: ar.id, version: v.id, hash: t.hash, asset: targets.assetRel, sha256: pngSha, overwrote });
+            pushEvent({ type: 'adopted', request: ar.id, version: v.id, slug: t.slug, asset: targets.assetRel, manifest: targets.manifestRel, sha256: pngSha });
+            step(job, 'Adopted', 'done'); job.status = 'done'; job.result = { asset: targets.assetRel, manifest: targets.manifestRel, sha256: pngSha, overwrote };
+          } finally { if (adoptionJobs.get(ar.id) === job) adoptionJobs.delete(ar.id); }
         })().catch((e) => failJob(job, e));
         return send(res, 202, publicJob(job));
       }

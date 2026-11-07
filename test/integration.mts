@@ -508,6 +508,62 @@ await check('#15 standalone propose: a discarded base gives 400; a base discarde
   assert.equal(r.status, 400); assert.match(r.json.error, /discarded/);
 });
 
+const requestAdoption = async (version: string, slug: string): Promise<string> => {
+  const r = await raw('/api/agent/adoption-request', JSON.stringify({ version, slug, reason: 'x' }), { agent: true });
+  assert.equal(r.status, 200, JSON.stringify(r.json)); return r.json.request;
+};
+const requestOf = async (id: string): Promise<Json> => (await state()).adoptionRequests.find((a: Json) => a.id === id);
+const adoptedEvents = async (requestId: string): Promise<number> => (await state()).events.filter((e: Json) => e.type === 'adopted' && e.request === requestId).length;
+
+await check('#14 while an adopt job renders, reject, plan and discard get 409; after cancel the request can be rejected and nothing is written', async () => {
+  const id = await newProposal(); const requestId = await requestAdoption(id, 'race-reject');
+  const plan = await human('/api/adopt/plan', { requestId }); assert.equal(plan.json.needsFinalRender, true);
+  holdRenders();
+  let jobId: string;
+  try {
+    jobId = (await human('/api/adopt', { ticket: plan.json.ticket })).json.id;
+    await renderWaiting();
+    assert.equal((await requestOf(requestId)).status, 'adopting');
+    const blocked: [string, unknown][] = [['/api/adopt/reject', { requestId }], ['/api/adopt/plan', { requestId }], ['/api/decide', { versionId: id, decision: 'discard' }]];
+    for (const [route, body] of blocked) assert.equal((await human(route, body)).status, 409, route);
+    assert.equal((await human(`/api/jobs/${jobId}/cancel`, {})).json.status, 'cancelled');
+    assert.equal((await human('/api/adopt/reject', { requestId })).status, 200);
+  } finally { releaseRenders(); }
+  await sleep(1000);
+  assert.equal((await human(`/api/jobs/${jobId}`)).json.status, 'cancelled');
+  assert.equal((await requestOf(requestId)).status, 'rejected');
+  assert.equal(fs.existsSync(path.join(PROJECT, 'public/vork/race-reject.png')), false);
+  assert.equal(await adoptedEvents(requestId), 0);
+});
+
+await check('#14 a version discarded after the adoption plan is not written, also when its final render is reused', async () => {
+  const reused = await newProposal();
+  const fp = await human('/api/final/plan', { versionId: reused });
+  assert.equal((await waitJob((await human('/api/render', { versionId: reused, profile: 'final', ticket: fp.json.ticket })).json.id)).status, 'done');
+  const fresh = await newProposal();
+  for (const [id, slug, needsFinalRender] of [[reused, 'race-discard', false], [fresh, 'race-discard-2', true]] as const) {
+    const requestId = await requestAdoption(id, slug);
+    const plan = await human('/api/adopt/plan', { requestId }); assert.equal(plan.json.needsFinalRender, needsFinalRender, slug);
+    assert.equal((await human('/api/decide', { versionId: id, decision: 'discard' })).status, 200);
+    const r = await human('/api/adopt', { ticket: plan.json.ticket });
+    assert.equal(r.status, 409, `${slug}: ${JSON.stringify(r.json)}`); assert.match(r.json.error, /discarded/);
+    assert.equal(fs.existsSync(path.join(PROJECT, `public/vork/${slug}.png`)), false, slug);
+    assert.equal((await requestOf(requestId)).status, 'pending', slug);
+  }
+});
+
+await check('#14 a second plan for the same request voids the first ticket; the request is adopted once', async () => {
+  const id = await newProposal(); const requestId = await requestAdoption(id, 'twice');
+  const first = await human('/api/adopt/plan', { requestId }); const second = await human('/api/adopt/plan', { requestId });
+  assert.equal((await human('/api/adopt', { ticket: first.json.ticket })).status, 403);
+  const job = await waitJob((await human('/api/adopt', { ticket: second.json.ticket })).json.id);
+  assert.equal(job.status, 'done', JSON.stringify(job));
+  assert.equal((await human('/api/adopt', { ticket: second.json.ticket })).status, 403);
+  assert.equal((await requestOf(requestId)).status, 'adopted');
+  assert.equal(await adoptedEvents(requestId), 1);
+  assert.equal((await state()).audit.filter((a: Json) => a.event === 'adopted' && a.request === requestId).length, 1);
+});
+
 await check('AC-01 nothing new was written under vork-director/runs', async () => {
   const after = fs.existsSync(path.join(ROOT, 'runs')) ? JSON.stringify(fs.readdirSync(path.join(ROOT, 'runs'))) : '[]';
   assert.equal(after, runsBefore);

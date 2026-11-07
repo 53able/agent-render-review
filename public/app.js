@@ -105,9 +105,10 @@ function renderEvents() {
   }).join('');
 }
 function renderAdoptions() {
-  const pending = (S.data.adoptionRequests || []).filter((a) => a.status === 'pending');
+  // 'adopting': its adopt job is running; the server refuses plan and reject until the job ends or is cancelled.
+  const pending = (S.data.adoptionRequests || []).filter((a) => a.status === 'pending' || a.status === 'adopting');
   $('#adoptBox').hidden = !pending.length;
-  $('#adoptList').innerHTML = pending.map((a) => `<li><span><b>${esc(a.slug)}</b> from ${esc(a.version)}</span><button class="ghost" data-req="${esc(a.id)}">Review…</button><span class="why">${esc(a.reason)}</span></li>`).join('');
+  $('#adoptList').innerHTML = pending.map((a) => `<li><span><b>${esc(a.slug)}</b> from ${esc(a.version)}</span>${a.status === 'adopting' ? '<span class="hint">adopting…</span>' : `<button class="ghost" data-req="${esc(a.id)}">Review…</button>`}<span class="why">${esc(a.reason)}</span></li>`).join('');
   $('#adoptList').querySelectorAll('button').forEach((b) => (b.onclick = () => reviewAdoption(b.dataset.req)));
 }
 /** @param {string | undefined} requestId */
@@ -126,7 +127,11 @@ async function reviewAdoption(requestId) {
   $('#adoptPlan').innerHTML = rows.map(([k, x]) => `<dt>${k}</dt><dd style="white-space:pre-wrap">${esc(x)}</dd>`).join('');
   /** @type {HTMLDialogElement} */ const dlg = $('#adoptDlg'); dlg.returnValue = ''; dlg.showModal();
   dlg.onclose = async () => {
-    if (dlg.returnValue === 'reject') { await api('/api/adopt/reject', { requestId }); say(`Rejected ${requestId}`); return load(); }
+    if (dlg.returnValue === 'reject') {
+      try { await api('/api/adopt/reject', { requestId }); say(`Rejected ${requestId}`); }
+      catch (e) { alertMsg(`Cannot reject: ${/** @type {Error} */ (e).message}`); }
+      return load();
+    }
     if (dlg.returnValue !== 'approve') return say('Nothing written');
     try { const job = await api('/api/adopt', { ticket: plan.ticket }); trackJob(job, async (j) => { await load(); say(j.status === 'done' ? `Wrote ${j.result.asset}` : `Adoption failed: ${j.error}`); }); }
     catch (e) { alertMsg(`Adoption refused: ${/** @type {Error} */ (e).message}`); }
@@ -471,7 +476,8 @@ function renderReview() {
 /** @param {string} decision */
 async function decide(decision) {
   const id = S.viewId;
-  await api('/api/decide', { versionId: id, decision });
+  try { await api('/api/decide', { versionId: id, decision }); }
+  catch (e) { return alertMsg(`Cannot ${decision}: ${/** @type {Error} */ (e).message}`); }
   if (decision === 'discard') S.viewId = /** @type {string} */ (/** @type {Version} */ (V(id)).parent);
   /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = '';
   await load(); say(decision === 'accept' ? `${id} is now HEAD` : `${id} discarded`);
