@@ -15,6 +15,8 @@ vork 本体は同梱していません。別途インストールし、[vork の
 
 ![ADEモード: 候補を開発中のページに当てはめて比較](docs/screenshot-on-page.png)
 
+初めて使うときは [クイックガイド](docs/quick-guide.md) から始めてください。同梱のサンプルページで、提案の確認から画像の採用までを一通り試せます。
+
 ## 必要なもの
 
 - vork 0.1.0（Apple Silicon + macOS 26以降、またはNVIDIA RTX + Vulkan）
