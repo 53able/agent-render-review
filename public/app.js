@@ -250,6 +250,20 @@ const /** @type {HTMLCanvasElement} */ cv = $('#canvas'), /** @type {HTMLCanvasE
 const loadImg = (src) => new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = src; });
 
 let drawSeq = 0;
+/**
+ * One line that says what the viewport shows: version, state, quality, what it is compared with, on page (#59).
+ * Compare is disabled, with the reason beside it, when it cannot apply.
+ * @param {Version} v
+ * @param {Version | undefined} parent
+ */
+function renderViewState(v, parent) {
+  const pr = parent?.renders[S.profile];
+  const noCompare = S.onPage ? 'not on page: the page shows one candidate' : !v.parent ? `${v.id} has no parent` : !pr ? `${v.parent} has no ${S.profile} render` : '';
+  const box = /** @type {HTMLInputElement} */ ($('#compareToggle')); box.disabled = !!noCompare;
+  $('#compareWhy').textContent = noCompare ? `(${noCompare})` : '';
+  const shown = S.onPage ? `${v.renders[S.profile] ? S.profile : 'draft'} on page ${S.data.config.pageUrl || '(no pageUrl)'}` : `${S.profile}${S.compare && !noCompare ? ` · wipe: ◀ ${v.parent} | ${v.id} ▶` : ''}`;
+  $('#viewing').textContent = `Showing ${v.id} · ${v.status}${v.id === S.data.head ? ' · HEAD' : v.status === 'accepted' ? ' (not HEAD)' : ''} · ${shown} · scene ${v.hash}`;
+}
 /** @returns {Promise<void>} */
 async function drawViewport() {
   if (S.onPage) return drawPage();
@@ -257,7 +271,8 @@ async function drawViewport() {
   const seq = ++drawSeq; const stale = () => seq !== drawSeq;
   const v = viewV(); const r = v.renders[S.profile];
   delete cv.dataset.ready; // clicks are ignored until this view's object ids are loaded
-  $('#viewing').textContent = `${v.id} · ${v.status}${v.status === 'accepted' && v.id !== S.data.head ? ' (not head)' : ''} · scene ${v.hash}`;
+  const p0 = /** @type {Version | undefined} */ (v.parent && V(v.parent));
+  renderViewState(v, p0);
   $('#empty').hidden = !!r;
   renderMeasure(r);
   if (!r) { ctx.clearRect(0, 0, cv.width, cv.height); octx.clearRect(0, 0, ov.width, ov.height); S.ids = null; return; }
@@ -280,7 +295,7 @@ async function drawPage() {
   const seq = ++drawSeq;
   delete cv.dataset.ready;
   const v = viewV(); const prof = v.renders[S.profile] ? S.profile : 'draft';
-  $('#viewing').textContent = `${v.id} · on page · ${S.data.config.pageUrl || 'no pageUrl'}`;
+  renderViewState(v, undefined);
   octx.clearRect(0, 0, ov.width, ov.height); S.ids = null; $('#wipe').hidden = true;
   /** @type {PagePreview | undefined} */
   let pv = v.pagePreviews?.[prof];
@@ -420,12 +435,20 @@ function renderObjects() {
     /** @type {HTMLElement} */ (li.querySelector('label')).classList.toggle('sel', sel); /** @type {HTMLInputElement} */ (li.querySelector('input')).checked = sel;
   }
   $('#selCount').textContent = S.selection.size ? `(${[...S.selection].join(', ')})` : '(none)';
+  if (S.data) renderTarget();
   renderQuick(scene);
 }
 /** @param {Scene} scene */
 function renderQuick(scene) {
   const q = $('#quick'); q.innerHTML = '';
-  if (viewV().status !== 'accepted') { q.innerHTML = '<p class="hint">Direct edits start from an accepted version. Accept this proposal or open HEAD.</p>'; return; }
+  const v = viewV();
+  if (v.status !== 'accepted') {
+    // Say why, next to what lifts it (#59).
+    q.innerHTML = `<p class="hint">Direct edits start from an accepted version; ${esc(v.id)} is ${esc(v.status)}.</p><div class="btnrow">${v.status === 'proposed' && !discarding(v.id) ? '<button type="button" class="ghost" id="qAccept">Accept this proposal</button>' : ''}<button type="button" class="ghost" id="qHead">Open HEAD (${esc(S.data.head)})</button></div>`;
+    $('#qHead').onclick = () => openVersion(S.data.head);
+    const acc = /** @type {HTMLButtonElement | null} */ (q.querySelector('#qAccept')); if (acc) acc.onclick = () => decide('accept', v.id);
+    return;
+  }
   if (S.selection.size !== 1) { q.innerHTML = S.selection.size ? '' : '<p class="hint">Select one object to edit it directly, without the agent.</p>'; return; }
   const n = scene.nodes.find((x) => x.name === [...S.selection][0]); if (!n) return;
   /** @type {QuickRow[]} */
@@ -482,11 +505,11 @@ $('#askForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const instruction = /** @type {HTMLTextAreaElement} */ ($('#instruction')).value.trim(); if (!instruction) return $('#instruction').focus();
   if (ADE()) {
-    try { await api('/api/feedback', { versionId: S.viewId, selection: [...S.selection], comment: instruction }); /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = ''; clearFails('ask'); say('Sent to your agent'); await load(); }
+    try { await api('/api/feedback', { versionId: askTarget(), selection: [...S.selection], comment: instruction }); /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = ''; clearFails('ask'); say('Sent to your agent'); await load(); }
     catch (err) { fail('ask', `Could not send: ${why(err)}. Your text is kept.`); }
     return;
   }
-  const v = viewV(); const baseId = v.status === 'discarded' ? S.data.head : v.id;
+  const baseId = askTarget();
   if (runningJob(baseId, 'propose')) return fail('ask', `A proposal from ${baseId} is already being made. Wait for it or cancel it, then propose again.`);
   try {
     const job = await api('/api/propose', {
@@ -522,7 +545,15 @@ function renderJobs() {
   $('#jobList').querySelectorAll('button[data-dismiss-job]').forEach((b) => (/** @type {HTMLButtonElement} */ (b).onclick = () => { JOBS.delete(/** @type {string} */ (/** @type {HTMLButtonElement} */ (b).dataset.dismissJob)); renderJobs(); }));
   // The version list marks versions with a running job; the final render waits for the viewed version's jobs.
   for (const li of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#versionList button[data-id]'))) li.classList.toggle('busy', !!runningJob(/** @type {string} */ (li.dataset.id)));
-  renderBusy();
+  renderBusy(); renderTarget();
+}
+/** Where the text in the box goes: the version on screen, shown above the box and following every switch (#59). */
+function askTarget() { const v = viewV(); return !ADE() && v.status === 'discarded' ? S.data.head : v.id; }
+function renderTarget() {
+  const v = viewV(); const to = askTarget(); const t = V(to);
+  $('#askTarget').innerHTML = ADE()
+    ? `Feedback on <b>${esc(to)}</b> <span class="hint">(${esc(t?.status)}${S.selection.size ? `, with ${S.selection.size} selected object${S.selection.size > 1 ? 's' : ''}` : ''})</span>`
+    : `New proposal based on <b>${esc(to)}</b>${to !== v.id ? ` <span class="hint">(${esc(v.id)} is discarded, so HEAD)</span>` : ''}`;
 }
 /** Says next to a button why it cannot be used while a job of the viewed version runs. */
 function renderBusy() {
@@ -659,7 +690,7 @@ function renderInspector() {
   if (v.status === 'proposed' && !discarding(v.id)) {
     $('#acceptBtn').onclick = () => decide('accept');
     $('#discardBtn').onclick = () => decide('discard');
-    $('#refineBtn').onclick = () => { /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = ''; /** @type {HTMLTextAreaElement} */ ($('#instruction')).placeholder = `Refine ${v.id}: what should differ?`; $('#instruction').focus(); };
+    $('#refineBtn').onclick = () => $('#instruction').focus(); // the box already says it goes to this version (#59)
   }
   $('#finalBtn').hidden = v.status === 'discarded';
   // adoption requests of this version, next to its actions

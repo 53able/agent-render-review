@@ -181,7 +181,7 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     const r = await agent('POST', '/api/agent/propose', { scene, interpretation: '夜のヒーロー: seedを主光源に', claimed_changes: [{ node: 'key', what: 'energy 60', why: 'night' }, { node: 'seed', what: 'emission 40', why: 'hero light' }] });
     vid = r.version; assert.ok(vid, JSON.stringify(r));
     await page.waitForSelector('#notice:not([hidden])', { timeout: 10000 });
-    assert.doesNotMatch(await page.textContent('#viewing') as string, new RegExp(`^${vid}`), 'the view must not switch by itself');
+    assert.doesNotMatch(await page.textContent('#viewing') as string, new RegExp(`^Showing ${vid} `), 'the view must not switch by itself');
     await page.click('#notice button');
     await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`, { timeout: 15000 });
     assert.match(await page.textContent('#review') as string, /Proposed by your ADE agent via MCP/);
@@ -210,6 +210,21 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     const ev = fb.events.find((e: { type: string }) => e.type === 'feedback');
     assert.equal(ev.version, vid); assert.deepEqual(ev.selection, ['vase'], JSON.stringify(ev)); assert.match(ev.comment, /花瓶/);
     await page.waitForFunction(() => document.querySelector('#eventList')!.textContent!.includes('read by agent'), null, { timeout: 8000 });
+  });
+
+  await check('#59 the feedback box names the version it goes to and follows the view; direct edit says what unlocks it', async () => {
+    await page.click(`button[data-id="${vid}"]`); await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`);
+    assert.match(await page.textContent('#askTarget') as string, new RegExp(`Feedback on ${vid} \\(proposed`));
+    assert.equal(await page.locator('#quick #qAccept').count(), 1); assert.equal(await page.locator('#quick #qHead').count(), 1);
+    await page.click('#refineBtn'); assert.equal(await page.evaluate(() => document.activeElement?.id), 'instruction');
+    await page.click('#quick #qHead'); await page.waitForSelector('#canvas[data-ready="v001:draft"]');
+    assert.match(await page.textContent('#askTarget') as string, /Feedback on v001 \(accepted/);
+    await agent('GET', '/api/agent/feedback?wait=0'); // drain
+    await page.fill('#instruction', 'about the starter'); await page.click('#askBtn');
+    await page.waitForFunction(() => document.querySelector('#eventList')!.textContent!.includes('about the starter'), null, { timeout: 5000 });
+    const ev = (await agent('GET', '/api/agent/feedback?wait=0')).events.find((e: { type: string }) => e.type === 'feedback');
+    assert.equal(ev.version, 'v001', 'sent to the version the box named');
+    assert.equal(await page.locator('#compareToggle').isDisabled(), true, 'v001 has no parent'); assert.match(await page.textContent('#compareWhy') as string, /no parent/);
   });
 
   await check('#54 while a final render runs, the page keeps updating and other versions can be viewed', async () => {
@@ -245,6 +260,9 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.click('#pageBtn');
     await page.waitForFunction(() => document.querySelector('#measure')!.textContent!.includes('substituted'), null, { timeout: 60000 });
     const m = (await page.textContent('#measure'))!.match(/substituted requests\s*(\d+)/); assert.ok(Number(m![1]) >= 1, await page.textContent('#measure') as string);
+    // #59: what is shown is spelled out, and Compare says why it cannot be used on page
+    assert.match(await page.textContent('#viewing') as string, new RegExp(`^Showing ${vid} · proposed · draft on page`));
+    assert.equal(await page.locator('#compareToggle').isDisabled(), true); assert.match(await page.textContent('#compareWhy') as string, /not on page/);
     const shot = fs.readFileSync(path.join(PROJECT, '.vork', vid, 'page-draft.png'));
     assert.notDeepEqual(shot, origShot, 'page with candidate must differ from the original page');
     assert.deepEqual(projectMtimes(), before);

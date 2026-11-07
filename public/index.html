@@ -40,7 +40,7 @@
         <button role="radio" data-profile="previs" aria-checked="false">previs</button>
         <button role="radio" data-profile="final" aria-checked="false">final</button>
       </div>
-      <label class="chk"><input type="checkbox" id="compareToggle"> Compare with parent</label>
+      <label class="chk"><input type="checkbox" id="compareToggle" aria-describedby="compareWhy"> Compare with parent <span id="compareWhy" class="hint"></span></label>
       <button type="button" id="pageBtn" class="ghost" aria-pressed="false" hidden>On page</button>
       <span id="viewing" class="viewing"></span>
       <div id="notice" class="notice" role="status" hidden></div>
@@ -102,7 +102,7 @@
       <h2 id="h-ask">Direct the agent</h2>
       <p id="adeHint" class="hint" hidden></p>
       <form id="askForm">
-        <label for="instruction" class="sr-only">Instruction</label>
+        <label for="instruction" id="askTarget" class="target"></label>
         <textarea id="instruction" rows="3" placeholder="例: 選択した物体をマットな陶器にして、ライトを夕方の色に"></textarea>
         <div class="starters" id="starters"></div>
         <fieldset class="ctx">
