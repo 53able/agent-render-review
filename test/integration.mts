@@ -579,6 +579,19 @@ await check('#30 page preview waits for a running render of the version and refu
   }
 });
 
+await check('#26 /runs/ serves a render file only while its bytes are the ones Director recorded', async () => {
+  for (const name of ['draft.png', 'draft.ids.bin']) {
+    const file = path.join(PROJECT, '.vork', proposed, name); const bytes = fs.readFileSync(file);
+    const get = async () => (await fetch(`${BASE}/runs/${proposed}/${name}`, { headers: { cookie: uiCookie } })).status;
+    assert.equal(await get(), 200, name);
+    try { fs.writeFileSync(file, Buffer.concat([bytes, Buffer.from('x')])); assert.equal(await get(), 404, `${name} changed on disk`); }
+    finally { fs.writeFileSync(file, bytes); }
+    assert.equal(await get(), 200, name);
+  }
+  // A file Director has no record of is not served, even under a valid name.
+  assert.equal((await fetch(`${BASE}/runs/${proposed}/page-final.png`, { headers: { cookie: uiCookie } })).status, 404);
+});
+
 await check('#31 two concurrent wait_for_feedback calls get one event once in total', async () => {
   await raw('/api/agent/feedback?wait=0', '', { agent: true, method: 'GET' }); // drain anything unread
   const waitOnce = () => raw('/api/agent/feedback?wait=10', '', { agent: true, method: 'GET' });

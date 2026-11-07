@@ -34,7 +34,7 @@ interface Exposure { mean: number; clipped: number; near_black: number }
 interface VorkMeta { object_ids: unknown; exposure: Exposure; denoiser: unknown; settings: { integrator: unknown; samples: number } }
 interface RenderInfo {
   profile: Profile; seconds: number; width: number; height: number; image: string; ids: string;
-  file: string; sha256: string; sceneHash: string | null; objects: unknown; exposure: Exposure;
+  file: string; sha256: string; idsSha256?: string; sceneHash: string | null; objects: unknown; exposure: Exposure;
   settings: { integrator: unknown; samples: number; denoiser: unknown }; warnings: string[];
 }
 type RenderResult =
@@ -54,7 +54,7 @@ interface Proposal {
   via: 'built-in' | 'mcp'; cost?: number; clarifying_question?: string | null; scene?: undefined; respondsTo?: unknown;
 }
 type VersionStatus = 'proposed' | 'accepted' | 'discarded';
-interface PagePreviewOk { ok: true; matched: number; image: string; warning: string | null }
+interface PagePreviewOk { ok: true; matched: number; image: string; warning: string | null; sha256?: string }
 type PagePreviewResult = { ok: false; reason: string } | PagePreviewOk;
 interface Version {
   id: string; parent: string | null; origin: 'starter' | 'agent' | 'human'; instruction: string | null; proposal: Proposal | null;
@@ -493,7 +493,7 @@ async function main() {
     const stamp = Date.now();
     const info: RenderInfo = {
       profile, seconds, width: ids.w, height: ids.h, image: `/runs/${v.id}/${profile}.png?${stamp}`, ids: `/runs/${v.id}/${profile}.ids.bin?${stamp}`,
-      file: out, sha256: sha256(fs.readFileSync(out)),
+      file: out, sha256: sha256(fs.readFileSync(out)), idsSha256: sha256(ids.data),
       sceneHash: sceneText ? sha256(sceneText).slice(0, 16) : null,
       objects: meta.object_ids, exposure: meta.exposure,
       settings: { integrator: meta.settings.integrator, samples: meta.settings.samples, denoiser: meta.denoiser }, warnings,
@@ -670,8 +670,8 @@ ${VORK_HELP}`;
       try { await page.goto(config.pageUrl, { waitUntil: 'networkidle', timeout: LIMITS.page }); }
       catch (e: any) { return { ok: false, reason: `could not open ${config.pageUrl}: ${String(e.message).split('\n')[0]}` }; }
       const file = path.join(vdir(v.id), `page-${render.profile}.png`);
-      await page.screenshot({ path: file, fullPage: false });
-      return { ok: true, matched, image: `/runs/${v.id}/page-${render.profile}.png?${Date.now()}`, warning: matched ? null : `no request matched ${config.assetUrlPattern}; the screenshot shows the page without the candidate` };
+      const shot = await page.screenshot({ path: file, fullPage: false });
+      return { ok: true, matched, sha256: sha256(shot), image: `/runs/${v.id}/page-${render.profile}.png?${Date.now()}`, warning: matched ? null : `no request matched ${config.assetUrlPattern}; the screenshot shows the page without the candidate` };
     } finally { await browser.close(); }
   }
 
@@ -731,6 +731,21 @@ ${VORK_HELP}`;
   const cookie = (req: http.IncomingMessage, name: string): string | undefined => (req.headers.cookie || '').split(';').map((s) => s.trim().split('=')).find(([k]) => k === name)?.[1];
   const tokenEq = (a: unknown, b: string): boolean => typeof a === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
+  // Hashes a /runs/ file may have: null if Director has no record of it, [] if the record predates hashes.
+  const recordedHashes = (pathname: string): string[] | null => {
+    const m = /^\/runs\/(v\d{3})\/(page-)?(previs|draft|final)\.(png|ids\.bin)$/.exec(pathname); const v = m && getV(m[1]);
+    if (!m || !v) return null;
+    const [, , page, profile, ext] = m as unknown as [string, string, string | undefined, Profile, string];
+    if (page) {
+      if (ext !== 'png') return null;
+      const shots = Object.values(v.pagePreviews || {}).filter((p) => p.image.split('?')[0] === `/runs/${v.id}/page-${profile}.png`);
+      if (!shots.length) return null;
+      return shots.some((p) => !p.sha256) ? [] : shots.map((p) => p.sha256!);
+    }
+    const r = v.renders[profile]; if (!r) return null;
+    const h = ext === 'png' ? r.sha256 : r.idsSha256;
+    return h ? [h] : [];
+  };
   const versionView = (v: Version) => {
     const base = v.parent ? sceneOf(v.parent) : null; const scene = sceneOf(v.id);
     return { ...v, scene, diff: base ? diffScenes(base, scene) : [], hash: hashScene(v.id) };
@@ -1092,7 +1107,16 @@ ${VORK_HELP}`;
         // O_NOFOLLOW covers the last component only: the opened file must still be the one at the checked path.
         const at = fs.lstatSync(real);
         if (at.dev !== st.dev || at.ino !== st.ino || fs.realpathSync.native(real) !== want) return send(res, 404, 'not found', 'text/plain');
-        return send(res, 200, fs.readFileSync(fd), MIME[path.extname(real)] || 'application/octet-stream');
+        const data = fs.readFileSync(fd);
+        // The checks above narrow a race but cannot close it: Node has no openat, so a directory on the path can be
+        // swapped for a symlink between the check and the open (#26). A render file is served only if its bytes are
+        // the ones Director recorded. State written before #26 has no hash for ids.bin and page-*.png; those keep
+        // the path checks only.
+        if (root === RUNS) {
+          const hashes = recordedHashes(url.pathname);
+          if (!hashes || (hashes.length && !hashes.includes(sha256(data)))) return send(res, 404, 'not found', 'text/plain');
+        }
+        return send(res, 200, data, MIME[path.extname(real)] || 'application/octet-stream');
       } finally { fs.closeSync(fd); }
     } catch (e: any) {
       if (e instanceof BadRequest) return send(res, 400, { error: e.message });
