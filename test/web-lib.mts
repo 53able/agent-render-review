@@ -4,7 +4,7 @@ import { api } from '../web/src/lib/api.ts';
 import { toS, toL, linToHex, hexToLin, isColor } from '../web/src/lib/color.ts';
 import { pick } from '../web/src/lib/ids.ts';
 import { signature } from '../web/src/lib/signature.ts';
-import { isWildcard, groupDiffs, keyOf, checkClaims } from '../web/src/lib/diff.ts';
+import { isWildcard, groupDiff, keyOf, checkClaims as checkClaimsOf } from '../web/src/lib/review-model.ts';
 import { depth } from '../web/src/lib/depth.ts';
 import { canvasColors } from '../web/src/lib/canvas-colors.ts';
 import type { Data, Version, Diff, Ids, SceneNode } from '../web/src/lib/types.ts';
@@ -124,7 +124,11 @@ await check('signature: changes with head, versions, status, renders, adoptions,
   assert.notEqual(signature(a), signature(b));
 });
 
-// ---------- diff ----------
+// ---------- diff (review-model.ts, the one implementation the review panel uses) ----------
+/** Claims by node name only; what and why do not matter to the check. */
+const checkClaims = (nodes: string[], diff: Diff[]) => checkClaimsOf(nodes.map((node) => ({ node, what: '', why: '' })), diff);
+/** Node types as the review panel builds them: the base scene first, then the version's own scene overrides it. */
+const groupDiffs = (diff: Diff[], baseNodes: SceneNode[], nodes: SceneNode[]) => groupDiff(diff, new Map([...baseNodes, ...nodes].map((n) => [n.name, n.type])));
 await check('diff: isWildcard needs a prefix and a trailing *', () => {
   assert.equal(isWildcard('b*'), true);
   assert.equal(isWildcard('chair_*'), true);
@@ -180,12 +184,12 @@ await check('diff: checkClaims.isClaimed matches exact, scene key, "scene", and 
   assert.equal(checkClaims(['*'], []).isClaimed({ node: 'anything', path: 'x' }), false); // bare * is a literal name
   assert.equal(checkClaims(['*'], []).isClaimed({ node: '*', path: 'x' }), true);
 });
-await check('diff: checkClaims.wildCount counts distinct changed nodes per wildcard claim', () => {
+await check('diff: checkClaims.wildMatches lists distinct changed nodes per wildcard claim', () => {
   const diff: Diff[] = [
     { node: 'b1', path: 'x' }, { node: 'b1', path: 'y' }, { node: 'b2', path: '(node)' }, { node: 'c1', path: 'x' }, { node: '(scene)', path: 'b.q' },
   ];
-  const { wildCount } = checkClaims(['b*', 'c*', 'z*', 'b1', '*', 'b*'], diff);
-  assert.deepEqual([...wildCount], [['b*', 2], ['c*', 1], ['z*', 0]]); // b1 counted once, (scene) never counted, bare * and plain names absent, duplicate claim collapsed
+  const { wildMatches } = checkClaims(['b*', 'c*', 'z*', 'b1', '*', 'b*'], diff);
+  assert.deepEqual([...wildMatches], [['b*', ['b1', 'b2']], ['c*', ['c1']], ['z*', []]]); // b1 counted once, (scene) never counted, bare * and plain names absent, duplicate claim collapsed
 });
 await check('diff: checkClaims.ghost lists claims that changed nothing (plain, wildcard, scene boundaries)', () => {
   const diff: Diff[] = [{ node: 'cube', path: 'x' }, { node: '(scene)', path: 'render.samples' }, { node: 'b1', path: 'x' }];
