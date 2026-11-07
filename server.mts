@@ -623,12 +623,18 @@ ${VORK_HELP}`;
     try { ({ chromium } = await import('playwright-core')); } catch { return { ok: false, reason: 'playwright-core is not installed (npm install)' }; }
     const exe = process.env.CHROME_PATH || ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium'].find((p) => fs.existsSync(p));
     if (!exe) return { ok: false, reason: 'Chrome not found (set CHROME_PATH)' };
+    // Wait for renders of this version queued so far: vork writes the PNG in place (#30).
+    await renderLocks.get(v.id)?.catch(() => {});
     const render = v.renders[profile] || v.renders.draft;
     if (!render) return { ok: false, reason: 'render the version first' };
+    // The bytes must be the ones recorded when the render finished; otherwise a render started after the wait is writing it.
+    let png: Buffer;
+    try { png = fs.readFileSync(render.file); } catch { return { ok: false, reason: 'the render file is missing; render the version again' }; }
+    if (sha256(png) !== render.sha256) return { ok: false, reason: 'the render is being updated; try again when it finishes' };
     const browser = await chromium.launch({ executablePath: exe, headless: true });
     try {
       const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-      let matched = 0; const png = fs.readFileSync(render.file);
+      let matched = 0;
       await page.route(config.assetUrlPattern, (route) => { matched++; route.fulfill({ status: 200, contentType: 'image/png', body: png }); });
       try { await page.goto(config.pageUrl, { waitUntil: 'networkidle', timeout: LIMITS.page }); }
       catch (e: any) { return { ok: false, reason: `could not open ${config.pageUrl}: ${String(e.message).split('\n')[0]}` }; }
@@ -757,6 +763,8 @@ ${VORK_HELP}`;
         await new Promise<void>((resolve) => { const done = () => { waiters.delete(done); clearTimeout(t); resolve(); }; const t = setTimeout(done, wait * 1000); waiters.add(done); res.on('close', done); });
       }
       if (res.destroyed || res.writableEnded) return; // client gone: leave events unread
+      // Concurrent waiters are all woken by one event. Each event is delivered once only because nothing below
+      // awaits between reading pending() and moving agentCursor: do not put an await (e.g. an async save) in between (#31).
       const evs = pending();
       if (!evs.length) return send(res, 200, { timeout: true, waitedSec: Math.round((Date.now() - t0) / 100) / 10, events: [] });
       state.agentCursor = evs.at(-1)!.seq; save();

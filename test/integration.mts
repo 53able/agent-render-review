@@ -550,6 +550,47 @@ const newProposal = async (): Promise<string> => {
 };
 const versionOf = async (id: string): Promise<Json> => (await state()).versions.find((v: Json) => v.id === id);
 
+await check('#30 page preview waits for a running render of the version and refuses a PNG that is not the recorded one', async () => {
+  const cfgFile = path.join(PROJECT, '.vork', 'config.json'); const cfg = fs.readFileSync(cfgFile, 'utf8');
+  const chrome = process.env.CHROME_PATH || ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium'].find((p) => fs.existsSync(p));
+  if (!chrome) { console.log('     (skipped: Chrome not found)'); return; }
+  // Nothing listens on port 9, so a preview that gets past the checks fails at page.goto with "could not open".
+  fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(cfg), pageUrl: 'http://127.0.0.1:9/', assetUrlPattern: '**/vork/hero.png' }));
+  const draft = path.join(PROJECT, '.vork', proposed, 'draft.png'); let rendered: Buffer | null = null;
+  try {
+    holdRenders();
+    const job = (await human('/api/render', { versionId: proposed, profile: 'draft' })).json;
+    await renderWaiting();
+    let settled = false;
+    const preview = human('/api/preview', { versionId: proposed, profile: 'draft' }).then((r) => { settled = true; return r; });
+    await sleep(2500);
+    assert.equal(settled, false, 'preview must wait for the render of the same version');
+    releaseRenders(); await waitJob(job.id);
+    const r = await preview;
+    assert.equal(r.json.ok, false); assert.match(r.json.reason, /could not open/);
+    rendered = fs.readFileSync(draft);
+    fs.writeFileSync(draft, Buffer.from('not the recorded png'));
+    const bad = await human('/api/preview', { versionId: proposed, profile: 'draft' });
+    assert.equal(bad.json.ok, false); assert.match(bad.json.reason, /being updated/);
+  } finally {
+    releaseRenders(); fs.writeFileSync(cfgFile, cfg);
+    if (rendered) fs.writeFileSync(draft, rendered);
+  }
+});
+
+await check('#31 two concurrent wait_for_feedback calls get one event once in total', async () => {
+  await raw('/api/agent/feedback?wait=0', '', { agent: true, method: 'GET' }); // drain anything unread
+  const waitOnce = () => raw('/api/agent/feedback?wait=10', '', { agent: true, method: 'GET' });
+  const a = waitOnce(), b = waitOnce();
+  await sleep(300);
+  const comment = `concurrent ${crypto.randomUUID()}`;
+  assert.equal((await human('/api/feedback', { versionId: proposed, selection: [], comment })).status, 200);
+  const got = [(await a).json, (await b).json];
+  const delivered = got.flatMap((g) => g.events).filter((e: Json) => e.comment === comment);
+  assert.equal(delivered.length, 1, JSON.stringify(got));
+  assert.equal(textOf(await tool('wait_for_feedback', { timeout_sec: 0 })).events.length, 0);
+});
+
 await check('#15 a final ticket for a version discarded after planning is refused', async () => {
   const id = await newProposal();
   const plan = await human('/api/final/plan', { versionId: id }); assert.equal(plan.status, 200);
