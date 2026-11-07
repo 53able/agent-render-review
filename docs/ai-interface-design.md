@@ -150,7 +150,7 @@
 - エージェントの権限（ADEモード）: エージェント用APIは `.vork/server.json`（パーミッション600）のトークンが必要。人間用API（採否、checkout、final計画、書き戻し、フィードバック送信）と描画ファイルは、ペアリング済みブラウザの HttpOnly・SameSite=Strict の Cookie が必要で、エージェントのトークンでは403になる。ペアリングは1回限りのトークンで行い、トークンは Director からOSのブラウザ起動コマンドへ渡すだけで、ファイルやログに書かない。MCP には採否・承認のツールがない。
 - 境界の限界: 同じユーザー権限のエージェントは、`.vork/` の状態ファイルを直接書き換える、プロセスの引数を覗く、ファイルを直接置く、などで回避できる。この境界が防ぐのは、通常の手順で承認を代行することであり、敵対的な同一ユーザーのプロセスではない。強制にはADE側のサンドボックスが必要。
 - モデル外の安全境界（単独モード）: 内蔵エージェントはツール・MCP・設定読込なし。シーンのファイル参照はサーバーで検査。サーバーは127.0.0.1のみで待受。Hostヘッダーを127.0.0.1/localhostに限定し（DNS rebinding対策）、POSTは同一Originと `application/json` を必須にする（CSRF対策）。`runs/` からは描画画像とIDマップだけを配信し、監査ログは配信しない。vork自体のサンドボックス化はしていない。
-- 監査記録: init、proposed（依頼文、費用、警告数、経路）、agent_proposal_rejected、feedback、accept、discard、direct_edit、cancelled、final_approved（ハッシュ）、final_rendered、adoption_requested、adopted（ハッシュ、パス、sha256、上書き有無）、adoption_rejected、agent_error を `state.json`（単独モードは `runs/`、ADEモードは `<project>/.vork/`）に保存する。`node server.mjs --report <project>` で、最初の提案から採用までの時間、フィードバック回数、破棄数を集計する。シーン全文とプロンプト全文はログへ入れず版ディレクトリに置く。
+- 監査記録: init、proposed（依頼文、費用、警告数、経路）、agent_proposal_rejected、feedback、accept、discard、direct_edit、cancelled、final_approved（ハッシュ）、final_rendered、adoption_requested、adopted（ハッシュ、パス、sha256、上書き有無）、adoption_rejected、agent_error を `state.json`（単独モードは `runs/`、ADEモードは `<project>/.vork/`）に保存する。`node server.mts --report <project>` で、最初の提案から採用までの時間、フィードバック回数、破棄数を集計する。シーン全文とプロンプト全文はログへ入れず版ディレクトリに置く。
 
 ## 7. 信頼・倫理・アクセシビリティ
 
@@ -171,12 +171,12 @@
 | 誤解系 | 対象が曖昧な依頼を送る | 確認質問を返し、版を作らず依頼文を保持 | 実装済み（スキーマの clarifying_question） | not run |
 | 誤出力系 | モデルの主張と実差分が食い違う | 該当行に警告 | 照合ロジック実装、`render` キーの誤検知を修正済み。食い違いを意図的に起こす試験はしていない | not run |
 | 副作用系 | チケットなし、または承認後に別シーンで final を要求 | 403 | curl で403を確認 | pass |
-| 副作用系 | 絶対パス、`..`、URL、`.gltf`、画像入力経由のファイル参照、カスタムプログラム、巨大・偏った解像度、compositor解像度、名前重複 | ポリシーで遮断 | `node server.mjs --selftest` 14件 PASS（差分1件を含む） | pass |
+| 副作用系 | 絶対パス、`..`、URL、`.gltf`、画像入力経由のファイル参照、カスタムプログラム、巨大・偏った解像度、compositor解像度、名前重複 | ポリシーで遮断 | `node server.mts --selftest` 14件 PASS（差分1件を含む） | pass |
 | 副作用系 | 他サイトからのPOST（text/plain、別Origin）、別Hostでのアクセス、直接編集への画像オブジェクト注入 | 415 / 403 / 421 / 400 | curl で確認 | pass |
 | 復旧系 | 提案中に中止 | ジョブ cancelled、claudeプロセスなし | API試験で確認 | pass |
 | 復旧系 | vork が提案シーンを拒否 | エラー文付きで1回修復、失敗なら版を作らない | 実装済み | not run |
 | 権限系 | 非対応の直接編集（メッシュに energy、任意フィールド、未採用版を起点） | 400 | curl で確認 | pass |
-| 正常系（ADE） | MCPで提案→画面に通知→開いて花瓶をクリックしてフィードバック→エージェントが受信→ページ上で比較→採用依頼→人間が承認 | 提案は proposed、HEAD不変、表示は勝手に切り替わらない。フィードバックに選択ノード名。画像と manifest がプロジェクトに書かれる | `test/integration.mjs` 19件、`test/e2e.mjs` 14件 PASS | pass |
+| 正常系（ADE） | MCPで提案→画面に通知→開いて花瓶をクリックしてフィードバック→エージェントが受信→ページ上で比較→採用依頼→人間が承認 | 提案は proposed、HEAD不変、表示は勝手に切り替わらない。フィードバックに選択ノード名。画像と manifest がプロジェクトに書かれる | `test/integration.mts` 19件、`test/e2e.mts` 14件 PASS | pass |
 | 副作用系（ADE） | 承認後に config の assetDir やシーン本文を書き換えてから書き込みを実行 | 書き込みを中止（409相当の失敗、または403） | 統合試験 | pass |
 | 権限系（ADE） | ページ自体からCookieを得る、ペアリングトークンを再利用する、未ペアのタブで開く | Cookieは発行されない、403、操作不可の案内 | 統合試験、E2E | pass |
 | 正常系（ADE実機） | Claude Code と Codex に MCP を一時登録し、get_render の画像を説明させる | 画像の物体と明るさを説明できる | 両方で花瓶・リング・発光球と明るさを説明した。Codex は `default_tools_approval_mode="approve"` が必要だった | pass |

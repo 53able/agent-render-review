@@ -1,4 +1,4 @@
-// Integration test: a real MCP client drives mcp.mjs (which starts Director in ADE mode) and a
+// Integration test: a real MCP client drives mcp.mts (which starts Director in ADE mode) and a
 // simulated human uses the Director HTTP API with the UI cookie. Requires vork on PATH.
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -9,9 +9,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// Loose on purpose: the test pokes at arbitrary JSON from Director and the MCP tools.
+type Json = any;
+// MCP content part; fields are all typed string because the test reads them after checking .type itself.
+interface Part { type: string; text: string; data: string; mimeType: string }
+interface ToolResult { content: Part[]; isError?: boolean }
+interface SceneNode { name: string; materials: { inputs: Record<string, unknown> }[] }
+
 process.env.VORK_DIRECTOR_IMPORT = '1';
-const { reportFromAudit } = await import('../server.mjs');
-delete process.env.VORK_DIRECTOR_IMPORT; // must not leak into the Director that mcp.mjs starts
+const { reportFromAudit } = await import('../server.mts');
+delete process.env.VORK_DIRECTOR_IMPORT; // must not leak into the Director that mcp.mts starts
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vd-int-')));
@@ -21,34 +28,34 @@ fs.rmSync(path.join(PROJECT, '.vork'), { recursive: true, force: true });
 const runsBefore = fs.existsSync(path.join(ROOT, 'runs')) ? JSON.stringify(fs.readdirSync(path.join(ROOT, 'runs'))) : '[]';
 
 let pass = 0, failures = 0;
-async function check(name, fn) {
+async function check(name: string, fn: () => Promise<void>) {
   try { await fn(); pass++; console.log(`PASS ${name}`); }
-  catch (e) { failures++; console.log(`FAIL ${name}\n     ${e.stack?.split('\n').slice(0, 3).join('\n     ')}`); }
+  catch (e: Json) { failures++; console.log(`FAIL ${name}\n     ${e.stack?.split('\n').slice(0, 3).join('\n     ')}`); }
 }
 
 const PAIR = crypto.randomBytes(16).toString('hex'); // test-only: lets the simulated human pair without a real browser opener
 const client = new Client({ name: 'integration-test', version: '1.0.0' });
-await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(ROOT, 'mcp.mjs'), '--project', PROJECT], stderr: 'pipe', env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR } }));
-const tool = async (name, args = {}) => client.callTool({ name, arguments: args });
-const textOf = (r) => JSON.parse(r.content.find((c) => c.type === 'text').text);
+await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(ROOT, 'mcp.mts'), '--project', PROJECT], stderr: 'pipe', env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR } }));
+const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolResult> => client.callTool({ name, arguments: args }) as unknown as Promise<ToolResult>;
+const textOf = (r: ToolResult): Json => JSON.parse(r.content.find((c) => c.type === 'text')!.text);
 
 // the human side
 const status = textOf(await tool('director_status'));
 const BASE = status.director_url;
-const pairWith = (token) => fetch(`${BASE}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) });
+const pairWith = (token: string) => fetch(`${BASE}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) });
 await check('AC-06 the page itself hands out no session; pairing is one-time', async () => {
   assert.equal((await fetch(`${BASE}/`)).headers.get('set-cookie'), null);
   assert.equal((await pairWith('wrong')).status, 403);
 });
 const paired = await pairWith(PAIR);
-const uiCookie = paired.headers.get('set-cookie').split(';')[0];
+const uiCookie = paired.headers.get('set-cookie')!.split(';')[0];
 await check('AC-06 a used pairing token cannot be replayed', async () => { assert.equal((await pairWith(PAIR)).status, 403); });
-const human = async (route, body, { cookie = uiCookie } = {}) => {
+const human = async (route: string, body?: unknown, { cookie = uiCookie }: { cookie?: string | null } = {}): Promise<{ status: number; json: Json }> => {
   const r = await fetch(`${BASE}${route}`, { method: body ? 'POST' : 'GET', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
   return { status: r.status, json: await r.json().catch(() => ({})) };
 };
-const state = async () => (await human('/api/state')).json;
-const waitJob = async (id) => { for (;;) { const j = (await human(`/api/jobs/${id}`)).json; if (j.status !== 'running') return j; await new Promise((r) => setTimeout(r, 300)); } };
+const state = async (): Promise<Json> => (await human('/api/state')).json;
+const waitJob = async (id: string) => { for (;;) { const j = (await human(`/api/jobs/${id}`)).json; if (j.status !== 'running') return j; await new Promise((r) => setTimeout(r, 300)); } };
 
 await check('AC-01 state lives in <project>/.vork and standalone runs/ is untouched', async () => {
   assert.equal(status.mode, 'ade'); assert.equal(status.project, PROJECT);
@@ -84,16 +91,16 @@ await check('AC-03 policy violations create no version', async () => {
   assert.equal((await state()).versions.length, versionsBefore);
 });
 
-let proposed;
+let proposed: string;
 await check('propose_scene creates a proposed agent version, HEAD unchanged, draft image returned', async () => {
-  const scene = structuredClone(base); scene.nodes.find((n) => n.name === 'vase').materials[0].inputs.base_color = [0.1, 0.3, 0.6];
+  const scene = structuredClone(base); scene.nodes.find((n: SceneNode) => n.name === 'vase').materials[0].inputs.base_color = [0.1, 0.3, 0.6];
   const headBefore = (await state()).head;
   const r = await tool('propose_scene', { scene, interpretation: 'blue vase', claimed_changes: [{ node: 'vase', what: 'blue', why: 'test' }] });
   assert.ok(!r.isError, r.content[0].text);
   const t = textOf(r); proposed = t.version;
   assert.equal(t.status, 'proposed'); assert.equal(t.head, headBefore);
   assert.ok(r.content.some((c) => c.type === 'image' && c.mimeType === 'image/png' && c.data.length > 1000));
-  const v = (await state()).versions.find((x) => x.id === proposed);
+  const v = (await state()).versions.find((x: { id: string }) => x.id === proposed);
   assert.equal(v.origin, 'agent'); assert.equal((await state()).head, headBefore);
 });
 
@@ -101,14 +108,14 @@ await check('AC-04 get_render returns an image and text with exposure and object
   const r = await tool('get_render', { version: proposed });
   const img = r.content.find((c) => c.type === 'image');
   assert.ok(img && Buffer.from(img.data, 'base64').subarray(1, 4).toString() === 'PNG');
-  const t = textOf(r); assert.ok(t.render.exposure && typeof t.render.exposure.mean === 'number'); assert.ok(t.render.object_ids.some((o) => o.name === 'vase'));
+  const t = textOf(r); assert.ok(t.render.exposure && typeof t.render.exposure.mean === 'number'); assert.ok(t.render.object_ids.some((o: { name: string }) => o.name === 'vase'));
   const f = await tool('get_render', { version: proposed, profile: 'final' });
   assert.equal(f.isError, true); assert.match(f.content[0].text, /human approval/);
 });
 
 await check('AC-06 human endpoints refuse requests without the UI cookie (also with the agent token)', async () => {
   const agentToken = JSON.parse(fs.readFileSync(path.join(PROJECT, '.vork', 'server.json'), 'utf8')).agentToken;
-  const routes = [['/api/decide', { versionId: proposed, decision: 'accept' }], ['/api/checkout', { versionId: 'v001' }], ['/api/final/plan', { versionId: proposed }], ['/api/adopt/plan', { requestId: 'a001' }], ['/api/adopt', { ticket: 'x' }], ['/api/feedback', { versionId: proposed, comment: 'x' }]];
+  const routes: [string, Record<string, string>][] = [['/api/decide', { versionId: proposed, decision: 'accept' }], ['/api/checkout', { versionId: 'v001' }], ['/api/final/plan', { versionId: proposed }], ['/api/adopt/plan', { requestId: 'a001' }], ['/api/adopt', { ticket: 'x' }], ['/api/feedback', { versionId: proposed, comment: 'x' }]];
   for (const [route, body] of routes) {
     assert.equal((await human(route, body, { cookie: null })).status, 403, route);
     const r = await fetch(`${BASE}${route}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${agentToken}` }, body: JSON.stringify(body) });
@@ -117,7 +124,7 @@ await check('AC-06 human endpoints refuse requests without the UI cookie (also w
   assert.equal((await fetch(`${BASE}/api/agent/status`)).status, 401);
   assert.equal((await fetch(`${BASE}/runs/${proposed}/draft.png`)).status, 403, 'render files need a session');
   assert.equal((await fetch(`${BASE}/runs/${proposed}/draft.png`, { headers: { cookie: uiCookie } })).status, 200);
-  assert.equal((await state()).versions.find((v) => v.id === proposed).status, 'proposed');
+  assert.equal((await state()).versions.find((v: { id: string }) => v.id === proposed).status, 'proposed');
 });
 
 await check('AC-05 wait_for_feedback times out, then delivers selection + comment (and wakes early)', async () => {
@@ -131,7 +138,7 @@ await check('AC-05 wait_for_feedback times out, then delivers selection + commen
   const got = textOf(await waiting);
   assert.ok(Date.now() - t1 < 5000, 'long-poll should wake on the event');
   assert.equal(got.timeout, false);
-  const ev = got.events.find((e) => e.type === 'feedback');
+  const ev = got.events.find((e: { type: string }) => e.type === 'feedback');
   assert.equal(ev.version, proposed); assert.deepEqual(ev.selection, ['vase', 'ring']); assert.equal(ev.comment, 'もっと暗い青に');
   assert.equal(textOf(await tool('wait_for_feedback', { timeout_sec: 0 })).timeout, true, 'events are delivered once');
 });
@@ -145,10 +152,10 @@ await check('AC-05 an aborted long-poll does not swallow the next event', async 
   await human('/api/feedback', { versionId: proposed, selection: [], comment: 'after abort' });
   await new Promise((r) => setTimeout(r, 200));
   const got = textOf(await tool('wait_for_feedback', { timeout_sec: 2 }));
-  assert.ok(got.events.some((e) => e.comment === 'after abort'), JSON.stringify(got));
+  assert.ok(got.events.some((e: { comment: string }) => e.comment === 'after abort'), JSON.stringify(got));
 });
 
-const adopt = async (slug) => {
+const adopt = async (slug: string) => {
   const req = textOf(await tool('request_adoption', { version: proposed, slug, reason: 'hero for landing' }));
   assert.equal(req.status, 'pending_human_approval');
   const plan = await human('/api/adopt/plan', { requestId: req.request });
@@ -168,7 +175,7 @@ await check('AC-07 approved adoption writes the PNG and a manifest with matching
   for (const k of ['scene', 'sceneHash', 'vork', 'profile', 'reason']) assert.ok(m[k], `manifest.${k}`);
   assert.equal(m.version, proposed);
   const s = await state(); assert.equal(s.head, proposed, 'adopting a proposal accepts it');
-  const ev = textOf(await tool('wait_for_feedback', { timeout_sec: 2 })).events.find((e) => e.type === 'adopted');
+  const ev = textOf(await tool('wait_for_feedback', { timeout_sec: 2 })).events.find((e: { type: string }) => e.type === 'adopted');
   assert.equal(ev.asset, 'public/vork/hero.png');
 });
 
@@ -193,7 +200,7 @@ await check('AC-07 approval pins the target: changing assetDir after approval ab
 await check('AC-07 approval pins the scene: editing scene.json after approval is refused', async () => {
   const { plan } = await adopt('tamper');
   const f = path.join(PROJECT, '.vork', proposed, 'scene.json'); const orig = fs.readFileSync(f, 'utf8');
-  const tampered = JSON.parse(orig); tampered.nodes.find((n) => n.name === 'vase').materials[0].inputs.base_color = [1, 0, 0];
+  const tampered = JSON.parse(orig); tampered.nodes.find((n: SceneNode) => n.name === 'vase').materials[0].inputs.base_color = [1, 0, 0];
   fs.writeFileSync(f, JSON.stringify(tampered, null, 2));
   const r = await human('/api/adopt', { ticket: plan.ticket });
   fs.writeFileSync(f, orig);
@@ -203,7 +210,7 @@ await check('AC-07 approval pins the scene: editing scene.json after approval is
 
 await check('one Director per project: a second instance refuses to start', async () => {
   const { spawnSync } = await import('node:child_process');
-  const r = spawnSync(process.execPath, [path.join(ROOT, 'server.mjs'), '--project', PROJECT], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1' }, encoding: 'utf8', timeout: 20000 });
+  const r = spawnSync(process.execPath, [path.join(ROOT, 'server.mts'), '--project', PROJECT], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1' }, encoding: 'utf8', timeout: 20000 });
   assert.equal(r.status, 3, r.stderr + r.stdout); assert.match(r.stderr, /already running/);
 });
 
@@ -232,7 +239,7 @@ await check('AC-10 report: fixture gives exact numbers; live project counts matc
   ];
   assert.deepEqual(reportFromAudit(fixture), { proposals: 2, feedbackRounds: 1, discards: 1, adoptionRequests: 1, adoptions: 1, adoptionRejections: 0, minutesFirstProposalToAdoption: 12.5 });
   const { execFileSync } = await import('node:child_process');
-  const live = JSON.parse(execFileSync(process.execPath, [path.join(ROOT, 'server.mjs'), '--report', PROJECT], { encoding: 'utf8' }));
+  const live = JSON.parse(execFileSync(process.execPath, [path.join(ROOT, 'server.mts'), '--report', PROJECT], { encoding: 'utf8' }));
   assert.equal(live.proposals, 1); assert.equal(live.feedbackRounds, 2); assert.equal(live.adoptions, 2); assert.equal(live.adoptionRequests, 5);
   assert.ok(live.minutesFirstProposalToAdoption >= 0);
 });
