@@ -47,7 +47,7 @@ const say = (msg) => { $('#live').textContent = ''; setTimeout(() => ($('#live')
 /**
  * A failure stays on screen next to what failed until it is dismissed or the same action succeeds (#53). Each one is
  * role=alert, so screen readers announce it too. Dismissing it returns focus to the control that failed.
- * @param {'view' | 'adopt' | 'ask' | 'review' | 'final' | 'edit'} scope the .errs container: #err-<scope>
+ * @param {'view' | 'preview' | 'adopt' | 'ask' | 'review' | 'final' | 'edit'} scope the .errs container: #err-<scope>
  * @param {string} msg
  * @param {{ retry?: () => unknown, retryLabel?: string }} [opts]
  */
@@ -65,7 +65,7 @@ function fail(scope, msg, opts = {}) {
   x.onclick = close; el.append(x);
   box.append(el);
 }
-/** @param {'view' | 'adopt' | 'ask' | 'review' | 'final' | 'edit'} scope */
+/** @param {'view' | 'preview' | 'adopt' | 'ask' | 'review' | 'final' | 'edit'} scope */
 const clearFails = (scope) => { $(`#err-${scope}`).innerHTML = ''; };
 /** @param {unknown} e */
 const why = (e) => /** @type {Error} */ (e).message;
@@ -93,15 +93,23 @@ const hexToLin = (h) => [1, 3, 5].map((i) => +toL(parseInt(h.slice(i, i + 2), 16
  */
 const isColor = (v) => Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === 'number' && n >= 0 && n <= 1.5);
 
+let loadSeq = 0;
 async function load(keepView = true) {
-  S.data = await api('/api/state');
+  // Several callers load (the poll, finished jobs, decisions); only the newest answer is applied.
+  const seq = ++loadSeq; const d = await api('/api/state'); if (seq !== loadSeq) return;
+  // A new agent version is announced by whichever load sees it first, not only by the poll.
+  const known = S.data && new Set(S.data.versions.map((v) => v.id));
+  const fresh = known ? d.versions.filter((/** @type {Version} */ v) => !known.has(v.id) && v.origin === 'agent') : [];
+  S.data = d;
   if (!keepView || !V(S.viewId)) S.viewId = S.data.head;
   S.sig = signature(S.data);
   $('#meta').textContent = ADE()
     ? `${S.data.vork} · ADE mode · project ${S.data.project?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''} · proposals come from your agent via MCP · local only`
     : `${S.data.vork} · agent: claude ${S.data.model} (no tools) · local only`;
   $('#meta').title = ADE() ? S.data.project || '' : ''; // only the directory name is on screen (recordings, one-line header); the full path on hover
-  applyMode(); renderVersions(); renderObjects(); renderReview(); renderInspector(); renderAdoptions(); renderEvents(); renderAudit(); await drawViewport();
+  applyMode(); renderVersions(); renderObjects(); renderReview(); renderInspector(); renderAdoptions(); renderEvents(); renderAudit();
+  if (fresh.length) notify(/** @type {Version} */ (fresh.at(-1)).id);
+  await drawViewport();
 }
 const ADE = () => S.data?.mode === 'ade';
 /** @param {Data} d */
@@ -145,6 +153,8 @@ function renderAdoptions() {
 }
 /** @param {string | undefined} requestId */
 async function reviewAdoption(requestId) {
+  const req = S.data.adoptionRequests.find((a) => a.id === requestId);
+  if (req && discarding(req.version)) return fail('adopt', `${req.version} is about to be discarded; undo the discard to review ${requestId}.`);
   /** @type {AdoptPlan} */
   let plan;
   try { plan = await api('/api/adopt/plan', { requestId }); } catch (e) { return fail('adopt', `Cannot adopt ${requestId}: ${why(e)}`); }
@@ -214,11 +224,7 @@ setInterval(async () => {
   /** @type {Data | null} */
   const d = await api('/api/state').catch(() => null);
   connection(!!d);
-  if (d && signature(d) !== S.sig) {
-    const fresh = d.versions.filter((v) => !V(v.id) && v.origin === 'agent');
-    await load(); // keeps the version you are viewing; never switches under your cursor
-    if (fresh.length) notify(/** @type {Version} */ (fresh.at(-1)).id);
-  }
+  if (d && signature(d) !== S.sig) await load(); // keeps the version you are viewing; never switches under your cursor
 }, 2500);
 
 // ---------- versions ----------
@@ -318,16 +324,18 @@ async function drawPage() {
   if (!pv) {
     $('#empty').hidden = false; $('#empty').textContent = 'Opening the page with this candidate…';
     pv = /** @type {PagePreview} */ (await api('/api/preview', { versionId: v.id, profile: prof }).catch((e) => ({ ok: false, reason: e.message })));
+    if (seq !== drawSeq) { if (pv.ok) (v.pagePreviews ||= {})[prof] = pv; return; }
     if (pv.ok) (v.pagePreviews ||= {})[prof] = pv;
   }
+  if (seq !== drawSeq) return;
   $('#empty').textContent = 'No render at this quality yet.';
   if (!pv.ok) {
     // The render is shown instead; the reason stays above the viewport with a retry (#53).
     S.onPage = false; $('#pageBtn').setAttribute('aria-pressed', 'false');
-    fail('view', `Page preview of ${v.id} unavailable: ${pv.reason}. Showing the render instead.`, { retry: () => { S.onPage = true; $('#pageBtn').setAttribute('aria-pressed', 'true'); return drawViewport(); } });
+    fail('preview', `Page preview of ${v.id} unavailable: ${pv.reason}. Showing the render instead.`, { retry: () => { S.onPage = true; $('#pageBtn').setAttribute('aria-pressed', 'true'); return drawViewport(); } });
     return drawViewport();
   }
-  clearFails('view');
+  clearFails('preview');
   $('#empty').hidden = true;
   const img = await loadImg(pv.image);
   if (seq !== drawSeq) return;
@@ -521,6 +529,7 @@ $('#askForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const instruction = /** @type {HTMLTextAreaElement} */ ($('#instruction')).value.trim(); if (!instruction) return $('#instruction').focus();
   if (ADE()) {
+    if (discarding(askTarget())) return fail('ask', `${askTarget()} is about to be discarded; undo the discard or open another version. Your text is kept.`);
     try { await api('/api/feedback', { versionId: askTarget(), selection: [...S.selection], comment: instruction }); /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = ''; clearFails('ask'); say('Sent to your agent'); await load(); }
     catch (err) { fail('ask', `Could not send: ${why(err)}. Your text is kept.`); }
     return;
@@ -551,20 +560,39 @@ const JOBS = new Map();
 const runningJob = (versionId, kind) => [...JOBS.values()].find((j) => j.status === 'running' && j.versionId === versionId && (!kind || j.kind === kind));
 const JOB_TITLE = /** @type {Record<string, string>} */ ({ render: 'Render', propose: 'Proposal from', adopt: 'Adoption of' });
 function renderJobs() {
-  const jobs = [...JOBS.values()];
-  $('#jobBox').hidden = !jobs.length;
-  $('#jobList').innerHTML = jobs.map((j) => `<li class="jobrow" data-job="${esc(j.id)}" data-status="${esc(j.status)}" data-version="${esc(j.versionId)}">
-    <div class="jobhead"><b>${esc(JOB_TITLE[j.kind] || j.kind)} ${esc(j.versionId)}</b><span class="hint">${esc(j.status === 'running' ? `elapsed ${(j.elapsed / 1000).toFixed(0)}s (no ETA: agent and GPU time vary)` : j.status)}</span>
-      ${j.status === 'running' ? `<button type="button" class="ghost" data-cancel-job="${esc(j.id)}">Cancel</button>` : `<button type="button" class="ghost" data-dismiss-job="${esc(j.id)}" aria-label="Dismiss">✕</button>`}</div>
-    <ol class="steps">${j.steps.map((st) => `<li class="${st.status}"><span class="ic" aria-hidden="true"></span><span>${esc(st.label)}</span><span class="t">${(st.t / 1000).toFixed(1)}s</span>${st.detail ? `<pre>${esc(st.detail)}</pre>` : ''}</li>`).join('')}</ol></li>`).join('');
-  $('#jobList').querySelectorAll('button[data-cancel-job]').forEach((b) => (/** @type {HTMLButtonElement} */ (b).onclick = () => api(`/api/jobs/${/** @type {HTMLButtonElement} */ (b).dataset.cancelJob}/cancel`, {}).catch((e) => fail('view', `Cannot cancel: ${why(e)}`))));
-  $('#jobList').querySelectorAll('button[data-dismiss-job]').forEach((b) => (/** @type {HTMLButtonElement} */ (b).onclick = () => { JOBS.delete(/** @type {string} */ (/** @type {HTMLButtonElement} */ (b).dataset.dismissJob)); renderJobs(); }));
+  const list = $('#jobList'); $('#jobBox').hidden = !JOBS.size;
+  // Rows are kept per job and updated in place: rebuilding them every 500 ms would take focus and clicks from Cancel.
+  for (const li of /** @type {NodeListOf<HTMLElement>} */ (list.querySelectorAll('li.jobrow'))) if (!JOBS.has(/** @type {string} */ (li.dataset.job))) li.remove();
+  for (const j of JOBS.values()) {
+    let li = /** @type {HTMLElement | null} */ (list.querySelector(`li.jobrow[data-job="${CSS.escape(j.id)}"]`));
+    if (!li) {
+      li = document.createElement('li'); li.className = 'jobrow'; li.dataset.job = j.id; li.dataset.version = j.versionId;
+      li.innerHTML = `<div class="jobhead"><b>${esc(JOB_TITLE[j.kind] || j.kind)} ${esc(j.versionId)}</b><span class="hint"></span><button type="button" class="ghost"></button></div><ol class="steps"></ol>`;
+      const id = j.id; const btn = /** @type {HTMLButtonElement} */ (li.querySelector('button'));
+      btn.onclick = () => {
+        if (JOBS.get(id)?.status === 'running') api(`/api/jobs/${id}/cancel`, {}).catch((e) => fail('view', `Cannot cancel: ${why(e)}`));
+        else { JOBS.delete(id); renderJobs(); }
+      };
+      list.append(li);
+    }
+    li.dataset.status = j.status;
+    /** @type {HTMLElement} */ (li.querySelector('.jobhead .hint')).textContent = j.status === 'running' ? `elapsed ${(j.elapsed / 1000).toFixed(0)}s (no ETA: agent and GPU time vary)` : j.status;
+    const btn = /** @type {HTMLButtonElement} */ (li.querySelector('.jobhead button'));
+    const running = j.status === 'running';
+    if (btn.dataset.mode !== String(running)) {
+      btn.dataset.mode = String(running); btn.textContent = running ? 'Cancel' : '✕';
+      if (running) { btn.removeAttribute('aria-label'); btn.dataset.cancelJob = j.id; delete btn.dataset.dismissJob; }
+      else { btn.setAttribute('aria-label', 'Dismiss'); btn.dataset.dismissJob = j.id; delete btn.dataset.cancelJob; }
+    }
+    const steps = j.steps.map((st) => `<li class="${st.status}"><span class="ic" aria-hidden="true"></span><span>${esc(st.label)}</span><span class="t">${(st.t / 1000).toFixed(1)}s</span>${st.detail ? `<pre>${esc(st.detail)}</pre>` : ''}</li>`).join('');
+    const ol = /** @type {HTMLElement} */ (li.querySelector('.steps')); if (ol.dataset.html !== steps) { ol.dataset.html = steps; ol.innerHTML = steps; }
+  }
   // The version list marks versions with a running job; the final render waits for the viewed version's jobs.
-  for (const li of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#versionList button[data-id]'))) li.classList.toggle('busy', !!runningJob(/** @type {string} */ (li.dataset.id)));
+  for (const el of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll('#versionList button[data-id]'))) el.classList.toggle('busy', !!runningJob(/** @type {string} */ (el.dataset.id)));
   renderBusy(); renderTarget();
 }
 /** Where the text in the box goes: the version on screen, shown above the box and following every switch (#59). */
-function askTarget() { const v = viewV(); return !ADE() && v.status === 'discarded' ? S.data.head : v.id; }
+function askTarget() { const v = viewV(); return !ADE() && (v.status === 'discarded' || discarding(v.id)) ? S.data.head : v.id; }
 function renderTarget() {
   const v = viewV(); const to = askTarget(); const t = V(to);
   $('#askTarget').innerHTML = ADE()
@@ -574,7 +602,7 @@ function renderTarget() {
 /** Says next to a button why it cannot be used while a job of the viewed version runs. */
 function renderBusy() {
   if (!S.data) return;
-  const busy = runningJob(S.viewId);
+  const busy = runningJob(S.viewId, 'render') || runningJob(S.viewId, 'adopt');
   /** @type {HTMLButtonElement} */ ($('#finalBtn')).disabled = !!busy;
   $('#finalBusy').hidden = !busy; $('#finalBusy').textContent = busy ? `${S.viewId} has a running job (${busy.kind}); plan the final render when it ends.` : '';
 }
@@ -646,12 +674,15 @@ function renderReview() {
   const p = v.proposal; const base = baseOf(v); const diff = base.kind === 'head' ? /** @type {Diff[]} */ (v.headDiff) : v.diff;
   // Against HEAD, the claims of the unaccepted versions in between count too: they describe changes this one carries.
   const between = []; for (let a = V(/** @type {string} */ (v.parent)); base.kind === 'head' && a && a.id !== S.data.head && a.status !== 'accepted'; a = V(/** @type {string} */ (a.parent))) between.push(a);
-  const claims = [...p.claimed_changes, ...between.flatMap((a) => a.proposal?.claimed_changes || [])];
-  const { isClaimed, wildMatches, ghost } = checkClaims(claims, diff);
+  const own = checkClaims(p.claimed_changes, diff);
+  const all = checkClaims([...p.claimed_changes, ...between.flatMap((a) => a.proposal?.claimed_changes || [])], diff);
+  const { wildMatches, ghost } = own; const isClaimed = all.isClaimed;
+  /** @param {Diff} d */
+  const claimClass = (d) => (own.isClaimed(d) ? '' : all.isClaimed(d) ? 'inherited' : 'unclaimed');
   const typeOf = new Map([...(V(/** @type {string} */ (base.id))?.scene.nodes || []), ...v.scene.nodes].map((n) => [n.name, n.type]));
   const { groups: groupList, rest } = groupDiff(diff, typeOf);
   /** @param {Diff} d */
-  const row = (d) => `<tr class="${isClaimed(d) ? '' : 'unclaimed'}"><td>${esc(d.node)}${d.path ? '.' + esc(d.path) : ''}</td><td>${fmt(d.before)}</td><td>${fmt(d.after)}</td></tr>`;
+  const row = (d) => `<tr class="${claimClass(d)}"><td>${esc(d.node)}${d.path ? '.' + esc(d.path) : ''}</td><td>${fmt(d.before)}</td><td>${fmt(d.after)}</td></tr>`;
   /** @param {Diff[]} ds */
   const unclaimedNote = (ds) => { const u = ds.filter((d) => !isClaimed(d)).length; return u ? ` <span class="flag">· ⚠ ${u} not mentioned</span>` : ''; };
   const CAP = 200; const hidden = rest.slice(CAP);
@@ -725,7 +756,7 @@ function renderInspector() {
   // adoption requests of this version, next to its actions
   const reqs = (S.data.adoptionRequests || []).filter((a) => a.version === v.id && (a.status === 'pending' || a.status === 'adopting'));
   $('#vrequests').hidden = !reqs.length;
-  $('#vrequests').innerHTML = reqs.map((a) => `<li><span>Adoption request <b>${esc(a.slug)}</b></span>${a.status === 'adopting' ? '<span class="hint">adopting…</span>' : `<button class="ghost" data-req="${esc(a.id)}">Review…</button>`}</li>`).join('');
+  $('#vrequests').innerHTML = reqs.map((a) => `<li><span>Adoption request <b>${esc(a.slug)}</b></span>${a.status === 'adopting' ? '<span class="hint">adopting…</span>' : discarding(v.id) ? '<span class="hint">rejected when the discard is final</span>' : `<button class="ghost" data-req="${esc(a.id)}">Review…</button>`}</li>`).join('');
   $('#vrequests').querySelectorAll('button[data-req]').forEach((b) => (/** @type {HTMLButtonElement} */ (b).onclick = () => reviewAdoption(/** @type {HTMLButtonElement} */ (b).dataset.req)));
   renderBusy();
 }

@@ -242,6 +242,21 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     assert.equal(await page.locator('#compareToggle').isDisabled(), true, 'v001 has no parent'); assert.match(await page.textContent('#compareWhy') as string, /no parent/);
   });
 
+  await check('#53 refused feedback and decisions stay on screen for 5 s and keep what was typed', async () => {
+    await page.click(`button[data-id="${vid}"]`); await page.waitForSelector('#acceptBtn');
+    await page.route('**/api/feedback', (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'disk full' }) }));
+    await page.route('**/api/decide', (r) => r.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'this version is being adopted' }) }));
+    try {
+      await page.fill('#instruction', 'keep me'); await page.click('#askBtn');
+      await page.click('#acceptBtn');
+      await sleep(5000);
+      assert.match(await page.textContent('#err-ask') as string, /Could not send: disk full/); assert.equal(await page.inputValue('#instruction'), 'keep me');
+      assert.match(await page.textContent('#err-review') as string, new RegExp(`Cannot accept ${vid}: this version is being adopted`));
+      assert.equal(await page.locator('#err-ask .err[role=alert]').isVisible(), true); assert.equal(await page.locator('#err-review .err[role=alert]').isVisible(), true);
+    } finally { await page.unroute('**/api/feedback'); await page.unroute('**/api/decide'); }
+    await page.click('#err-ask button[aria-label=Dismiss]'); await page.click('#err-review button[aria-label=Dismiss]'); await page.fill('#instruction', '');
+  });
+
   await check('#54 while a final render runs, the page keeps updating and other versions can be viewed', async () => {
     fs.writeFileSync(GATE, '');
     try {
@@ -253,6 +268,10 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
       // the agent asks for an adoption meanwhile: the request shows up within the poll interval
       const r = await agent('POST', '/api/agent/adoption-request', { version: vid, slug: 'during-job', reason: 'x' });
       await page.waitForFunction(() => document.querySelector('#adoptList')!.textContent!.includes('during-job'), null, { timeout: 3500 });
+      // a proposal made now waits for the GPU (its validation render queues behind the final render, #49)
+      const scene: { nodes: SceneNode[] } = (await agent('GET', '/api/agent/scene?version=v001')).scene;
+      scene.nodes.find((n) => n.name === 'key')!.energy = 77;
+      const queued = agent('POST', '/api/agent/propose', { base: 'v001', scene, interpretation: 'made during a final render', claimed_changes: [{ node: 'key', what: 'energy 77', why: 'test' }] });
       // another version can be opened and compared while the job runs
       await page.click('button[data-id="v001"]'); await page.waitForSelector('#canvas[data-ready="v001:draft"]', { timeout: 10000 });
       assert.equal(await page.locator('#finalBtn').isDisabled(), false, 'v001 has no job');
@@ -262,6 +281,10 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
       await sleep(2000);
       assert.equal(await page.locator(`#jobList [data-status="cancelled"][data-version="${vid}"]`).count(), 1, 'a cancelled job stays listed');
       await page.click(`#jobList [data-version="${vid}"] button[data-dismiss-job]`);
+      // once the GPU is free the queued proposal is made, listed and announced
+      const made = (await queued).version; assert.ok(made);
+      await page.waitForFunction((id) => !!document.querySelector(`#versionList button[data-id="${id}"]`), made, { timeout: 10000 });
+      await page.waitForSelector('#notice:not([hidden])', { timeout: 10000 }); await page.click('#notice button[aria-label=Dismiss]');
       assert.equal(await page.evaluate(async (id) => (await fetch('/api/adopt/reject', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: id }) })).status, r.request), 200);
       await page.click(`button[data-id="${vid}"]`); await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`);
     } finally { fs.rmSync(GATE, { force: true }); }
@@ -297,14 +320,14 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.click(`button[data-id="${vid}"]`); await sleep(500);
     await page.click('[data-profile="previs"]'); await sleep(300); // no cached page preview for previs yet
     await page.click('#pageBtn');
-    await page.waitForFunction(() => document.querySelector('#err-view')!.textContent!.includes('unavailable'), null, { timeout: 60000 });
+    await page.waitForFunction(() => document.querySelector('#err-preview')!.textContent!.includes('unavailable'), null, { timeout: 60000 });
     await sleep(5000);
     // #53: the reason stays on screen (not only for screen readers) next to the render shown instead
-    assert.equal(await page.locator('#err-view .err[role=alert]').isVisible(), true);
+    assert.equal(await page.locator('#err-preview .err[role=alert]').isVisible(), true);
     assert.doesNotMatch(await page.textContent('#viewing') as string, /on page/);
     assert.equal(await page.locator('#pageBtn').getAttribute('aria-pressed'), 'false');
-    await page.focus('#pageBtn'); await page.click('#err-view .err button[aria-label=Dismiss]');
-    assert.equal(await page.locator('#err-view .err').count(), 0);
+    await page.focus('#pageBtn'); await page.click('#err-preview .err button[aria-label=Dismiss]');
+    assert.equal(await page.locator('#err-preview .err').count(), 0);
     assert.equal(await page.evaluate(() => document.activeElement?.id), 'pageBtn', 'dismissing returns focus to the control');
     await page.click('[data-profile="draft"]');
   });

@@ -119,6 +119,7 @@ textarea { width: 100%; resize: vertical; background: var(--sunken); color: var(
 .difftable th { text-align: left; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line); padding: 3px 4px; }
 .difftable td { border-bottom: 1px solid var(--line-soft); padding: 3px 4px; vertical-align: top; font-family: ui-monospace, monospace; word-break: break-all; }
 .difftable tr.unclaimed td:first-child::after { content: " ⚠ not mentioned"; color: var(--warn); font-family: inherit; }
+.difftable tr.inherited td:first-child::after { content: " (claimed by an earlier proposal)"; color: var(--muted); font-family: inherit; }
 .difftable tr.group td { font-family: inherit; } .difftable summary { cursor: pointer; } .difftable .difftable { margin-top: 4px; }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 4px; border: 1px solid #fff3; }
 .flag { color: var(--warn); } .flag.bad { color: var(--bad); }
@@ -165,7 +166,7 @@ dialog h2 { font-size: 15px; text-transform: none; letter-spacing: 0; color: var
 .err .msg { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
 .err button { flex: none; padding: 2px 8px; }
 .conn { background: var(--bad-soft); border-bottom: 1px solid var(--bad); padding: 6px 16px; }
-#err-view { margin-bottom: 8px; }
+#err-view, #err-preview { margin-bottom: 8px; }
 .undo { position: fixed; left: 16px; bottom: 16px; z-index: 10; background: var(--panel); border: 1px solid var(--warn); border-radius: 6px; padding: 6px 10px; display: flex; gap: 10px; align-items: center; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
 .planbox { border: 1px solid var(--accent); border-radius: 8px; padding: 10px; }
 .planbox h3 { margin: 0; font-size: 13px; }
