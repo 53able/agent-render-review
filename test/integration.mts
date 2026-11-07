@@ -904,6 +904,24 @@ await check('#39 RENDER_DIRECTOR_BROWSER opens the pairing link with the given c
   } finally { proc.kill('SIGTERM'); }
 });
 
+await check('#44 RENDER_DIRECTOR_BROWSER_STDIN=1 passes the pairing link on standard input, not as an argument', async () => {
+  const { spawn } = await import('node:child_process'); const net = await import('node:net');
+  const port = await new Promise<number>((ok) => { const srv = net.createServer().listen(0, '127.0.0.1', () => { const p = (srv.address() as { port: number }).port; srv.close(() => ok(p)); }); });
+  const got = path.join(tmp, 'browser-stdin'); const opener = path.join(BIN, 'fake-browser-stdin');
+  fs.writeFileSync(opener, `#!/bin/sh\nread link\n{ printf 'args:%s\\n' "$*"; printf 'stdin:%s\\n' "$link"; } > '${got}.tmp' && mv '${got}.tmp' '${got}'\n`, { mode: 0o755 });
+  const env: NodeJS.ProcessEnv = { ...process.env, RENDER_DIRECTOR_RUNS: path.join(tmp, 'browser-stdin-runs'), RENDER_DIRECTOR_BROWSER: JSON.stringify([opener, '--profile', 'review']), RENDER_DIRECTOR_BROWSER_STDIN: '1' };
+  delete env.RENDER_DIRECTOR_NO_OPEN; delete env.RENDER_DIRECTOR_PAIR_TOKEN;
+  const proc = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !fs.existsSync(got); i++) await sleep(150);
+    const [args, input] = fs.readFileSync(got, 'utf8').trim().split('\n');
+    assert.equal(args, 'args:--profile review', 'the link is not an argument');
+    const m = new RegExp(`^stdin:http://127\\.0\\.0\\.1:${port}/#pair=([0-9a-f]+)$`).exec(input); assert.ok(m, input);
+    const pr = await fetch(`http://127.0.0.1:${port}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: m[1] }) });
+    assert.equal(pr.status, 200);
+  } finally { proc.kill('SIGTERM'); }
+});
+
 await check('#17 /api/state keeps its shape', async () => {
   const s = await state();
   assertShape(s, {

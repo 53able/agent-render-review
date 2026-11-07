@@ -120,7 +120,15 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         opener = cmd;
       } catch (e: any) { console.error(`ignoring RENDER_DIRECTOR_BROWSER: ${e.message}`); }
     }
-    try { spawn(opener[0], [...opener.slice(1), link], { detached: true, stdio: 'ignore' }).on('error', (e) => console.error(`could not open the review tab with ${opener[0]}: ${e.message}`)).unref(); return true; } catch { return false; }
+    // RENDER_DIRECTOR_BROWSER_STDIN=1: the link goes to the command's standard input (one line) instead of its last
+    // argument, so a long-running command does not show it to ps for as long as it runs (#44).
+    const viaStdin = Boolean(custom) && process.env.RENDER_DIRECTOR_BROWSER_STDIN === '1';
+    try {
+      const child = spawn(opener[0], viaStdin ? opener.slice(1) : [...opener.slice(1), link], { detached: true, stdio: [viaStdin ? 'pipe' : 'ignore', 'ignore', 'ignore'] });
+      child.on('error', (e) => console.error(`could not open the review tab with ${opener[0]}: ${e.message}`));
+      if (viaStdin) { child.stdin!.on('error', () => {}); child.stdin!.end(`${link}\n`); }
+      child.unref(); return true;
+    } catch { return false; }
   }
   const cookie = (req: http.IncomingMessage, name: string): string | undefined => (req.headers.cookie || '').split(';').map((s) => s.trim().split('=')).find(([k]) => k === name)?.[1];
   const tokenEq = (a: unknown, b: string): boolean => typeof a === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
