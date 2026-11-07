@@ -156,6 +156,29 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     assert.equal(await page.locator('#wipe').isVisible(), true);
     await page.uncheck('#compareToggle');
   });
+  await check('at 1440×900 the page itself does not scroll in either theme while the job list shows: the panels scroll inside', async () => {
+    // A failed job stays listed until dismissed, so a fake one (no GPU) keeps the job list on screen while measuring.
+    const v = await page.evaluate(() => document.querySelector('#canvas')!.getAttribute('data-ready')!.split(':')[0]!);
+    const steps = Array.from({ length: 8 }, (_, i) => ({ status: 'done', label: `step ${i + 1}`, t: i * 100 }));
+    const job = { id: 'fakejob', kind: 'render', status: 'running', versionId: v, steps: [], elapsed: 0, result: null };
+    await page.route('**/api/render', (r) => r.fulfill({ status: 202, contentType: 'application/json', body: JSON.stringify(job) }));
+    await page.route('**/api/jobs/fakejob', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...job, status: 'failed', error: 'fake', steps }) }));
+    await page.setViewportSize({ width: 1440, height: 900 }); await sleep(300);
+    try {
+      await page.click('#finalBtn'); await page.waitForSelector('#finalPlanBox:not([hidden])'); await page.click('#finalApprove');
+      await page.waitForSelector('#jobList [data-job="fakejob"][data-status="failed"]', { timeout: 5000 });
+      for (const colorScheme of ['light', 'dark'] as const) {
+        await page.emulateMedia({ colorScheme }); await sleep(200);
+        const [sh, ih, content] = await page.evaluate(() => [document.documentElement.scrollHeight, window.innerHeight, document.querySelector('.inspector')!.scrollHeight]);
+        assert.ok(content > ih, `${colorScheme}: the inspector content (${content} px) is taller than the screen (${ih} px)`);
+        assert.equal(sh, ih, `${colorScheme}: scrollHeight ${sh} vs innerHeight ${ih}`);
+      }
+    } finally {
+      await page.click('#jobList [data-job="fakejob"] button[data-dismiss-job]').catch(() => {});
+      await page.unroute('**/api/render'); await page.unroute('**/api/jobs/fakejob');
+      await page.emulateMedia({ colorScheme: null }); await page.setViewportSize({ width: 1500, height: 1000 }); await sleep(200);
+    }
+  });
   await check('#57 the final render plan opens inline: the wipe works meanwhile, and switching versions closes it', async () => {
     const head = await page.evaluate(() => document.querySelector('.headmark')!.closest('button')!.getAttribute('data-id'));
     await page.click('#finalBtn'); await page.waitForSelector('#finalPlanBox:not([hidden])');
@@ -352,16 +375,6 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     await page.setViewportSize({ width: 1500, height: 1000 });
   });
 
-  await check('at 1440×900 the page itself does not scroll in either theme: the panels scroll inside', async () => {
-    await page.setViewportSize({ width: 1440, height: 900 }); await sleep(300);
-    try {
-      for (const colorScheme of ['light', 'dark'] as const) {
-        await page.emulateMedia({ colorScheme }); await sleep(200);
-        const [sh, ih] = await page.evaluate(() => [document.documentElement.scrollHeight, window.innerHeight]);
-        assert.equal(sh, ih, `${colorScheme}: scrollHeight ${sh} vs innerHeight ${ih}`);
-      }
-    } finally { await page.emulateMedia({ colorScheme: null }); await page.setViewportSize({ width: 1500, height: 1000 }); }
-  });
   await check('at 390 px Plan final render… starts at the left edge of the inspector heading', async () => {
     // v001 is HEAD here: its decide row is empty, which is where an unintended gap came from.
     await page.click('button[data-id="v001"]'); await page.waitForSelector('#canvas[data-ready="v001:draft"]');
@@ -730,13 +743,20 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     // v001 as HEAD: the accepted large scene is not HEAD, and its dots are not in HEAD's scene.
     const st = await page.evaluate(() => fetch('/api/checkout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ versionId: 'v001' }) }).then((r) => r.status));
     assert.equal(st, 200);
+    // The page knows v001 is HEAD (from the poll): that is the version shown in place of one not loaded yet.
+    await page.waitForFunction(() => document.querySelector('.headmark')?.closest('button')?.getAttribute('data-id') === 'v001', null, { timeout: 10000 });
     await page.click(`button[data-id="${large}"]`); await page.waitForSelector(`#canvas[data-ready="${large}:draft"]`, { timeout: 15000 });
     const dot = largeNodeName(0);
     await page.fill('#objectFilter', dot);
     await page.locator(`#objectList li[data-name="${dot}"] [role=checkbox]`).check();
     await page.waitForSelector('#quick input[type=range]'); await idle(page);
     const before = await versionsOf(page);
-    await dragQuickInput(page, 'range', ['0.7']);
+    // /api/state is held until the edit has answered, so no poll brings the new version in before the page views it.
+    let release!: () => void; const answered = new Promise<void>((ok) => { release = ok; });
+    await page.route('**/api/state', async (r) => { await answered; await r.continue(); });
+    await page.route('**/api/edit', async (r) => { const res = await r.fetch(); await r.fulfill({ response: res }); release(); });
+    try { await dragQuickInput(page, 'range', ['0.7']); await answered; }
+    finally { await page.unroute('**/api/edit'); await page.unroute('**/api/state'); }
     const after = await waitForNewVersion(page, before.length + 1);
     assert.equal(after.at(-1)!.parent, large);
     assert.match(await page.textContent('#selCount') as string, new RegExp(dot), 'the dot is still selected');
