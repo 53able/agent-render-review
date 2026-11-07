@@ -263,7 +263,8 @@ await check('#4 adoption-request needs a string slug; propose needs { node, what
   assert.equal((await state()).versions.length, versions);
   const pending = (await state()).adoptionRequests.find((a: Json) => a.status === 'pending');
   assert.ok(pending, 'an earlier check leaves a pending adoption request');
-  assert.equal((await human('/api/adopt/plan', { requestId: pending.id, slug: ['hero'] })).status, 400);
+  const plan = await human('/api/adopt/plan', { requestId: pending.id, slug: ['hero'] });
+  assert.equal(plan.status, 400); assert.match(plan.json.error, /slug/);
 });
 
 await check('#2 inherited keys (toString, constructor, __proto__) are not valid profiles or edit fields', async () => {
