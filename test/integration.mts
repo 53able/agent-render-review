@@ -592,6 +592,29 @@ await check('#14 a second plan for the same request voids the first ticket; the 
   assert.equal((await state()).audit.filter((a: Json) => a.event === 'adopted' && a.request === requestId).length, 1);
 });
 
+await check('#20 reason and assumptions are bounded; one pending request per version and slug; at most 20 pending', async () => {
+  const versions = (await state()).versions.length;
+  for (const assumptions of [Array(21).fill('a'), ['x'.repeat(1001)]]) {
+    const r = await raw('/api/agent/propose', JSON.stringify({ interpretation: 'x', claimed_changes: [], scene: base, assumptions }), { agent: true });
+    assert.equal(r.status, 400); assert.match(r.json.error, /assumptions/);
+  }
+  assert.equal((await state()).versions.length, versions);
+  const long = await raw('/api/agent/adoption-request', JSON.stringify({ version: 'v001', slug: 'long', reason: 'x'.repeat(4001) }), { agent: true });
+  assert.equal(long.status, 400); assert.match(long.json.error, /reason/);
+  const first = await requestAdoption('v001', 'dup');
+  const dup = await raw('/api/agent/adoption-request', JSON.stringify({ version: 'v001', slug: 'dup', reason: 'x'.repeat(4000) }), { agent: true });
+  assert.equal(dup.status, 409); assert.equal(dup.json.request, first);
+  let refused: Json = null; const made: string[] = [];
+  for (let i = 0; i < 25 && !refused; i++) {
+    const r = await raw('/api/agent/adoption-request', JSON.stringify({ version: 'v001', slug: `fill-${i}`, reason: 'x' }), { agent: true });
+    if (r.status === 200) made.push(r.json.request); else refused = r;
+  }
+  assert.equal(refused?.status, 429, JSON.stringify(refused));
+  const s = await state(); const live = (id: string) => s.versions.find((v: Json) => v.id === id)?.status !== 'discarded';
+  assert.equal(s.adoptionRequests.filter((a: Json) => a.status === 'pending' && live(a.version)).length, 20);
+  for (const requestId of [first, ...made]) assert.equal((await human('/api/adopt/reject', { requestId })).status, 200);
+});
+
 await check('AC-01 nothing new was written under vork-director/runs', async () => {
   const after = fs.existsSync(path.join(ROOT, 'runs')) ? JSON.stringify(fs.readdirSync(path.join(ROOT, 'runs'))) : '[]';
   assert.equal(after, runsBefore);

@@ -108,6 +108,8 @@ class PayloadTooLarge extends Error {
   drain = true;
 }
 const MAX_BODY = 4e6;
+// Agent text is kept in state.json (rewritten on every save) and shown to the human, so it is bounded.
+const MAX_REASON = 4000, MAX_ASSUMPTIONS = 20, MAX_ASSUMPTION = 1000, MAX_PENDING_ADOPTIONS = 20;
 const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
 const isClaimedChange = (x: unknown): x is ClaimedChange => isPlainObject(x) && typeof x.node === 'string' && typeof x.what === 'string' && typeof x.why === 'string';
 
@@ -717,6 +719,7 @@ ${VORK_HELP}`;
       if (!b.claimed_changes.every(isClaimedChange)) return send(res, 400, { error: 'each claimed_changes item must be { node, what, why } with string values' });
       // Checked before validateScene so a bad field does not cost a vork render.
       if (b.assumptions != null && !(Array.isArray(b.assumptions) && b.assumptions.every((a) => typeof a === 'string'))) return send(res, 400, { error: 'assumptions must be an array of strings' });
+      if (Array.isArray(b.assumptions) && (b.assumptions.length > MAX_ASSUMPTIONS || b.assumptions.some((a: string) => a.length > MAX_ASSUMPTION))) return send(res, 400, { error: `assumptions: at most ${MAX_ASSUMPTIONS} items of at most ${MAX_ASSUMPTION} characters` });
       if (b.responds_to != null && !Number.isInteger(b.responds_to)) return send(res, 400, { error: 'responds_to must be an integer' });
       const assumptions: string[] = (b.assumptions as string[] | null | undefined) ?? [];
       const respondsTo = (b.responds_to as number | null | undefined) ?? null;
@@ -757,8 +760,14 @@ ${VORK_HELP}`;
       if (!PROJECT) return send(res, 409, { error: 'adoption needs Director started with --project' });
       if (!v) return send(res, 400, { error: 'version must exist and not be discarded' });
       if (b.reason != null && typeof b.reason !== 'string') return send(res, 400, { error: 'reason must be a string' });
+      if (typeof b.reason === 'string' && b.reason.length > MAX_REASON) return send(res, 400, { error: `reason must be at most ${MAX_REASON} characters` });
       let slug: string;
       try { ({ slug } = adoptionTargets(b.slug)); } catch (e: any) { return send(res, 400, { error: e.message }); }
+      const same = state.adoptionRequests.find((a) => a.status === 'pending' && a.version === v.id && a.slug === slug);
+      if (same) return send(res, 409, { error: `request ${same.id} for ${v.id} as ${slug} is already pending; call wait_for_feedback`, request: same.id });
+      // Requests for a discarded version can no longer be adopted, so they do not count.
+      if (state.adoptionRequests.filter((a) => a.status === 'pending' && liveV(a.version)).length >= MAX_PENDING_ADOPTIONS)
+        return send(res, 429, { error: `${MAX_PENDING_ADOPTIONS} adoption requests are already pending; wait for the human to decide` });
       const reqId = `a${String(state.adoptionRequests.length + 1).padStart(3, '0')}`;
       state.adoptionRequests.push({ id: reqId, version: v.id, slug, reason: b.reason ?? '', status: 'pending', t: new Date().toISOString() });
       audit('adoption_requested', { request: reqId, version: v.id, slug });

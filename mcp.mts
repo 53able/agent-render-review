@@ -114,7 +114,7 @@ server.registerTool('propose_scene', {
     scene: z.record(z.string(), z.unknown()).describe('Complete vork scene JSON, version 2'),
     interpretation: z.string().min(1).describe('One sentence: what you are trying to achieve'),
     claimed_changes: z.array(z.object({ node: z.string(), what: z.string(), why: z.string() })),
-    assumptions: z.array(z.string()).optional(),
+    assumptions: z.array(z.string().max(1000)).max(20).optional(),
     base: z.string().regex(/^v\d{3}$/).optional().describe('Version this builds on (default HEAD)'),
     responds_to: z.number().int().optional().describe('seq of the feedback event this proposal answers'),
   },
@@ -153,7 +153,7 @@ server.registerTool('wait_for_feedback', {
 server.registerTool('request_adoption', {
   annotations: { readOnlyHint: false, destructiveHint: false },
   description: 'Ask the human to adopt a version into the project as <assetDir>/<slug>.png (default public/vork/). This only queues a request; the human approves or rejects it in Director. Learn the result with wait_for_feedback (event "adopted" carries the asset path to use in code).',
-  inputSchema: { version: z.string().regex(/^v\d{3}$/), slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), reason: z.string().min(1).describe('Why this candidate fits the page') },
+  inputSchema: { version: z.string().regex(/^v\d{3}$/), slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), reason: z.string().min(1).max(4000).describe('Why this candidate fits the page') },
 }, async (args) => {
   const r = await call('POST', '/api/agent/adoption-request', args);
   return r.ok ? { content: [text({ ...r.json, review_url: r.url })] } : fail(r.json.error || `HTTP ${r.status}`);
