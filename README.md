@@ -118,6 +118,8 @@ npm run test:e2e            # ブラウザE2E（Chrome）。E2E_AGENT=1 で内�
 npm run report -- <project> # 最初の提案から採用までの時間、フィードバック回数など
 ```
 
+vork を使う試験（`npm test` の統合試験と `npm run test:e2e`）は、同じマシンでは同時に1本しか描画しません。同じ GPU で複数の vork が同時に描画すると `GPU device lost` で失敗することがあるため、試験は開始時に `os.tmpdir()` のロックファイル（`render-director-gpu-test.lock`）を取り、ほかの試験が終わるまで待ちます。Director 本体や他の GPU 処理との同時実行は防げません。
+
 実験の手順は [docs/experiment.md](docs/experiment.md)、設計判断とリスクは [docs/ai-interface-design.md](docs/ai-interface-design.md) にあります。サンプルのページは [examples/landing](examples/landing) です。
 
 ## 安全境界

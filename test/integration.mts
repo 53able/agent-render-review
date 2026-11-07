@@ -16,6 +16,9 @@ interface Part { type: string; text: string; data: string; mimeType: string }
 interface ToolResult { content: Part[]; isError?: boolean }
 interface SceneNode { name: string; materials: { inputs: Record<string, unknown> }[] }
 
+import { acquireGpuLock } from './gpu-lock.mts';
+await acquireGpuLock('integration');
+
 process.env.RENDER_DIRECTOR_IMPORT = '1';
 const { reportFromAudit } = await import('../server.mts');
 delete process.env.RENDER_DIRECTOR_IMPORT; // must not leak into the Director that mcp.mts starts

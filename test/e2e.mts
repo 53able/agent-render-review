@@ -11,6 +11,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { acquireGpuLock } from './gpu-lock.mts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -19,6 +20,7 @@ if (!fs.existsSync(CHROME)) {
   if (process.env.E2E_REQUIRED === '1') { console.log('FAIL e2e: Chrome not found (set CHROME_PATH); E2E_REQUIRED=1'); process.exit(1); }
   console.log('SKIP e2e: Chrome not found (set CHROME_PATH)'); process.exit(0);
 }
+await acquireGpuLock('e2e');
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vd-e2e-')));
 // The README images in docs/ are rewritten only with E2E_UPDATE_SCREENSHOTS=1; otherwise screenshots go to the temp folder.
 const SHOTS = process.env.E2E_UPDATE_SCREENSHOTS === '1' ? path.join(ROOT, 'docs') : tmp;
