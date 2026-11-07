@@ -73,8 +73,9 @@ async function load(keepView = true) {
   if (!keepView || !V(S.viewId)) S.viewId = S.data.head;
   S.sig = signature(S.data);
   $('#meta').textContent = ADE()
-    ? `${S.data.vork} · ADE mode · project ${S.data.project} · proposals come from your agent via MCP · local only`
+    ? `${S.data.vork} · ADE mode · project ${S.data.project?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''} · proposals come from your agent via MCP · local only`
     : `${S.data.vork} · agent: claude ${S.data.model} (no tools) · local only`;
+  $('#meta').title = ADE() ? S.data.project || '' : ''; // only the directory name is on screen (recordings, one-line header); the full path on hover
   applyMode(); renderVersions(); renderObjects(); renderReview(); renderAdoptions(); renderEvents(); renderAudit(); await drawViewport();
 }
 const ADE = () => S.data?.mode === 'ade';

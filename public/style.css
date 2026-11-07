@@ -13,10 +13,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .hint { color: var(--muted); font-size: 11.5px; margin: 6px 0; }
 
-.top { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); }
-.brand { font-weight: 650; letter-spacing: .02em; display: flex; gap: 8px; align-items: center; }
+.top { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+.brand { flex: none; font-weight: 650; letter-spacing: .02em; display: flex; gap: 8px; align-items: center; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
-.meta { color: var(--muted); font-size: 12px; }
+.meta { color: var(--muted); font-size: 12px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .layout { display: grid; grid-template-columns: 240px minmax(0, 1fr) 360px; gap: 0; height: calc(100vh - 43px); }
 .panel { background: var(--panel); padding: 14px; overflow: auto; }
