@@ -248,6 +248,24 @@ await check('#3 a body that is not a JSON object gets 400 without internal error
   }
 });
 
+await check('#4 adoption-request needs a string slug; propose needs { node, what, why } strings in claimed_changes', async () => {
+  const before = (await state()).adoptionRequests.length;
+  for (const slug of [['hero'], 1, { s: 'hero' }, null]) {
+    const r = await raw('/api/agent/adoption-request', JSON.stringify({ version: 'v001', slug, reason: 'x' }), { agent: true });
+    assert.equal(r.status, 400, JSON.stringify(slug)); assert.match(r.json.error, /slug/);
+  }
+  assert.equal((await state()).adoptionRequests.length, before);
+  const versions = (await state()).versions.length;
+  for (const claimed_changes of [[1, 'x'], [{ node: 'vase', what: 'x' }], [{ node: 'vase', what: 'x', why: 2 }], [null]]) {
+    const r = await raw('/api/agent/propose', JSON.stringify({ interpretation: 'x', claimed_changes, scene: base }), { agent: true });
+    assert.equal(r.status, 400, JSON.stringify(claimed_changes)); assert.match(r.json.error, /claimed_changes/);
+  }
+  assert.equal((await state()).versions.length, versions);
+  const pending = (await state()).adoptionRequests.find((a: Json) => a.status === 'pending');
+  assert.ok(pending, 'an earlier check leaves a pending adoption request');
+  assert.equal((await human('/api/adopt/plan', { requestId: pending.id, slug: ['hero'] })).status, 400);
+});
+
 await check('AC-10 report: fixture gives exact numbers; live project counts match', async () => {
   const fixture = [
     { t: '2026-01-01T10:00:00.000Z', event: 'init' }, { t: '2026-01-01T10:02:00.000Z', event: 'proposed' },

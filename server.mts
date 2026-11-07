@@ -101,6 +101,7 @@ const arg = (name: string): string | undefined => { const i = argv.indexOf(name)
 /** A client error whose message is safe to return as a 400 response. */
 class BadRequest extends Error {}
 const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
+const isClaimedChange = (x: unknown): x is ClaimedChange => isPlainObject(x) && typeof x.node === 'string' && typeof x.what === 'string' && typeof x.why === 'string';
 
 const sha256 = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex');
 
@@ -542,13 +543,13 @@ ${VORK_HELP}`;
     tickets.delete(id); return t as Extract<Ticket, { kind: K }>;
   };
 
-  function adoptionTargets(slug: string) {
+  function adoptionTargets(slug: unknown) {
     if (!PROJECT) throw new Error('adoption needs --project');
-    if (!SLUG.test(slug || '')) throw new Error('slug must match [a-z0-9][a-z0-9-]{0,63}');
+    if (typeof slug !== 'string' || !SLUG.test(slug)) throw new Error('slug must match [a-z0-9][a-z0-9-]{0,63}');
     const assetDir = String(readConfig().assetDir || DEFAULT_CONFIG.assetDir);
     const assetRel = path.posix.join(assetDir.replace(/\\/g, '/'), `${slug}.png`);
     const manifestRel = path.posix.join('.vork', 'adopted', `${slug}.json`);
-    return { assetRel, manifestRel, asset: resolveInside(PROJECT, assetRel), manifest: resolveInside(PROJECT, manifestRel) };
+    return { slug, assetRel, manifestRel, asset: resolveInside(PROJECT, assetRel), manifest: resolveInside(PROJECT, manifestRel) };
   }
 
   // ---------- page preview: real page, candidate substituted by request interception ----------
@@ -638,6 +639,7 @@ ${VORK_HELP}`;
       const baseId = b.base || state.head; const base = getV(baseId);
       if (!base || base.status === 'discarded') return send(res, 400, { error: 'base must be an existing, not discarded version' });
       if (typeof b.interpretation !== 'string' || !b.interpretation.trim() || !Array.isArray(b.claimed_changes)) return send(res, 400, { error: 'interpretation and claimed_changes are required' });
+      if (!b.claimed_changes.every(isClaimedChange)) return send(res, 400, { error: 'each claimed_changes item must be { node, what, why } with string values' });
       const job = newJob('agent-propose', baseId!);
       const check = await validateScene(job, b.scene);
       if (!check.ok) { audit('agent_proposal_rejected', { kind: check.kind, base: baseId }); return send(res, 422, { error: check.kind === 'blocked' ? 'policy' : 'vork rejected the scene', blockers: check.policy?.blockers || [], log: check.log || null, version: null }); }
@@ -669,13 +671,14 @@ ${VORK_HELP}`;
       return send(res, 200, { timeout: false, events: evs });
     }
     if (url.pathname === '/api/agent/adoption-request' && req.method === 'POST') {
-      const b = await readBody<{ version: string; slug: string; reason?: unknown }>(req); const v = getV(b.version);
+      const b = await readBody<{ version: string; slug: unknown; reason?: unknown }>(req); const v = getV(b.version);
       if (!PROJECT) return send(res, 409, { error: 'adoption needs Director started with --project' });
       if (!v || v.status === 'discarded') return send(res, 400, { error: 'version must exist and not be discarded' });
-      try { adoptionTargets(b.slug); } catch (e: any) { return send(res, 400, { error: e.message }); }
+      let slug: string;
+      try { ({ slug } = adoptionTargets(b.slug)); } catch (e: any) { return send(res, 400, { error: e.message }); }
       const reqId = `a${String(state.adoptionRequests.length + 1).padStart(3, '0')}`;
-      state.adoptionRequests.push({ id: reqId, version: v.id, slug: b.slug, reason: String(b.reason || ''), status: 'pending', t: new Date().toISOString() });
-      audit('adoption_requested', { request: reqId, version: v.id, slug: b.slug });
+      state.adoptionRequests.push({ id: reqId, version: v.id, slug, reason: String(b.reason || ''), status: 'pending', t: new Date().toISOString() });
+      audit('adoption_requested', { request: reqId, version: v.id, slug });
       return send(res, 200, { request: reqId, status: 'pending_human_approval', note: 'A human must approve this in Director. Call wait_for_feedback to learn the outcome.' });
     }
     return send(res, 404, { error: 'unknown agent endpoint' });
@@ -792,17 +795,17 @@ ${VORK_HELP}`;
       }
 
       if (req.method === 'POST' && url.pathname === '/api/adopt/plan') {
-        const { requestId, slug: slugOverride } = await readBody<{ requestId: string; slug?: string }>(req);
+        const { requestId, slug: slugOverride } = await readBody<{ requestId: string; slug?: unknown }>(req);
         const ar = state.adoptionRequests.find((a) => a.id === requestId && a.status === 'pending');
         if (!ar) return send(res, 400, { error: 'no pending adoption request with that id' });
         const v = getV(ar.version); if (!v || v.status === 'discarded') return send(res, 409, { error: 'version is gone or discarded' });
-        const slug = slugOverride || ar.slug; let t;
-        try { t = adoptionTargets(slug); } catch (e: any) { return send(res, 400, { error: e.message }); }
+        let t;
+        try { t = adoptionTargets(slugOverride || ar.slug); } catch (e: any) { return send(res, 400, { error: e.message }); }
         const pol = policyCheck(sceneOf(v.id)); if (pol.blockers.length) return send(res, 409, { error: pol.blockers.join('; ') });
         const sceneText = fs.readFileSync(path.join(vdir(v.id), 'scene.json'), 'utf8');
         const hash = sha256(sceneText).slice(0, 16);
         const overwrites = fs.existsSync(t.asset);
-        const reusable = finalMatches(v, hash);
+        const reusable = finalMatches(v, hash); const { slug } = t;
         const ticket = issueTicket({ kind: 'adopt', versionId: v.id, hash, requestId, slug, sceneText, assetRel: t.assetRel, overwrites });
         return send(res, 200, {
           ticket, requestId, versionId: v.id, versionStatus: v.status, hash, slug, reason: ar.reason,
