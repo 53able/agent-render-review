@@ -430,6 +430,28 @@ await check('#9 standalone /api/propose rejects a non-string instruction with 40
   }
 });
 
+await check('#21 standalone /api/propose keeps only string selections and reads context flags as booleans', async () => {
+  const cases: [unknown, unknown, RegExp | null][] = [
+    ['abc', { selection: true }, null],
+    [['vase', 1, { x: 1 }, ['ring']], { selection: true }, /^SELECTED objects \(director clicked these in the image\): vase$/m],
+    [['vase'], { selection: 'yes' }, null],
+    [['vase'], 'selection', null],
+  ];
+  for (const [selection, context, want] of cases) {
+    fs.rmSync(PROMPT_FILE, { force: true });
+    const r = await standalone.call('/api/propose', { baseId: 'v001', instruction: 'same scene', selection, context });
+    assert.equal(r.status, 202, JSON.stringify(r.json));
+    const job = await standalone.waitJob(r.json.id);
+    assert.equal(job.status, 'done', `${JSON.stringify({ selection, context })}: ${JSON.stringify(job)}`);
+    const prompt = fs.readFileSync(PROMPT_FILE, 'utf8');
+    if (want) assert.match(prompt, want); else assert.doesNotMatch(prompt, /SELECTED objects/, JSON.stringify({ selection, context }));
+  }
+  fs.rmSync(PROMPT_FILE, { force: true });
+  const r = await standalone.call('/api/propose', { baseId: 'v001', instruction: 'same scene', context: { exposure: 1, history: 'yes' } });
+  assert.equal((await standalone.waitJob(r.json.id)).status, 'done');
+  assert.doesNotMatch(fs.readFileSync(PROMPT_FILE, 'utf8'), /Last render measurements|Earlier accepted requests/);
+});
+
 await check('#12 a body over 4 MB gets 413, with or without content-length; the server keeps serving', async () => {
   const big = JSON.stringify({ interpretation: 'x'.repeat(5e6), claimed_changes: [], scene: base });
   const r = await raw('/api/agent/propose', big, { agent: true });
@@ -521,6 +543,7 @@ await check('#15 agent propose: a base discarded during the validation render gi
 await check('#15 standalone propose: a discarded base gives 400; a base discarded while the agent works makes no proposal', async () => {
   const first = (await standalone.waitJob((await standalone.call('/api/propose', { baseId: 'v001', instruction: 'same scene' })).json.id));
   assert.equal(first.status, 'done', JSON.stringify(first)); const proposedId = first.result.versionId;
+  const count = (await standalone.call('/api/state')).json.versions.length;
   fs.writeFileSync(CLAUDE_GATE, ''); fs.rmSync(PROMPT_FILE, { force: true });
   try {
     const job = (await standalone.call('/api/propose', { baseId: proposedId, instruction: 'again' })).json;
@@ -530,8 +553,7 @@ await check('#15 standalone propose: a discarded base gives 400; a base discarde
     const done = await standalone.waitJob(job.id);
     assert.equal(done.status, 'failed'); assert.equal(done.error, 'base_discarded');
   } finally { fs.rmSync(CLAUDE_GATE, { force: true }); }
-  const versions = (await standalone.call('/api/state')).json.versions;
-  assert.deepEqual(versions.map((v: Json) => v.id), ['v001', proposedId]);
+  assert.equal((await standalone.call('/api/state')).json.versions.length, count);
   const r = await standalone.call('/api/propose', { baseId: proposedId, instruction: 'from discarded' });
   assert.equal(r.status, 400); assert.match(r.json.error, /discarded/);
 });
