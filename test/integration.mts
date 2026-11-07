@@ -40,7 +40,8 @@ const BIN = path.join(tmp, 'bin'); fs.mkdirSync(BIN);
 const realVork = process.env.PATH!.split(path.delimiter).map((d) => path.join(d, 'vork')).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return true; } catch { return false; } });
 if (!realVork) throw new Error('vork not found on PATH');
 const GATE = path.join(tmp, 'gate');
-fs.writeFileSync(path.join(BIN, 'vork'), `#!/bin/sh\nif [ "$1" = render ] && [ -e '${GATE}' ]; then\n  echo $$ >> '${GATE}.waiting'\n  while [ -e '${GATE}' ]; do sleep 0.05; done\nfi\nexec '${realVork}' "$@"\n`, { mode: 0o755 });
+// Every `vork render` also appends its --out path to GATE.calls, so a test can count renders.
+fs.writeFileSync(path.join(BIN, 'vork'), `#!/bin/sh\nif [ "$1" = render ]; then echo "$4" >> '${GATE}.calls'; fi\nif [ "$1" = render ] && [ -e '${GATE}' ]; then\n  echo $$ >> '${GATE}.waiting'\n  while [ -e '${GATE}' ]; do sleep 0.05; done\nfi\nexec '${realVork}' "$@"\n`, { mode: 0o755 });
 const holdRenders = () => { fs.rmSync(`${GATE}.waiting`, { force: true }); fs.writeFileSync(GATE, ''); };
 const releaseRenders = () => fs.rmSync(GATE, { force: true });
 /** Waits until a render is held at the gate; returns the pid of the waiting process. */
@@ -778,6 +779,23 @@ await check('#16 cancelling a job kills its render process and the render is not
     releaseRenders(); await sleep(1000);
     assert.equal((await human(`/api/jobs/${job.id}`)).json.status, 'cancelled');
     assert.equal(JSON.stringify((await versionOf('v001')).renders), before);
+  } finally { releaseRenders(); }
+});
+
+await check('#28 concurrent agent renders of one version and profile run vork once and share the result', async () => {
+  holdRenders();
+  try {
+    const edit = await human('/api/edit', { baseId: 'v001', node: 'vase', field: 'specular_roughness', value: 0.37 });
+    assert.equal(edit.status, 202, JSON.stringify(edit.json)); const id = edit.json.version;
+    await renderWaiting(); // the edit's draft render holds the version's lock; previs renders queue behind it
+    const out = path.join(PROJECT, '.vork', id, 'previs.png');
+    const before = fs.existsSync(`${GATE}.calls`) ? fs.readFileSync(`${GATE}.calls`, 'utf8').split('\n').filter((l) => l === out).length : 0;
+    const agents = [0, 1, 2].map(() => raw(`/api/agent/render?version=${id}&profile=previs`, '', { agent: true, method: 'GET' }));
+    await sleep(300); releaseRenders();
+    for (const r of await Promise.all(agents)) assert.equal(r.status, 200, JSON.stringify(r.json));
+    await waitJob(edit.json.job.id);
+    const calls = fs.readFileSync(`${GATE}.calls`, 'utf8').split('\n').filter((l) => l === out).length - before;
+    assert.equal(calls, 1, `vork rendered ${id} previs ${calls} times`);
   } finally { releaseRenders(); }
 });
 

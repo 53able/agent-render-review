@@ -447,11 +447,25 @@ async function main() {
   }
 
   // Renders of the same version are serialized: vork writes fixed output names per profile.
+  // renderLocks holds the last queued render of a version and is dropped when that render ends (#32).
   const renderLocks = new Map<string, Promise<RenderResult>>();
+  // A stored render of a version and profile that is queued or running. A version's scene.json never changes, so a
+  // second request for the same render waits for that one instead of queueing another (#28). Renders of a pinned
+  // scene text (adoption) are never shared.
+  const sharedRenders = new Map<string, Promise<RenderResult>>();
   function renderVersion(job: Job, v: Version, profile: Profile, opts: { scene?: Scene; pinnedText?: string } = {}): Promise<RenderResult> {
+    const key = `${v.id}:${profile}`; const shareable = !opts.scene && opts.pinnedText === undefined;
+    const running = shareable ? sharedRenders.get(key) : undefined;
+    // If the shared render was cancelled with its own job, a caller that was not cancelled renders it itself.
+    if (running) return running.then((r) => (r.cancelled && job.status !== 'cancelled' ? renderVersion(job, v, profile) : r));
     const prev = renderLocks.get(v.id) || Promise.resolve();
     const next = prev.catch(() => {}).then(() => renderVersionNow(job, v, profile, opts));
     renderLocks.set(v.id, next);
+    if (shareable) sharedRenders.set(key, next);
+    next.catch(() => {}).finally(() => {
+      if (renderLocks.get(v.id) === next) renderLocks.delete(v.id);
+      if (sharedRenders.get(key) === next) sharedRenders.delete(key);
+    });
     return next;
   }
   // scene: throwaway validation render (not stored). pinnedText: render exactly this scene text and store it.
