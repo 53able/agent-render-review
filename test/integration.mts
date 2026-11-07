@@ -444,6 +444,22 @@ await check('#12 a body over 4 MB gets 413, with or without content-length; the 
   assert.equal((await raw('/api/agent/status', '', { agent: true, method: 'GET' })).status, 200);
 });
 
+await check('#18 a declared content-length past the drain limit gets 413 before the body is read', async () => {
+  const http = await import('node:http'); const u = new URL(BASE);
+  const size = 20e6; const chunk = 'x'.repeat(1e6);
+  const got = await new Promise<string>((ok) => {
+    const req = http.request({ host: u.hostname, port: u.port, path: '/api/agent/propose', method: 'POST', headers: { host: u.host, 'content-type': 'application/json', authorization: `Bearer ${agentToken()}`, 'content-length': String(size) } }, (res) => {
+      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => ok(`${res.statusCode} ${b}`));
+    });
+    req.on('error', () => ok('dropped'));
+    let sent = 0;
+    const pump = () => { while (sent < size / 1e6 && req.write(chunk)) sent++; if (sent < size / 1e6) req.once('drain', () => { sent++; pump(); }); else req.end(); };
+    pump();
+  });
+  assert.match(got, /^413 .*larger than/);
+  assert.equal((await raw('/api/agent/status', '', { agent: true, method: 'GET' })).status, 200);
+});
+
 await check('AC-10 report: fixture gives exact numbers; live project counts match', async () => {
   const fixture = [
     { t: '2026-01-01T10:00:00.000Z', event: 'init' }, { t: '2026-01-01T10:02:00.000Z', event: 'proposed' },

@@ -103,7 +103,10 @@ const arg = (name: string): string | undefined => { const i = argv.indexOf(name)
 /** A client error whose message is safe to return as a 400 response. */
 class BadRequest extends Error {}
 /** A request body over MAX_BODY bytes; answered with 413. */
-class PayloadTooLarge extends Error {}
+class PayloadTooLarge extends Error {
+  /** false: the declared length is past the drain limit, so the 413 goes out before the body is read. */
+  drain = true;
+}
 const MAX_BODY = 4e6;
 const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
 const isClaimedChange = (x: unknown): x is ClaimedChange => isPlainObject(x) && typeof x.node === 'string' && typeof x.what === 'string' && typeof x.why === 'string';
@@ -649,8 +652,10 @@ ${VORK_HELP}`;
   // The type argument is not checked at run time; each endpoint still validates the fields it reads.
   // Over MAX_BODY: settle with PayloadTooLarge (413) and keep draining the rest, so the client can read the response.
   // Draining stops at MAX_DRAIN: past that the connection is dropped instead of reading on until requestTimeout.
-  const MAX_DRAIN = 4 * MAX_BODY;
+  // A content-length declared past MAX_DRAIN is answered before reading; the rest is then discarded for at most DRAIN_MS.
+  const MAX_DRAIN = 4 * MAX_BODY, DRAIN_MS = 5000;
   const readBody = <T,>(req: http.IncomingMessage): Promise<T> => new Promise((ok, bad) => {
+    if (Number(req.headers['content-length']) > MAX_DRAIN) { const e = new PayloadTooLarge(); e.drain = false; return bad(e); }
     const chunks: Buffer[] = []; let size = 0; let settled = false;
     const fail = (e: Error) => { if (!settled) { settled = true; chunks.length = 0; bad(e); } };
     req.on('data', (d: Buffer) => {
@@ -1024,8 +1029,15 @@ ${VORK_HELP}`;
     } catch (e: any) {
       if (e instanceof BadRequest) return send(res, 400, { error: e.message });
       if (e instanceof PayloadTooLarge) {
-        // Reply once the rest of the body is drained: closing while the client still sends resets the connection.
         const reply = () => { if (!res.headersSent && !res.destroyed) send(res, 413, { error: `request body is larger than ${MAX_BODY / 1e6} MB` }); };
+        if (!e.drain) {
+          // Declared past the drain limit: reply now, then discard what still arrives for at most DRAIN_MS.
+          // Closing at once would reset the connection while the client still sends, and the client could lose the reply.
+          const cut = setTimeout(() => req.destroy(), DRAIN_MS);
+          req.once('close', () => clearTimeout(cut)); req.resume();
+          return reply();
+        }
+        // Otherwise reply once the rest of the body is drained: closing while the client still sends resets the connection.
         return req.readableEnded ? reply() : void req.once('end', reply);
       }
       if (res.destroyed) return; // client went away mid-body
