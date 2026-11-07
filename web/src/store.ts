@@ -283,15 +283,19 @@ let editing = false;
 export async function directEdit(node: string, field: string, value: unknown): Promise<boolean> {
   if (editing) return true; // the edit in flight creates the version
   editing = true;
+  const base = state.viewId;
   let r: { version: string; job: Job };
-  try { r = await api<{ version: string; job: Job }>('/api/edit', { baseId: state.viewId, node, field, value }); }
+  try { r = await api<{ version: string; job: Job }>('/api/edit', { baseId: base, node, field, value }); }
   catch (e) { editing = false; fail('edit', `Edit of ${node}.${field} failed: ${why(e)}`); return false; }
   clearFails('edit');
-  // The new version is loaded before it is viewed, so HEAD is not shown in its place meanwhile. The edit succeeded
-  // either way: a failed load is a view failure, and the next poll brings the version in.
-  try { await load(); } catch (e) { fail('view', `Created ${r.version}, but could not load it: ${why(e)}`); }
+  // The new version is viewed only once it is loaded, so HEAD is not shown in its place, and only while the human is
+  // still on the version edited: one opened meanwhile stays on screen. The edit succeeded either way: a failed load is a
+  // view failure, the view stays, and the next poll brings the version in.
+  let loaded = false;
+  try { await load(); loaded = true; } catch (e) { fail('view', `Created ${r.version}, but could not load it: ${why(e)}`); }
   finally { editing = false; }
-  openVersion(r.version); say(`Created ${r.version}`);
+  if (loaded && state.viewId === base && V(r.version)) openVersion(r.version);
+  say(`Created ${r.version}`);
   trackJob(r.job, () => load());
   return true;
 }
@@ -327,7 +331,8 @@ export async function decide(decision: 'accept' | 'discard', id: string = state.
   catch (e) { return fail('review', `Cannot ${decision} ${id}: ${why(e)}`); }
   clearFails('review');
   set({ instruction: '' });
-  await load(); say(`${id} is now HEAD`);
+  try { await load(); } catch (e) { return fail('view', `${id} is now HEAD, but could not reload: ${why(e)}`); }
+  say(`${id} is now HEAD`);
 }
 /** The box already says it goes to this version (#59). */
 export const refine = (): void => focusInstruction();
@@ -337,7 +342,9 @@ export const dismissResult = (): void => set({ lastResult: null });
 export async function checkout(id: string): Promise<void> {
   try { await api('/api/checkout', { versionId: id }); }
   catch (e) { return fail('review', `Cannot make ${id} HEAD: ${why(e)}`); }
-  clearFails('review'); await load(); say(`${id} is now HEAD`);
+  clearFails('review');
+  try { await load(); } catch (e) { return fail('view', `${id} is now HEAD, but could not reload: ${why(e)}`); }
+  say(`${id} is now HEAD`);
 }
 
 // Discard can be undone for a few seconds (#55): the decision reaches Director, and through it the agent (with the
@@ -362,7 +369,8 @@ async function commitDiscard(): Promise<void> {
   catch (e) { return fail('review', `Cannot discard ${id}: ${why(e)}`); }
   clearFails('review');
   if (state.viewId === id) set({ viewId: V(id)?.parent ?? state.data.head });
-  await load(); say(`${id} discarded`);
+  try { await load(); } catch (e) { return fail('view', `${id} discarded, but could not reload: ${why(e)}`); }
+  say(`${id} discarded`);
 }
 
 // ---------- final render ----------

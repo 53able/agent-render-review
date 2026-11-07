@@ -12,14 +12,22 @@ import {
 } from '../store.ts';
 
 const DRAW_FAILED = 'Cannot show the render: ';
+/**
+ * A failed draw is over once something is on screen (the render or the page). Only the draw failures go: the other view
+ * failures (a render or a cancel that could not start) stay until dismissed or that action succeeds (#53).
+ */
+const clearDrawFails = () => {
+  const fs = get().fails;
+  if (fs.view.some((f) => f.msg.startsWith(DRAW_FAILED))) set({ fails: { ...fs, view: fs.view.filter((f) => !f.msg.startsWith(DRAW_FAILED)) } });
+};
 const loadImg = (src: string) => new Promise<HTMLImageElement>((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error(`cannot load ${src}`)); i.src = src; });
 
 /** What the canvas shows: the images, the object ids, and which versions the wipe labels name (those drawn, not those viewed). */
-type Gfx = { img: HTMLImageElement | null; imgB: HTMLImageElement | null; ids: Ids | null; hover: string | null; wipe: number; seq: number; labels: [string, string]; drawn: string };
+type Gfx = { img: HTMLImageElement | null; imgB: HTMLImageElement | null; ids: Ids | null; hover: string | null; wipe: number; seq: number; labels: [string, string]; drawn: string; view: string };
 
 export function Viewport() {
   const cvRef = useRef<HTMLCanvasElement>(null), ovRef = useRef<HTMLCanvasElement>(null), vpRef = useRef<HTMLDivElement>(null);
-  const g = useRef<Gfx>({ img: null, imgB: null, ids: null, hover: null, wipe: 50, seq: 0, labels: ['', ''], drawn: '' });
+  const g = useRef<Gfx>({ img: null, imgB: null, ids: null, hover: null, wipe: 50, seq: 0, labels: ['', ''], drawn: '', view: '' });
   const [wipeVal, setWipeVal] = useState(50);
   // The hover tip is written to the DOM directly: a state change on every mouse move would draw the whole viewport again.
   const tipRef = useRef<HTMLDivElement>(null);
@@ -96,12 +104,17 @@ export function Viewport() {
     size(img.width, img.height);
     const ctx = cv.getContext('2d')!; ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0);
     set({ measure: { kind: 'page', pageUrl, pv } });
+    clearDrawFails();
     if (pv.warning) say(pv.warning);
   }, []);
 
   const drawViewport = useCallback(async () => {
     // The poll, a finished job and the human can each redraw; only the latest draw may write to the canvas (#54).
     const seq = ++g.current.seq; const stale = () => seq !== g.current.seq;
+    // The object under the pointer belongs to what was drawn: another version, profile or the page drops it and its tip
+    // (the pointer may not move again before the next click).
+    { const s = get(); const view = `${viewV(s).id}:${s.profile}:${s.onPage}`;
+      if (view !== g.current.view) { g.current.view = view; g.current.hover = null; if (tipRef.current) tipRef.current.hidden = true; } }
     if (get().onPage) return drawPage(seq);
     const cv = cvRef.current!, ov = ovRef.current!;
     const s = get(); const v = viewV(s); const r = v.renders[s.profile];
@@ -126,13 +139,13 @@ export function Viewport() {
     paint();
     set({ wipe: !!imgB });
     g.current.drawn = key; cv.dataset.ready = `${v.id}:${s.profile}`;
-    // A failed draw is over once a render is on screen. Only the draw failures go: the other view failures (a render
-    // or a cancel that could not start) stay until dismissed or that action succeeds (#53).
-    const fs = get().fails; if (fs.view.some((f) => f.msg.startsWith(DRAW_FAILED))) set({ fails: { ...fs, view: fs.view.filter((f) => !f.msg.startsWith(DRAW_FAILED)) } });
+    clearDrawFails();
   }, [drawPage, paint]);
 
   useEffect(() => {
-    drawViewport().catch((e: Error) => fail('view', `${DRAW_FAILED}${e.message}`));
+    // drawViewport takes its seq before its first await; a draw that a newer one replaced does not report its failure.
+    const drawing = drawViewport(); const seq = g.current.seq;
+    drawing.catch((e: Error) => { if (seq === g.current.seq) fail('view', `${DRAW_FAILED}${e.message}`); });
   }, [drawSeq, viewId, drawViewport]);
   useEffect(() => { paintOverlay(); }, [selection, paintOverlay]);
 

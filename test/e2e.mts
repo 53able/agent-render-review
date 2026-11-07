@@ -3,6 +3,7 @@
 // Set E2E_AGENT=1 to also exercise the built-in `claude -p` proposer in standalone mode (costs an API call).
 import { chromium } from 'playwright-core';
 import type { Page } from 'playwright-core';
+import type { Route } from 'playwright-core';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
@@ -762,6 +763,106 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     assert.match(await page.textContent('#selCount') as string, new RegExp(dot), 'the dot is still selected');
     assert.equal(await page.textContent('#quick b'), dot, 'QuickEdit stays on the dot');
     await page.fill('#objectFilter', '');
+  });
+
+  // Versions made by the direct edits below while another version is viewed: their renders are never drawn on this page
+  // (so no image of them is cached) until the draw-failure checks.
+  let editFailed = '', editMoved = '';
+  const quickOnLarge = async () => {
+    await page.click(`button[data-id="${large}"]`); await page.waitForSelector(`#canvas[data-ready="${large}:draft"]`, { timeout: 15000 });
+    await page.waitForSelector('#quick input[type=range]'); await idle(page);
+  };
+  const newVersionAfter = async (n: number) => {
+    for (let i = 0; i < 100 && (await versionsOf(page)).length < n; i++) await sleep(150);
+    const vs = await versionsOf(page); assert.equal(vs.length, n, 'exactly one new version');
+    await page.waitForSelector(`#versionList button[data-id="${vs.at(-1)!.id}"]`, { timeout: 10000 }); await idle(page);
+    return vs.at(-1)!;
+  };
+  await check('a direct edit whose reload fails keeps the edited version on screen, not HEAD in place of the new one', async () => {
+    await quickOnLarge();
+    const before = await versionsOf(page);
+    let release!: () => void; const answered = new Promise<void>((ok) => { release = ok; }); let failing = true;
+    await page.route('**/api/state', async (r) => {
+      await answered;
+      if (failing) await r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'state unavailable' }) }); else await r.continue();
+    });
+    await page.route('**/api/edit', async (r) => { const res = await r.fetch(); await r.fulfill({ response: res }); release(); });
+    try {
+      await dragQuickInput(page, 'range', ['0.65']); await answered;
+      await page.waitForFunction(() => /could not load it/.test(document.querySelector('#err-view')!.textContent!), null, { timeout: 5000 });
+      await sleep(300);
+      assert.equal(await page.getAttribute('#canvas', 'data-ready'), `${large}:draft`, 'the edited version stays drawn');
+    } finally { failing = false; await page.unroute('**/api/edit'); await page.unroute('**/api/state'); }
+    const created = await newVersionAfter(before.length + 1);
+    assert.equal(created.parent, large);
+    assert.equal(await page.getAttribute('#canvas', 'data-ready'), `${large}:draft`, 'the next poll brings the version in without switching to it');
+    editFailed = created.id;
+  });
+  await check('a version opened while a direct edit is loading stays on screen when the load answers', async () => {
+    await quickOnLarge();
+    const before = await versionsOf(page);
+    let release!: () => void; const moved = new Promise<void>((ok) => { release = ok; });
+    let answer!: () => void; const answered = new Promise<void>((ok) => { answer = ok; });
+    await page.route('**/api/state', async (r) => { await moved; await r.continue(); });
+    await page.route('**/api/edit', async (r) => { const res = await r.fetch(); await r.fulfill({ response: res }); answer(); });
+    try {
+      await dragQuickInput(page, 'range', ['0.75']); await answered;
+      await page.click('button[data-id="v001"]'); await page.waitForSelector('#canvas[data-ready="v001:draft"]', { timeout: 15000 });
+    } finally { release(); await page.unroute('**/api/edit'); await page.unroute('**/api/state'); }
+    const created = await newVersionAfter(before.length + 1);
+    assert.equal(created.parent, large);
+    await sleep(500);
+    assert.equal(await page.getAttribute('#canvas', 'data-ready'), 'v001:draft', 'the view did not move to the new version');
+    editMoved = created.id;
+  });
+  await check('the hover tip goes when another version is drawn under a pointer that does not move', async () => {
+    await page.waitForSelector('#canvas[data-ready="v001:draft"]');
+    const vase = await spotOf(page, 'vase'); assert.ok(vase, 'the vase is on screen');
+    const pt = await canvasPoint(page, vase); await page.mouse.move(pt.x, pt.y);
+    await page.waitForFunction(() => !document.querySelector('#tip')!.hasAttribute('hidden'), null, { timeout: 3000 });
+    await page.evaluate((id) => document.querySelector<HTMLElement>(`button[data-id="${id}"]`)!.click(), large); // no pointer move
+    await page.waitForSelector(`#canvas[data-ready="${large}:draft"]`, { timeout: 15000 });
+    assert.equal(await isHidden(page, '#tip'), true);
+    await page.mouse.move(0, 0);
+  });
+  const draftImage = async (id: string) => new URL(((await versionsOf(page)).find((v) => v.id === id)!.renders.draft as { image: string }).image, url).href;
+  await check('a draw that a newer draw replaced does not report its failure', async () => {
+    assert.ok(editFailed && editMoved, 'needs the two versions made above');
+    const slow = await draftImage(editFailed); const match = (u: URL) => u.href === slow;
+    const handler = async (r: Route) => { await sleep(1500); await r.abort(); };
+    await page.route(match, handler);
+    try {
+      await page.click(`button[data-id="${editFailed}"]`); await page.click(`button[data-id="${editMoved}"]`);
+      await page.waitForSelector(`#canvas[data-ready="${editMoved}:draft"]`, { timeout: 15000 });
+      await sleep(1800);
+      assert.doesNotMatch(await page.textContent('#err-view') as string, /Cannot show the render/);
+    } finally { await page.unroute(match, handler); }
+  });
+  await check('a failed draw is cleared once the page with the candidate is drawn', async () => {
+    setConfig({ pageUrl: 'http://127.0.0.1:4794/', assetUrlPattern: '**/vork/hero.png' });
+    const broken = await draftImage(editFailed); const match = (u: URL) => u.href === broken;
+    const handler = (r: Route) => r.fulfill({ status: 404, body: '' });
+    await page.route(match, handler);
+    try {
+      await page.click(`button[data-id="${editFailed}"]`);
+      await page.waitForFunction(() => /Cannot show the render/.test(document.querySelector('#err-view')!.textContent!), null, { timeout: 10000 });
+      await page.click('#pageBtn');
+      await page.waitForFunction(() => document.querySelector('#measure')!.textContent!.includes('substituted'), null, { timeout: 60000 });
+      assert.doesNotMatch(await page.textContent('#err-view') as string, /Cannot show the render/);
+    } finally { await page.unroute(match, handler); }
+    await page.click('#pageBtn'); await page.waitForSelector(`#canvas[data-ready="${editFailed}:draft"]`, { timeout: 15000 });
+  });
+  await check('#55 when the reload after Make HEAD fails, the page says so instead of an unhandled rejection', async () => {
+    await page.click(`button[data-id="${large}"]`); await page.waitForSelector('#headBtn');
+    const errs = page.errors.length;
+    await page.route('**/api/state', (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'state unavailable' }) }));
+    try {
+      await page.click('#headBtn');
+      await page.waitForFunction(() => /is now HEAD, but could not reload/.test(document.querySelector('#err-view')!.textContent!), null, { timeout: 5000 });
+      await sleep(300);
+    } finally { await page.unroute('**/api/state'); }
+    assert.equal((await agent('GET', '/api/agent/status')).head, large);
+    assert.deepEqual(page.errors.slice(errs), []);
   });
 
   await check('ADE: no page errors', async () => assert.deepEqual(page.errors, []));
