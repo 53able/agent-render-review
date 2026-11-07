@@ -16,7 +16,7 @@
 /** @typedef {{ versionId: string, versionStatus: string, acceptsProposal?: boolean, hash: string, reason: string, writes: string[], overwrites?: boolean, needsFinalRender?: boolean, expiresInSec: number, ticket: string }} AdoptPlan */
 /** @typedef {{ versionId: string, hash: string, profile: string, resolution: number[], output: string, overwrites?: boolean, reference: string, timeoutSec: number, expiresInSec: number, flags: { msg: string }[], ticket: string }} FinalPlan */
 /** @typedef {{ w: number, h: number, arr: Uint16Array, objects: Record<string, string> }} Ids */
-/** @typedef {{ data: Data, viewId: string, profile: string, selection: Set<string>, hover: string | null, compare: boolean, job: Job | null, ids: Ids | null, img: HTMLImageElement, imgB: HTMLImageElement | null, lastResult: Job | null, sig?: string, onPage?: boolean, editing?: boolean }} State */
+/** @typedef {{ data: Data, viewId: string, profile: string, selection: Set<string>, hover: string | null, compare: boolean, job: Job | null, ids: Ids | null, img: HTMLImageElement, imgB: HTMLImageElement | null, lastResult: Job | null, sig?: string, onPage?: boolean, editing?: boolean, objKey?: string }} State */
 /** @typedef {[string, string, string, any, ...number[]]} QuickRow */
 
 /**
@@ -73,8 +73,9 @@ async function load(keepView = true) {
   if (!keepView || !V(S.viewId)) S.viewId = S.data.head;
   S.sig = signature(S.data);
   $('#meta').textContent = ADE()
-    ? `${S.data.vork} · ADE mode · project ${S.data.project} · proposals come from your agent via MCP · local only`
+    ? `${S.data.vork} · ADE mode · project ${S.data.project?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''} · proposals come from your agent via MCP · local only`
     : `${S.data.vork} · agent: claude ${S.data.model} (no tools) · local only`;
+  $('#meta').title = ADE() ? S.data.project || '' : ''; // only the directory name is on screen (recordings, one-line header); the full path on hover
   applyMode(); renderVersions(); renderObjects(); renderReview(); renderAdoptions(); renderEvents(); renderAudit(); await drawViewport();
 }
 const ADE = () => S.data?.mode === 'ade';
@@ -143,16 +144,25 @@ async function reviewAdoption(requestId) {
     catch (e) { alertMsg(`Adoption refused: ${/** @type {Error} */ (e).message}`); }
   };
 }
+const BASE_TITLE = document.title;
+/** The proposal the notice announces, while it is shown. @type {string | null} */
+let noticeFor = null;
+const closeNotice = () => { noticeFor = null; $('#notice').hidden = true; document.title = BASE_TITLE; };
 /** @param {string} id */
 function notify(id) {
-  const n = $('#notice'); n.hidden = false;
-  n.innerHTML = `New proposal <b>${esc(id)}</b> from your agent <button type="button" class="ghost">View</button>`;
-  /** @type {HTMLButtonElement} */ (n.querySelector('button')).onclick = async () => { n.hidden = true; S.viewId = id; renderVersions(); renderObjects(); renderReview(); await drawViewport(); };
+  // fixed on screen so it is seen while scrolled down; the tab title is marked until the proposal is opened, decided or dismissed
+  const n = $('#notice'); n.hidden = false; document.title = `(1) ${BASE_TITLE}`; noticeFor = id;
+  n.innerHTML = `New proposal <b>${esc(id)}</b> from your agent <button type="button" class="ghost">View</button><button type="button" class="ghost" aria-label="Dismiss">✕</button>`;
+  const close = closeNotice;
+  const [view, dismiss] = /** @type {NodeListOf<HTMLButtonElement>} */ (n.querySelectorAll('button'));
+  view.onclick = async () => { close(); S.viewId = id; renderVersions(); renderObjects(); renderReview(); await drawViewport(); };
+  dismiss.onclick = close;
   say(`New proposal ${id} from your agent. Press View to open it.`);
 }
 // Agents act from outside the page: poll for new proposals, requests and reads.
 setInterval(async () => {
-  if (!S.data || S.job || document.visibilityState !== 'visible' || document.querySelector('dialog[open]')) return;
+  // Also while the tab is hidden: the "(1)" title mark is how a hidden tab shows a new proposal (browsers slow this timer down there).
+  if (!S.data || S.job || document.querySelector('dialog[open]')) return;
   /** @type {Data | null} */
   const d = await api('/api/state').catch(() => null);
   if (d && signature(d) !== S.sig) {
@@ -275,8 +285,9 @@ cv.addEventListener('mousemove', (ev) => {
   tip.hidden = !n; if (n) { const r = $('#viewport').getBoundingClientRect(); tip.style.left = `${ev.clientX - r.left}px`; tip.style.top = `${ev.clientY - r.top}px`; tip.textContent = n + (S.selection.has(n) ? ' · selected' : ' · click to select'); }
 });
 cv.addEventListener('mouseleave', () => { S.hover = null; $('#tip').hidden = true; paintOverlay(); });
-cv.addEventListener('click', (ev) => { if (!cv.dataset.ready) return; const n = pick(ev); if (!n) { S.selection.clear(); } else toggleSel(n, ev.shiftKey || ev.metaKey); });
+cv.addEventListener('click', (ev) => { if (!cv.dataset.ready) return; const n = pick(ev); if (!n) { S.selection.clear(); renderObjects(); paintOverlay(); say('Selection cleared'); } else toggleSel(n, ev.shiftKey || ev.metaKey); });
 $('#wipe').addEventListener('input', paint);
+$('#objectFilter').addEventListener('input', () => renderObjects());
 $('#compareToggle').addEventListener('change', (e) => { S.compare = /** @type {HTMLInputElement} */ (e.target).checked; drawViewport(); });
 /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.seg button')).forEach((b) => b.addEventListener('click', () => {
   S.profile = /** @type {string} */ (b.dataset.profile); document.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-checked', /** @type {string} */ (/** @type {unknown} */ (x === b)))); drawViewport();
@@ -305,15 +316,29 @@ function renderMeasure(r) {
 }
 
 // ---------- objects & direct manipulation ----------
+const OBJECT_CAP = 200;
+// Rebuilds the list only when the version or the filter changes; a selection change only updates the rows already shown.
 function renderObjects() {
-  const scene = viewV().scene; const list = $('#objectList'); list.innerHTML = '';
-  for (const n of scene.nodes.filter((n) => n.name)) {
-    const li = document.createElement('li'); const sel = S.selection.has(n.name);
-    li.innerHTML = `<label class="${sel ? 'sel' : ''}"><input type="checkbox" ${sel ? 'checked' : ''}> ${esc(n.name)} <span class="kind">${esc(n.type)}${n.type === 'light' ? ' ' + esc(n.shape) : ''}</span></label>`;
-    /** @type {HTMLInputElement} */ (li.querySelector('input')).onchange = () => toggleSel(n.name, true);
-    list.append(li);
-  }
+  const scene = viewV().scene; const list = $('#objectList');
+  const filter = /** @type {HTMLInputElement} */ ($('#objectFilter')).value.trim().toLowerCase();
   for (const s of [...S.selection]) if (!scene.nodes.some((n) => n.name === s)) S.selection.delete(s);
+  const key = `${S.viewId}\n${filter}`;
+  if (key !== S.objKey) {
+    S.objKey = key; list.innerHTML = '';
+    const matches = scene.nodes.filter((n) => n.name && n.name.toLowerCase().includes(filter));
+    for (const n of matches.slice(0, OBJECT_CAP)) {
+      const li = document.createElement('li'); li.dataset.name = n.name;
+      li.innerHTML = `<label><input type="checkbox"> ${esc(n.name)} <span class="kind">${esc(n.type)}${n.type === 'light' ? ' ' + esc(n.shape) : ''}</span></label>`;
+      /** @type {HTMLInputElement} */ (li.querySelector('input')).onchange = () => toggleSel(n.name, true);
+      list.append(li);
+    }
+    const more = $('#objectMore'); const rest = matches.length - OBJECT_CAP;
+    more.hidden = matches.length ? rest <= 0 : !filter; more.textContent = matches.length ? `${rest} more — type to filter` : 'No objects match';
+  }
+  for (const li of /** @type {HTMLCollectionOf<HTMLElement>} */ (list.children)) {
+    const sel = S.selection.has(/** @type {string} */ (li.dataset.name));
+    /** @type {HTMLElement} */ (li.querySelector('label')).classList.toggle('sel', sel); /** @type {HTMLInputElement} */ (li.querySelector('input')).checked = sel;
+  }
   $('#selCount').textContent = S.selection.size ? `(${[...S.selection].join(', ')})` : '(none)';
   renderQuick(scene);
 }
@@ -408,11 +433,19 @@ function trackJob(job, onEnd) {
   let lastCount = 0;
   const tick = async () => {
     /** @type {Job | null} */
-    const j = await api(`/api/jobs/${job.id}`).catch(() => null); if (!j) return;
+    // 'no job': Director drops finished jobs after a while (#32); treat it as ended instead of polling forever.
+    /** @type {Job | null} */
+    const j = await api(`/api/jobs/${job.id}`).catch((e) => (/** @type {Error} */ (e).message === 'no job' ? { ...job, status: 'gone' } : null)); if (!j) return;
     $('#jobSteps').innerHTML = j.steps.map((s) => `<li class="${s.status}"><span class="ic" aria-hidden="true"></span><span>${esc(s.label)}</span><span class="t">${(s.t / 1000).toFixed(1)}s</span>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ''}</li>`).join('');
     $('#jobElapsed').textContent = `elapsed ${(j.elapsed / 1000).toFixed(0)}s (no ETA: agent and GPU time vary)`;
     if (j.steps.length !== lastCount) { lastCount = j.steps.length; say(j.steps.at(-1)?.label || ''); }
     if (j.status === 'running') return setTimeout(tick, 500);
+    if (j.status === 'gone') {
+      // The result is unknown here (the tab did not poll for over 10 minutes); the reloaded state shows what happened.
+      S.job = null; /** @type {HTMLButtonElement} */ ($('#askBtn')).disabled = false; /** @type {HTMLButtonElement} */ ($('#finalBtn')).disabled = false; $('#cancelBtn').hidden = true; $('#jobBox').hidden = true;
+      await load(); say('The job ended while this tab was not watching it; the versions and requests show the result');
+      return;
+    }
     S.job = null; /** @type {HTMLButtonElement} */ ($('#askBtn')).disabled = false; /** @type {HTMLButtonElement} */ ($('#finalBtn')).disabled = false; $('#cancelBtn').hidden = true;
     say(j.status === 'done' ? 'Finished' : `Stopped: ${j.error || j.status}`);
     await onEnd?.(j);
@@ -429,8 +462,12 @@ function fmt(v) {
   const s = esc(JSON.stringify(v));
   return isColor(v) ? `<span class="swatch" style="background:${linToHex(v)}"></span>${s}` : s;
 }
+/** @param {string} c */
+const isWildcard = (c) => c.length > 1 && c.endsWith('*');
 function renderReview() {
   const box = $('#review'); const v = viewV(); const r = S.lastResult;
+  // The notice is done once its proposal is on screen or no longer a proposal.
+  if (noticeFor === v.id || (noticeFor && V(noticeFor)?.status !== 'proposed')) closeNotice();
   // failure / question states from the last agent job (not tied to a version)
   if (r && r.result && ['question', 'blocked', 'invalid'].includes(r.result.kind) && r.versionId === S.viewId) {
     const p = r.result.proposal || {};
@@ -446,13 +483,41 @@ function renderReview() {
   }
   if (v.origin !== 'agent') { box.hidden = true; return; }
   const p = v.proposal; const claimedNodes = new Set(p.claimed_changes.map((c) => c.node));
+  // "b*" claims every changed node whose name starts with "b"; a bare "*" stays a literal name so one claim cannot cover everything
+  const prefixes = [...claimedNodes].filter(isWildcard).map((c) => c.slice(0, -1));
   // scene-level keys (render, animation, …) appear in the diff as "(scene)" with the key as path head
   /** @param {Diff} d */
   const keyOf = (d) => (d.node === '(scene)' ? d.path.split(/[.[]/)[0] : d.node);
   /** @param {Diff} d */
-  const isClaimed = (d) => claimedNodes.has(d.node) || claimedNodes.has(keyOf(d)) || (d.node === '(scene)' && claimedNodes.has('scene'));
+  const isClaimed = (d) => claimedNodes.has(d.node) || claimedNodes.has(keyOf(d)) || (d.node === '(scene)' && claimedNodes.has('scene')) || (d.node !== '(scene)' && prefixes.some((x) => d.node.startsWith(x)));
   const changedKeys = new Set(v.diff.map(keyOf));
-  const ghost = [...claimedNodes].filter((n) => !changedKeys.has(n) && !(n === 'scene' && v.diff.some((d) => d.node === '(scene)')));
+  const changedNodes = [...new Set(v.diff.map((d) => d.node).filter((n) => n !== '(scene)'))];
+  /** @type {Map<string, number>} */
+  const wildCount = new Map([...claimedNodes].filter(isWildcard).map((c) => [c, changedNodes.filter((n) => n.startsWith(c.slice(0, -1))).length]));
+  const ghost = [...claimedNodes].filter((n) => (isWildcard(n) ? !wildCount.get(n) : !changedKeys.has(n) && !(n === 'scene' && v.diff.some((d) => d.node === '(scene)'))));
+  // Large scenes produce thousands of rows: node additions/removals collapse into one row per (type, added|removed), the rest is capped.
+  const typeOf = new Map([...(V(/** @type {string} */ (v.parent))?.scene.nodes || []), ...v.scene.nodes].map((n) => [n.name, n.type]));
+  /** @type {Map<string, { type: string, kind: string, ds: Diff[] }>} */
+  const groups = new Map(); /** @type {Diff[]} */ const rest = [];
+  for (const d of v.diff) {
+    if (d.path !== '(node)') { rest.push(d); continue; }
+    const type = String(typeOf.get(d.node) || 'node'), kind = d.after === 'removed' ? 'removed' : 'added';
+    const k = JSON.stringify([type, kind]); const g = groups.get(k); if (g) g.ds.push(d); else groups.set(k, { type, kind, ds: [d] });
+  }
+  const groupList = [...groups.values()];
+  /** @param {Diff} d */
+  const row = (d) => `<tr class="${isClaimed(d) ? '' : 'unclaimed'}"><td>${esc(d.node)}${d.path ? '.' + esc(d.path) : ''}</td><td>${fmt(d.before)}</td><td>${fmt(d.after)}</td></tr>`;
+  /** @param {Diff[]} ds */
+  const unclaimedNote = (ds) => { const u = ds.filter((d) => !isClaimed(d)).length; return u ? ` <span class="flag">· ⚠ ${u} not mentioned</span>` : ''; };
+  const CAP = 200; const hidden = rest.slice(CAP);
+  const diffRows = groupList.map(({ type, kind, ds }, i) => `<tr class="group"><td colspan="3"><details data-group="${i}"><summary>${ds.length} ${esc(type)} node${ds.length > 1 ? 's' : ''} ${esc(kind)} (${esc(ds[0].node)}${ds.length > 1 ? ` … ${esc(ds.at(-1)?.node)}` : ''})${unclaimedNote(ds)}</summary><table class="difftable"><tbody></tbody></table></details></td></tr>`).join('')
+    + rest.slice(0, CAP).map(row).join('')
+    + (hidden.length ? `<tr class="group"><td colspan="3"><button type="button" class="ghost" id="moreDiff">Show remaining ${hidden.length} rows</button>${unclaimedNote(hidden)}</td></tr>` : '');
+  // The poll re-renders this panel; keep what the human opened in the diff while it shows the same version.
+  const same = box.dataset.view === v.id;
+  const openGroups = same ? [...box.querySelectorAll('details[data-group]')].filter((el) => /** @type {HTMLDetailsElement} */ (el).open).map((el) => /** @type {HTMLElement} */ (el).dataset.group) : [];
+  const shownMore = same && box.dataset.more === '1';
+  box.dataset.view = v.id; box.dataset.more = shownMore ? '1' : '';
   box.hidden = false;
   box.style.borderColor = v.status === 'proposed' ? 'var(--warn)' : 'var(--line)';
   box.innerHTML = `
@@ -461,10 +526,10 @@ function renderReview() {
     <div><h3>Request</h3>${esc(v.instruction)}</div>
     <div><h3>Agent's reading</h3><p class="interp">${esc(p.interpretation)}</p>
       ${p.assumptions.length ? `<ul>${p.assumptions.map((a) => `<li>${esc(a)}</li>`).join('')}</ul>` : ''}</div>
-    <div><h3>What the agent says it changed</h3><ul>${p.claimed_changes.map((c) => `<li><b>${esc(c.node)}</b>: ${esc(c.what)} <span class="hint">— ${esc(c.why)}</span></li>`).join('')}</ul></div>
+    <div><h3>What the agent says it changed</h3><ul>${p.claimed_changes.map((c) => `<li><b>${esc(c.node)}</b>${isWildcard(c.node) ? ` <span class="hint">→ ${wildCount.get(c.node)} node${wildCount.get(c.node) === 1 ? '' : 's'}</span>` : ''}: ${esc(c.what)} <span class="hint">— ${esc(c.why)}</span></li>`).join('')}</ul></div>
     <div><h3>What actually changed (computed from the scene)</h3>
       <table class="difftable"><thead><tr><th>node.field</th><th>before</th><th>after</th></tr></thead><tbody>
-      ${v.diff.map((d) => `<tr class="${isClaimed(d) ? '' : 'unclaimed'}"><td>${esc(d.node)}${d.path ? '.' + esc(d.path) : ''}</td><td>${fmt(d.before)}</td><td>${fmt(d.after)}</td></tr>`).join('') || '<tr><td colspan="3">No changes</td></tr>'}
+      ${diffRows || '<tr><td colspan="3">No changes</td></tr>'}
       </tbody></table>
       ${ghost.length ? `<p class="flag">⚠ Claimed but not changed: ${ghost.map(esc).join(', ')}</p>` : ''}</div>
     ${p.policy.flags.length ? `<div><h3>Needs attention</h3><ul>${p.policy.flags.map((f) => `<li class="flag">${f.level}: ${esc(f.msg)}</li>`).join('')}</ul></div>` : ''}
@@ -474,6 +539,14 @@ function renderReview() {
       <button class="primary" id="acceptBtn">Accept as new HEAD</button>
       <button class="ghost" id="refineBtn">Refine from this</button>
       <button class="ghost danger" id="discardBtn">Discard</button></div>` : ''}`;
+  // rows inside a group or past the cap are built only when the human opens them
+  box.querySelectorAll('details[data-group]').forEach((el) => el.addEventListener('toggle', () => {
+    const tb = /** @type {HTMLElement} */ (el.querySelector('tbody'));
+    if (/** @type {HTMLDetailsElement} */ (el).open && !tb.children.length) tb.innerHTML = groupList[Number(/** @type {HTMLElement} */ (el).dataset.group)].ds.map(row).join('');
+  }));
+  const more = box.querySelector('#moreDiff'); if (more) /** @type {HTMLButtonElement} */ (more).onclick = () => { box.dataset.more = '1'; /** @type {HTMLElement} */ (more.closest('tr')).outerHTML = hidden.map(row).join(''); };
+  for (const g of openGroups) /** @type {HTMLDetailsElement | null} */ (box.querySelector(`details[data-group="${g}"]`))?.setAttribute('open', '');
+  if (shownMore && more) /** @type {HTMLButtonElement} */ (more).click();
   if (v.status !== 'proposed') return;
   $('#acceptBtn').onclick = () => decide('accept');
   $('#discardBtn').onclick = () => decide('discard');

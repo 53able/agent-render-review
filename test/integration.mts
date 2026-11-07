@@ -16,6 +16,9 @@ interface Part { type: string; text: string; data: string; mimeType: string }
 interface ToolResult { content: Part[]; isError?: boolean }
 interface SceneNode { name: string; materials: { inputs: Record<string, unknown> }[] }
 
+import { acquireGpuLock } from './gpu-lock.mts';
+await acquireGpuLock('integration');
+
 process.env.RENDER_DIRECTOR_IMPORT = '1';
 const { reportFromAudit } = await import('../server.mts');
 delete process.env.RENDER_DIRECTOR_IMPORT; // must not leak into the Director that mcp.mts starts
@@ -40,7 +43,8 @@ const BIN = path.join(tmp, 'bin'); fs.mkdirSync(BIN);
 const realVork = process.env.PATH!.split(path.delimiter).map((d) => path.join(d, 'vork')).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return true; } catch { return false; } });
 if (!realVork) throw new Error('vork not found on PATH');
 const GATE = path.join(tmp, 'gate');
-fs.writeFileSync(path.join(BIN, 'vork'), `#!/bin/sh\nif [ "$1" = render ] && [ -e '${GATE}' ]; then\n  echo $$ >> '${GATE}.waiting'\n  while [ -e '${GATE}' ]; do sleep 0.05; done\nfi\nexec '${realVork}' "$@"\n`, { mode: 0o755 });
+// Every `vork render` also appends its --out path to GATE.calls, so a test can count renders.
+fs.writeFileSync(path.join(BIN, 'vork'), `#!/bin/sh\nif [ "$1" = render ]; then echo "$4" >> '${GATE}.calls'; fi\nif [ "$1" = render ] && [ -e '${GATE}' ]; then\n  echo $$ >> '${GATE}.waiting'\n  while [ -e '${GATE}' ]; do sleep 0.05; done\nfi\nexec '${realVork}' "$@"\n`, { mode: 0o755 });
 const holdRenders = () => { fs.rmSync(`${GATE}.waiting`, { force: true }); fs.writeFileSync(GATE, ''); };
 const releaseRenders = () => fs.rmSync(GATE, { force: true });
 /** Waits until a render is held at the gate; returns the pid of the waiting process. */
@@ -254,6 +258,60 @@ const raw = async (route: string, body: string, { agent = false, method = 'POST'
   const r = await fetch(`${BASE}${route}`, { method, headers, body: method === 'GET' ? undefined : body });
   return { status: r.status, json: await r.json().catch(() => ({})) };
 };
+
+// #17: the shape of /api/state and /api/agent/* responses (keys and value types only; not times, paths or hashes).
+// A spec is a type name ('a|b' allows either, 'any' anything), [spec] for an array whose items all match spec, an object
+// spec whose keys must match exactly ('k?' marks an optional key), or a function that checks the value itself.
+type Spec = string | Spec[] | { [k: string]: Spec } | ((x: Json, at: string) => void);
+const typeOf = (x: unknown) => (x === null ? 'null' : Array.isArray(x) ? 'array' : typeof x);
+function assertShape(x: Json, spec: Spec, at = '$'): void {
+  if (typeof spec === 'function') return spec(x, at);
+  if (typeof spec === 'string') { assert.ok(spec === 'any' || spec.split('|').includes(typeOf(x)), `${at}: ${typeOf(x)} is not ${spec}`); return; }
+  if (Array.isArray(spec)) { assert.ok(Array.isArray(x), `${at}: ${typeOf(x)} is not an array`); x.forEach((item: Json, i: number) => assertShape(item, spec[0], `${at}[${i}]`)); return; }
+  assert.equal(typeOf(x), 'object', `${at}: not an object`);
+  const keys = Object.keys(spec).map((k) => k.replace(/\?$/, ''));
+  for (const k of Object.keys(x)) assert.ok(keys.includes(k), `${at}: unexpected key ${k}`);
+  for (const [k, s] of Object.entries(spec)) {
+    const key = k.replace(/\?$/, '');
+    if (!Object.hasOwn(x, key)) { assert.ok(k.endsWith('?'), `${at}: missing key ${key}`); continue; }
+    assertShape(x[key], s, `${at}.${key}`);
+  }
+}
+const orNull = (spec: Spec): Spec => (x, at) => { if (x !== null) assertShape(x, spec, at); };
+// exposure and objects are passed through from vork's meta.json: these keys at least, and whatever else vork adds.
+const atLeast = (spec: Record<string, Spec>): Spec => (x, at) => { assert.equal(typeOf(x), 'object', at); for (const [k, s] of Object.entries(spec)) assertShape(x[k], s, `${at}.${k}`); };
+const EXPOSURE = atLeast({ mean: 'number', clipped: 'number', near_black: 'number' });
+const OBJECTS: Spec = [atLeast({ pass_index: 'number', name: 'string' })];
+const RENDER_INFO: Spec = {
+  profile: 'string', seconds: 'number', width: 'number', height: 'number', image: 'string', ids: 'string', file: 'string', sha256: 'string',
+  'idsSha256?': 'string', sceneHash: 'string|null', objects: OBJECTS, exposure: EXPOSURE, settings: { integrator: 'any', samples: 'number', denoiser: 'any' }, warnings: ['string'],
+};
+const RENDER_SUMMARY: Spec = { profile: 'string', seconds: 'number', width: 'number', height: 'number', file: 'string', exposure: EXPOSURE, objects: OBJECTS, warnings: ['string'] };
+const POLICY: Spec = { blockers: ['string'], flags: [{ level: 'string', msg: 'string' }] };
+const DIFF: Spec = [{ node: 'string', path: 'string', 'before?': 'any', 'after?': 'any' }];
+const PROPOSAL: Spec = {
+  interpretation: 'string', assumptions: ['string'], claimed_changes: [{ node: 'string', what: 'string', why: 'string' }], policy: POLICY, context: ['string'],
+  via: 'string', 'cost?': 'number|null', 'clarifying_question?': 'string|null', 'respondsTo?': 'number|null',
+};
+const PAGE_PREVIEW: Spec = { ok: 'boolean', matched: 'number', image: 'string', warning: 'string|null', 'sha256?': 'string' };
+const VERSION: Spec = {
+  id: 'string', parent: 'string|null', origin: 'string', instruction: 'string|null', proposal: orNull(PROPOSAL), status: 'string', created: 'string',
+  renders: { 'previs?': RENDER_INFO, 'draft?': RENDER_INFO, 'final?': RENDER_INFO }, 'pagePreviews?': { 'previs?': PAGE_PREVIEW, 'draft?': PAGE_PREVIEW, 'final?': PAGE_PREVIEW },
+  scene: 'object', diff: DIFF, hash: 'string',
+};
+const EVENT_BODIES: Record<string, Record<string, Spec>> = {
+  feedback: { version: 'string', versionStatus: 'string', selection: ['string'], comment: 'string' },
+  decision: { version: 'string', decision: 'string', head: 'string|null', comment: 'string|null' },
+  checkout: { head: 'string' },
+  adoption_rejected: { request: 'string', version: 'string', comment: 'string|null' },
+  adopted: { request: 'string', version: 'string', slug: 'string', asset: 'string', manifest: 'string', sha256: 'string' },
+  direct_edit: { version: 'string', parent: 'string', node: 'string', field: 'string', value: 'any', head: 'string|null' },
+};
+const EVENT: Spec = (e, at) => {
+  assert.ok(Object.hasOwn(EVENT_BODIES, e?.type), `${at}: unknown event type ${e?.type}`);
+  assertShape(e, { seq: 'number', t: 'string', type: 'string', ...EVENT_BODIES[e.type] }, at);
+};
+const CONFIG: Spec = { assetDir: 'string', pageUrl: 'string|null', assetUrlPattern: 'string|null' };
 
 await check('#3 a body that is not a JSON object gets 400 without internal error text', async () => {
   for (const body of ['null', '1', '"x"', '[]', 'true', '{not json']) {
@@ -550,6 +608,64 @@ const newProposal = async (): Promise<string> => {
 };
 const versionOf = async (id: string): Promise<Json> => (await state()).versions.find((v: Json) => v.id === id);
 
+await check('#30 page preview waits for a running render of the version and refuses a PNG that is not the recorded one', async () => {
+  const cfgFile = path.join(PROJECT, '.vork', 'config.json'); const cfg = fs.readFileSync(cfgFile, 'utf8');
+  const chrome = process.env.CHROME_PATH || ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium'].find((p) => fs.existsSync(p));
+  if (!chrome) { console.log('     (skipped: Chrome not found)'); return; }
+  // Nothing listens on port 9, so a preview that gets past the checks fails at page.goto with "could not open".
+  fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(cfg), pageUrl: 'http://127.0.0.1:9/', assetUrlPattern: '**/vork/hero.png' }));
+  const draft = path.join(PROJECT, '.vork', proposed, 'draft.png'); let rendered: Buffer | null = null;
+  try {
+    holdRenders();
+    const job = (await human('/api/render', { versionId: proposed, profile: 'draft' })).json;
+    await renderWaiting();
+    let settled = false;
+    const preview = human('/api/preview', { versionId: proposed, profile: 'draft' }).then((r) => { settled = true; return r; });
+    await sleep(2500);
+    assert.equal(settled, false, 'preview must wait for the render of the same version');
+    releaseRenders(); await waitJob(job.id);
+    const r = await preview;
+    assert.equal(r.json.ok, false); assert.match(r.json.reason, /could not open/);
+    rendered = fs.readFileSync(draft);
+    fs.writeFileSync(draft, Buffer.from('not the recorded png'));
+    const bad = await human('/api/preview', { versionId: proposed, profile: 'draft' });
+    assert.equal(bad.json.ok, false); assert.match(bad.json.reason, /being updated/);
+  } finally {
+    releaseRenders(); fs.writeFileSync(cfgFile, cfg);
+    if (rendered) fs.writeFileSync(draft, rendered);
+  }
+});
+
+await check('#26 /runs/ serves a render file only while its bytes are the ones Director recorded', async () => {
+  for (const name of ['draft.png', 'draft.ids.bin']) {
+    const file = path.join(PROJECT, '.vork', proposed, name); const bytes = fs.readFileSync(file);
+    const get = async () => (await fetch(`${BASE}/runs/${proposed}/${name}`, { headers: { cookie: uiCookie } })).status;
+    assert.equal(await get(), 200, name);
+    try { fs.writeFileSync(file, Buffer.concat([bytes, Buffer.from('x')])); assert.equal(await get(), 404, `${name} changed on disk`); }
+    finally { fs.writeFileSync(file, bytes); }
+    assert.equal(await get(), 200, name);
+  }
+  // The UI loads the URL Director presents: it carries the recorded hash, so it changes exactly when the file does (#17).
+  const r = (await versionOf(proposed)).renders.draft;
+  assert.equal(r.image, `/runs/${proposed}/draft.png?${r.sha256.slice(0, 16)}`); assert.equal(r.ids, `/runs/${proposed}/draft.ids.bin?${r.idsSha256.slice(0, 16)}`);
+  assert.equal((await fetch(`${BASE}${r.image}`, { headers: { cookie: uiCookie } })).status, 200);
+  // A file Director has no record of is not served, even under a valid name.
+  assert.equal((await fetch(`${BASE}/runs/${proposed}/page-final.png`, { headers: { cookie: uiCookie } })).status, 404);
+});
+
+await check('#31 two concurrent wait_for_feedback calls get one event once in total', async () => {
+  await raw('/api/agent/feedback?wait=0', '', { agent: true, method: 'GET' }); // drain anything unread
+  const waitOnce = () => raw('/api/agent/feedback?wait=10', '', { agent: true, method: 'GET' });
+  const a = waitOnce(), b = waitOnce();
+  await sleep(300);
+  const comment = `concurrent ${crypto.randomUUID()}`;
+  assert.equal((await human('/api/feedback', { versionId: proposed, selection: [], comment })).status, 200);
+  const got = [(await a).json, (await b).json];
+  const delivered = got.flatMap((g) => g.events).filter((e: Json) => e.comment === comment);
+  assert.equal(delivered.length, 1, JSON.stringify(got));
+  assert.equal(textOf(await tool('wait_for_feedback', { timeout_sec: 0 })).events.length, 0);
+});
+
 await check('#15 a final ticket for a version discarded after planning is refused', async () => {
   const id = await newProposal();
   const plan = await human('/api/final/plan', { versionId: id }); assert.equal(plan.status, 200);
@@ -647,7 +763,7 @@ await check('#14 a version discarded after the adoption plan is not written, als
     const r = await human('/api/adopt', { ticket: plan.json.ticket });
     assert.equal(r.status, 409, `${slug}: ${JSON.stringify(r.json)}`); assert.match(r.json.error, /discarded/);
     assert.equal(fs.existsSync(path.join(PROJECT, `public/vork/${slug}.png`)), false, slug);
-    assert.equal((await requestOf(requestId)).status, 'pending', slug);
+    assert.equal((await requestOf(requestId)).status, 'rejected', `${slug}: discarding the version rejects its request (#27)`);
   }
 });
 
@@ -719,6 +835,7 @@ await check('#16 /runs/ serves only render files by name, also with a session', 
 await check('#16 open-tab is limited to one call per 30 seconds', async () => {
   const first = await raw('/api/agent/open-tab', '{}', { agent: true });
   assert.equal(first.status, 200, JSON.stringify(first.json));
+  assertShape(first.json, { opened: 'boolean', note: 'string' }); // #17
   const second = await raw('/api/agent/open-tab', '{}', { agent: true });
   assert.equal(second.status, 429); assert.match(second.json.error, /30 seconds/);
 });
@@ -738,6 +855,91 @@ await check('#16 cancelling a job kills its render process and the render is not
     assert.equal((await human(`/api/jobs/${job.id}`)).json.status, 'cancelled');
     assert.equal(JSON.stringify((await versionOf('v001')).renders), before);
   } finally { releaseRenders(); }
+});
+
+await check('#27 discarding a version rejects its pending adoption requests and tells the agent', async () => {
+  const id = await newProposal();
+  const req = await raw('/api/agent/adoption-request', JSON.stringify({ version: id, slug: 'gone', reason: 'x' }), { agent: true });
+  assert.equal(req.status, 200, JSON.stringify(req.json));
+  await raw('/api/agent/feedback?wait=0', '', { agent: true, method: 'GET' }); // drain
+  assert.equal((await human('/api/decide', { versionId: id, decision: 'discard' })).status, 200);
+  assert.equal((await state()).adoptionRequests.find((a: Json) => a.id === req.json.request).status, 'rejected');
+  const evs = (await raw('/api/agent/feedback?wait=0', '', { agent: true, method: 'GET' })).json.events;
+  assert.ok(evs.some((e: Json) => e.type === 'adoption_rejected' && e.request === req.json.request && e.comment === 'version discarded'), JSON.stringify(evs));
+});
+
+await check('#28 concurrent agent renders of one version and profile run vork once and share the result', async () => {
+  holdRenders();
+  try {
+    const edit = await human('/api/edit', { baseId: 'v001', node: 'vase', field: 'specular_roughness', value: 0.37 });
+    assert.equal(edit.status, 202, JSON.stringify(edit.json)); const id = edit.json.version;
+    await renderWaiting(); // the edit's draft render holds the version's lock; previs renders queue behind it
+    // Stored renders go to a fresh folder under the version first: .vork/<id>/.render-previs-XXXXXX/previs.png
+    const isOut = (l: string) => l.startsWith(path.join(PROJECT, '.vork', id, '.render-previs-')) && l.endsWith('/previs.png');
+    const before = fs.existsSync(`${GATE}.calls`) ? fs.readFileSync(`${GATE}.calls`, 'utf8').split('\n').filter(isOut).length : 0;
+    const agents = [0, 1, 2].map(() => raw(`/api/agent/render?version=${id}&profile=previs`, '', { agent: true, method: 'GET' }));
+    await sleep(300); releaseRenders();
+    for (const r of await Promise.all(agents)) assert.equal(r.status, 200, JSON.stringify(r.json));
+    await waitJob(edit.json.job.id);
+    const calls = fs.readFileSync(`${GATE}.calls`, 'utf8').split('\n').filter(isOut).length - before;
+    assert.equal(calls, 1, `vork rendered ${id} previs ${calls} times`);
+  } finally { releaseRenders(); }
+});
+
+await check('#39 RENDER_DIRECTOR_BROWSER opens the pairing link with the given command', async () => {
+  const { spawn } = await import('node:child_process'); const net = await import('node:net');
+  const port = await new Promise<number>((ok) => { const srv = net.createServer().listen(0, '127.0.0.1', () => { const p = (srv.address() as { port: number }).port; srv.close(() => ok(p)); }); });
+  const got = path.join(tmp, 'browser-args'); const opener = path.join(BIN, 'fake-browser');
+  fs.writeFileSync(opener, `#!/bin/sh\nprintf '%s\\n' "$@" > '${got}'\n`, { mode: 0o755 });
+  const env: NodeJS.ProcessEnv = { ...process.env, RENDER_DIRECTOR_RUNS: path.join(tmp, 'browser-runs'), RENDER_DIRECTOR_BROWSER: JSON.stringify([opener, '--profile', 'review']) };
+  delete env.RENDER_DIRECTOR_NO_OPEN; delete env.RENDER_DIRECTOR_PAIR_TOKEN;
+  const proc = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !fs.existsSync(got); i++) await sleep(150);
+    const args = fs.readFileSync(got, 'utf8').trim().split('\n');
+    assert.deepEqual(args.slice(0, 2), ['--profile', 'review']);
+    const m = new RegExp(`^http://127\\.0\\.0\\.1:${port}/#pair=([0-9a-f]+)$`).exec(args[2]); assert.ok(m, args[2]);
+    const pr = await fetch(`http://127.0.0.1:${port}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: m[1] }) });
+    assert.equal(pr.status, 200);
+  } finally { proc.kill('SIGTERM'); }
+});
+
+await check('#17 /api/state keeps its shape', async () => {
+  const s = await state();
+  assertShape(s, {
+    mode: 'string', project: 'string|null', config: CONFIG, head: 'string|null', vork: 'string', model: 'string', versions: [VERSION],
+    audit: [(a: Json, at: string) => { assert.equal(typeof a.t, 'string', at); assert.equal(typeof a.event, 'string', at); }],
+    adoptionRequests: [{ id: 'string', version: 'string', slug: 'string', reason: 'string', status: 'string', t: 'string', 'job?': 'string' }],
+    events: [EVENT], agentCursor: 'number',
+  });
+  // The state above must cover what the shapes describe, or the check proves little.
+  assert.ok(s.versions.some((v: Json) => v.proposal && v.renders.draft && v.renders.previs) && s.versions.some((v: Json) => v.renders.final));
+  for (const type of Object.keys(EVENT_BODIES).filter((t) => t !== 'checkout')) assert.ok(s.events.some((e: Json) => e.type === type), `no ${type} event to check`);
+});
+
+await check('#17 /api/agent/* responses keep their shape', async () => {
+  const get = (route: string) => raw(route, '', { agent: true, method: 'GET' });
+  const st = await get('/api/agent/status'); assert.equal(st.status, 200);
+  assertShape(st.json, { mode: 'string', project: 'string|null', head: 'string|null', vork: 'string', versions: [{ id: 'string', parent: 'string|null', status: 'string', origin: 'string', instruction: 'string|null' }], config: CONFIG });
+  const sc = await get('/api/agent/scene'); assert.equal(sc.status, 200);
+  assertShape(sc.json, { version: 'string', status: 'string', scene: 'object' });
+  const scene = structuredClone(base); scene.nodes.find((n: SceneNode) => n.name === 'vase').materials[0].inputs.base_color = [0.4, 0.4, 0.1];
+  const pr = await raw('/api/agent/propose', JSON.stringify({ interpretation: 'shape', claimed_changes: [{ node: 'vase', what: 'x', why: 'y' }], scene, base: 'v001', responds_to: 1 }), { agent: true });
+  assert.equal(pr.status, 200, JSON.stringify(pr.json));
+  assertShape(pr.json, { version: 'string', status: 'string', head: 'string|null', render: orNull(RENDER_SUMMARY), renderError: 'string|null', diff: DIFF, flags: [{ level: 'string', msg: 'string' }] });
+  const bad = await raw('/api/agent/propose', JSON.stringify({ interpretation: 'x', claimed_changes: [], scene: { ...base, programs: { p: {} } } }), { agent: true });
+  assert.equal(bad.status, 422); assertShape(bad.json, { error: 'string', blockers: ['string'], log: 'string|null', version: 'null' });
+  const rn = await get(`/api/agent/render?version=${pr.json.version}&profile=previs`); assert.equal(rn.status, 200);
+  assertShape(rn.json, { version: 'string', status: 'string', render: RENDER_SUMMARY });
+  await get('/api/agent/feedback?wait=0'); // drain
+  assertShape((await get('/api/agent/feedback?wait=0')).json, { timeout: 'boolean', waitedSec: 'number', events: [EVENT] });
+  assert.equal((await human('/api/feedback', { versionId: pr.json.version, selection: ['vase'], comment: 'shape' })).status, 200);
+  const fb = await get('/api/agent/feedback?wait=0');
+  assertShape(fb.json, { timeout: 'boolean', events: [EVENT] }); assert.equal(fb.json.events.length, 1);
+  const ar = await raw('/api/agent/adoption-request', JSON.stringify({ version: pr.json.version, slug: 'shape', reason: 'x' }), { agent: true });
+  assert.equal(ar.status, 200); assertShape(ar.json, { request: 'string', status: 'string', note: 'string' });
+  assert.equal((await human('/api/adopt/reject', { requestId: ar.json.request })).status, 200);
+  assertShape((await get('/api/agent/scene?version=v999')).json, { error: 'string' });
 });
 
 await check('AC-01 nothing new was written under render-director/runs', async () => {
