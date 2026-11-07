@@ -1,7 +1,7 @@
 // Unit tests of the review panel's checks (public/review-model.js): claimed changes against the diff, the grouping of
 // large diffs, the object list. No browser needed (#48).
 import assert from 'node:assert/strict';
-import { isWildcard, keyOf, checkClaims, groupDiff } from '../public/review-model.js';
+import { isWildcard, keyOf, checkClaims, groupDiff, nameStem, nameRuns, describeNames } from '../public/review-model.js';
 
 let pass = 0, failures = 0;
 async function check(name: string, fn: () => unknown) {
@@ -35,6 +35,16 @@ await check('#37 node additions and removals collapse per type and kind; other r
   const { groups, rest } = groupDiff(diff, typeOf);
   assert.deepEqual(groups.map((g) => [g.type, g.kind, g.ds.length]), [['mesh', 'added', 400], ['light', 'added', 1], ['mesh', 'removed', 1], ['node', 'added', 1]]);
   assert.deepEqual(rest.map((d) => d.node), ['key', 'fill']);
+});
+
+await check('#47 the nodes a prefix claim matched are listed by name stem, so an unrelated match stands out', () => {
+  const diff = [...Array.from({ length: 4000 }, (_, i) => added(`b${i}`)), field('backdrop'), field('background_light')];
+  const names = checkClaims([{ node: 'b*', what: '', why: '' }], diff).wildMatches.get('b*')!;
+  assert.equal(names.length, 4002);
+  assert.deepEqual(nameRuns(names).map((r) => [r.stem, r.count]), [['b', 4000], ['backdrop', 1], ['background_light', 1]]);
+  assert.equal(describeNames(names), 'b0 … b3999 (4000), backdrop, background_light');
+  assert.equal(nameStem('hill_12'), 'hill_'); assert.equal(nameStem('42'), '');
+  assert.equal(describeNames(['a1', 'b1', 'c1', 'd1', 'e1', 'e2', 'f1'], 4), 'a1, b1, c1, d1, +3 more');
 });
 
 console.log(`\n${pass} passed, ${failures} failed`);

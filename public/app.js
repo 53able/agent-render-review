@@ -1,4 +1,4 @@
-import { isWildcard, checkClaims, groupDiff } from './review-model.js';
+import { isWildcard, checkClaims, groupDiff, nameRuns, describeNames } from './review-model.js';
 
 // ---------- types (JSDoc only; no runtime effect) ----------
 /** @typedef {{ pass_index: number, name: string }} RenderObject */
@@ -471,6 +471,15 @@ function fmt(v) {
   const s = esc(JSON.stringify(v));
   return isColor(v) ? `<span class="swatch" style="background:${linToHex(v)}"></span>${s}` : s;
 }
+/**
+ * What a "prefix*" claim covers, by name stem: "→ 401 nodes: b0 … b399 (400), backdrop". Names of more than one stem
+ * are flagged, because a short prefix can hide an unrelated change among the claimed ones (#47).
+ * @param {string[]} names
+ */
+function wildNote(names) {
+  const mixed = nameRuns(names).length > 1;
+  return ` <span class="${mixed ? 'flag' : 'hint'}">→ ${names.length} node${names.length === 1 ? '' : 's'}${names.length ? `: ${esc(describeNames(names))}` : ''}${mixed ? ' · check each name' : ''}</span>`;
+}
 function renderReview() {
   const box = $('#review'); const v = viewV(); const r = S.lastResult;
   // The notice is done once its proposal is on screen or no longer a proposal.
@@ -514,7 +523,7 @@ function renderReview() {
     <div><h3>Request</h3>${esc(v.instruction)}</div>
     <div><h3>Agent's reading</h3><p class="interp">${esc(p.interpretation)}</p>
       ${p.assumptions.length ? `<ul>${p.assumptions.map((a) => `<li>${esc(a)}</li>`).join('')}</ul>` : ''}</div>
-    <div><h3>What the agent says it changed</h3><ul>${p.claimed_changes.map((c) => `<li><b>${esc(c.node)}</b>${isWildcard(c.node) ? ` <span class="hint">→ ${wildMatches.get(c.node)?.length} node${wildMatches.get(c.node)?.length === 1 ? '' : 's'}</span>` : ''}: ${esc(c.what)} <span class="hint">— ${esc(c.why)}</span></li>`).join('')}</ul></div>
+    <div><h3>What the agent says it changed</h3><ul>${p.claimed_changes.map((c) => `<li><b>${esc(c.node)}</b>${isWildcard(c.node) ? wildNote(wildMatches.get(c.node) || []) : ''}: ${esc(c.what)} <span class="hint">— ${esc(c.why)}</span></li>`).join('')}</ul></div>
     <div><h3>What actually changed (computed from the scene)</h3>
       <table class="difftable"><thead><tr><th>node.field</th><th>before</th><th>after</th></tr></thead><tbody>
       ${diffRows || '<tr><td colspan="3">No changes</td></tr>'}

@@ -123,7 +123,7 @@ server.registerTool('propose_scene', {
     'Propose a complete revised vork scene (version 2). Director checks it against a policy (relative .glb/image files only, no custom shader programs, resolution <= 1920x1080, a unique non-empty name on every node, not starting with "#"),',
     'validates it with a previs render, stores it as a PROPOSED version (HEAD does not move) and renders a draft. The draft image is returned so you can inspect it.',
     'Pass the scene inline as scene, or, for a scene your script wrote to a file, as scene_file (a JSON file inside the project, path relative to the project root); do not shrink a large scene to fit it inline.',
-    'claimed_changes must list every edit; the human sees them next to the real diff. To claim many nodes at once, set node to a name prefix ending in "*" (e.g. "bird_*" covers bird_0, bird_1, …); the human sees how many nodes each prefix matched, and a bare "*" matches nothing. Then ask the human to review and call wait_for_feedback.',
+    'claimed_changes must list every edit; the human sees them next to the real diff. To claim many nodes at once, set node to a name prefix ending in "*" (e.g. "bird_*" covers bird_0, bird_1, …); the human sees which nodes each prefix matched, grouped by name (keep prefixes specific: "b*" also matches "backdrop"), and a bare "*" matches nothing. Then ask the human to review and call wait_for_feedback.',
   ].join(' '),
   inputSchema: {
     scene: z.record(z.string(), z.unknown()).optional().describe('Complete vork scene JSON, version 2. Give this or scene_file'),

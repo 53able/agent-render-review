@@ -229,7 +229,7 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     assert.doesNotMatch(await page.title(), /^\(1\)/); assert.equal(await page.locator('#notice').isHidden(), true);
   });
   await check('#36 a prefix claim shows how many nodes it matched; a prefix that matches nothing is flagged', async () => {
-    assert.match(await page.textContent('#review') as string, new RegExp(`b\\*\\s*→ ${BIRDS} nodes`));
+    assert.match(await page.textContent('#review') as string, new RegExp(`b\\*\\s*→ ${BIRDS} nodes: b0 … b${BIRDS - 1} \\(${BIRDS}\\):`));
     assert.match(await page.textContent('#review') as string, /Claimed but not changed: zz\*/);
     assert.equal(await page.locator('#review tr.unclaimed').count(), 0, 'every added bird is claimed');
   });

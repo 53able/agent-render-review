@@ -3,6 +3,7 @@
 
 /** @typedef {{ node: string, path: string, before?: unknown, after?: unknown }} Diff */
 /** @typedef {{ node: string, what: string, why: string }} Claim */
+/** @typedef {{ stem: string, count: number, first: string, last: string }} NameRun */
 
 /**
  * "b*" claims every changed node whose name starts with "b"; a bare "*" stays a literal name, so one claim cannot
@@ -10,6 +11,39 @@
  * @param {string} c
  */
 export const isWildcard = (c) => c.length > 1 && c.endsWith('*');
+
+/**
+ * A name without its trailing digits: the part that numbered copies (b0 … b3999) share.
+ * @param {string} name
+ */
+export const nameStem = (name) => name.replace(/\d+$/, '');
+
+/**
+ * Names grouped by stem, in the order they first appear: b0, b1, backdrop → b0…b1 (2), backdrop (1).
+ * @param {string[]} names
+ * @returns {NameRun[]}
+ */
+export function nameRuns(names) {
+  /** @type {Map<string, NameRun>} */
+  const runs = new Map();
+  for (const n of names) {
+    const stem = nameStem(n); const r = runs.get(stem);
+    if (r) { r.count++; r.last = n; } else runs.set(stem, { stem, count: 1, first: n, last: n });
+  }
+  return [...runs.values()];
+}
+
+/**
+ * One line for a list of names: "b0 … b3999 (4000), backdrop". At most max runs are named; the rest are counted.
+ * @param {string[]} names
+ * @param {number} [max]
+ */
+export function describeNames(names, max = 4) {
+  const runs = nameRuns(names);
+  const shown = runs.slice(0, max).map((r) => (r.count === 1 ? r.first : `${r.first} … ${r.last} (${r.count})`));
+  const rest = runs.slice(max).reduce((n, r) => n + r.count, 0);
+  return shown.join(', ') + (rest ? `, +${rest} more` : '');
+}
 
 /**
  * Scene-level keys (render, animation, …) appear in the diff as "(scene)" with the key as path head.
