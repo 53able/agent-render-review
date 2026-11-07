@@ -12,13 +12,23 @@
   <div class="brand"><span class="dot" aria-hidden="true"></span> Render Director</div>
   <div class="meta" id="meta">loading…</div>
 </header>
+<div id="conn" class="conn" role="alert" hidden></div>
 
-<main class="layout">
-  <!-- Versions -->
-  <aside class="panel versions" aria-labelledby="h-versions">
+<main class="layout" data-pane="inspector">
+  <!-- Versions: what needs a decision, every version, and the history -->
+  <aside class="panel versions" id="versions" aria-labelledby="h-versions">
+    <section id="adoptBox" class="adopt" hidden aria-labelledby="h-adopt">
+      <h2 id="h-adopt">Adoption requests</h2>
+      <ul id="adoptList" class="alist"></ul>
+    </section>
+    <div id="err-adopt" class="errs"></div>
     <h2 id="h-versions">Versions</h2>
     <p class="hint">Every change is a version. Proposals stay separate until you accept them.</p>
     <ol id="versionList" class="vlist"></ol>
+    <details class="auditbox">
+      <summary>History (audit log)</summary>
+      <ol id="audit" class="audit"></ol>
+    </details>
   </aside>
 
   <!-- Viewport -->
@@ -30,11 +40,13 @@
         <button role="radio" data-profile="previs" aria-checked="false">previs</button>
         <button role="radio" data-profile="final" aria-checked="false">final</button>
       </div>
-      <label class="chk"><input type="checkbox" id="compareToggle"> Compare with parent</label>
+      <label class="chk"><input type="checkbox" id="compareToggle" aria-describedby="compareWhy"> Compare with <span id="compareBase">parent</span> <span id="compareWhy" class="hint"></span></label>
       <button type="button" id="pageBtn" class="ghost" aria-pressed="false" hidden>On page</button>
       <span id="viewing" class="viewing"></span>
       <div id="notice" class="notice" role="status" hidden></div>
     </div>
+    <div id="err-preview" class="errs"></div>
+    <div id="err-view" class="errs"></div>
     <div class="viewport" id="viewport">
       <canvas id="canvas" width="960" height="540" aria-label="Render. Hover to identify objects, click to select. Object list on the right offers the same selection by keyboard."></canvas>
       <canvas id="overlay" width="960" height="540" aria-hidden="true"></canvas>
@@ -46,26 +58,58 @@
     <p class="hint">Numbers above come from vork's render metadata, not from the agent.</p>
   </section>
 
-  <!-- Direction -->
-  <aside class="panel direct" aria-labelledby="h-direct">
+  <!-- Narrow screens only: the two panels below the render are tabs (#60) -->
+  <div class="panetabs" role="tablist" aria-label="Panel below the render">
+    <button type="button" role="tab" id="tab-insp" aria-controls="inspector" aria-selected="true" data-pane="inspector">This version</button>
+    <button type="button" role="tab" id="tab-versions" aria-controls="versions" aria-selected="false" data-pane="versions">All versions</button>
+  </div>
+
+  <!-- Inspector of the version on screen: its state and what can be done with it first, then what changed,
+       then selection (nouns) and what to send about it (verbs) (#56) -->
+  <aside class="panel inspector" id="inspector" aria-labelledby="h-insp">
+    <section class="vhead" aria-labelledby="h-insp">
+      <h2 id="h-insp" class="insp-title"></h2>
+      <p id="vstate" class="vstate"></p>
+      <div class="btnrow" id="actions">
+        <span id="decide" class="btnrow"></span>
+        <button id="finalBtn" class="ghost">Plan final render…</button>
+      </div>
+      <p id="finalBusy" class="hint" hidden></p>
+      <section id="finalPlanBox" class="planbox" hidden aria-labelledby="h-fplan">
+        <h3 id="h-fplan" tabindex="-1">Final render</h3>
+        <p class="hint">Uses GPU time and writes a file. The approval covers this exact scene; switching versions closes the plan.</p>
+        <dl id="finalPlan" class="plan"></dl>
+        <div class="btnrow">
+          <button type="button" id="finalApprove" class="primary">Approve and render</button>
+          <button type="button" id="finalCancel" class="ghost">Cancel</button>
+        </div>
+      </section>
+      <ul id="vrequests" class="alist" hidden aria-label="Adoption requests for this version"></ul>
+      <div id="err-review" class="errs"></div>
+      <div id="err-final" class="errs"></div>
+    </section>
+
+    <section id="jobBox" class="job" hidden aria-labelledby="h-job">
+      <h2 id="h-job">Working</h2>
+      <ol id="jobList" class="jobs"></ol>
+    </section>
+
+    <section id="review" class="review" hidden aria-label="What this proposal changes"></section>
+
     <section aria-labelledby="h-objects">
       <h2 id="h-objects">Objects</h2>
       <input type="search" id="objectFilter" class="ofilter" placeholder="Filter by name" aria-label="Filter objects by name" autocomplete="off">
       <ul id="objectList" class="olist"></ul>
       <p id="objectMore" class="hint" hidden></p>
       <div id="quick" class="quick"></div>
-    </section>
-
-    <section id="adoptBox" class="adopt" hidden aria-labelledby="h-adopt">
-      <h2 id="h-adopt">Adoption requests</h2>
-      <ul id="adoptList" class="alist"></ul>
+      <div id="err-edit" class="errs"></div>
     </section>
 
     <section aria-labelledby="h-ask" class="ask">
       <h2 id="h-ask">Direct the agent</h2>
       <p id="adeHint" class="hint" hidden></p>
       <form id="askForm">
-        <label for="instruction" class="sr-only">Instruction</label>
+        <label for="instruction" id="askTarget" class="target"></label>
         <textarea id="instruction" rows="3" placeholder="例: 選択した物体をマットな陶器にして、ライトを夕方の色に"></textarea>
         <div class="starters" id="starters"></div>
         <fieldset class="ctx">
@@ -78,44 +122,16 @@
         </fieldset>
         <button type="submit" id="askBtn" class="primary">Propose change</button>
       </form>
+      <div id="err-ask" class="errs"></div>
       <ol id="eventList" class="events" hidden aria-label="Messages to the agent"></ol>
     </section>
-
-    <section id="jobBox" class="job" hidden aria-labelledby="h-job">
-      <h2 id="h-job">Working</h2>
-      <ol id="jobSteps" class="steps"></ol>
-      <div class="jobfoot"><span id="jobElapsed"></span><button id="cancelBtn" class="ghost">Cancel</button></div>
-    </section>
-
-    <section id="review" class="review" hidden aria-labelledby="h-review"></section>
-
-    <section class="final" aria-labelledby="h-final">
-      <h2 id="h-final">Final render</h2>
-      <p class="hint">Uses GPU time and writes a file. Requires approval for the exact scene shown.</p>
-      <button id="finalBtn" class="ghost">Plan final render…</button>
-    </section>
-
-    <details class="auditbox">
-      <summary>Audit log</summary>
-      <ol id="audit" class="audit"></ol>
-    </details>
   </aside>
 </main>
-
-<dialog id="finalDlg" aria-labelledby="h-dlg">
-  <form method="dialog">
-    <h2 id="h-dlg">Approve final render?</h2>
-    <dl id="finalPlan" class="plan"></dl>
-    <div class="dlgbtns">
-      <button value="cancel" class="ghost" autofocus>Cancel</button>
-      <button value="approve" class="primary" id="approveBtn">Approve and render</button>
-    </div>
-  </form>
-</dialog>
 
 <dialog id="adoptDlg" aria-labelledby="h-adlg">
   <form method="dialog">
     <h2 id="h-adlg">Write this image into the project?</h2>
+    <div id="adoptImages" class="adoptimgs"></div>
     <dl id="adoptPlan" class="plan"></dl>
     <div class="dlgbtns">
       <button value="cancel" class="ghost" autofocus>Cancel</button>
@@ -125,8 +141,8 @@
   </form>
 </dialog>
 
+<div id="undoBar" class="undo" role="status" hidden></div>
 <div id="live" class="sr-only" aria-live="polite"></div>
-<div id="alert" class="sr-only" role="alert"></div>
 <script type="module" src="/app.js"></script>
 </body>
 </html>

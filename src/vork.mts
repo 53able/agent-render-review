@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { LIMITS, PROFILES } from './policy.mts';
+import { withGpuLock } from './gpu-lock.mts';
 import type { Profile, Scene, Exposure, RenderObject, RenderInfo } from './policy.mts';
 
 /** A finished render: dir/<profile>.png (file) and the object index of every pixel (ids, uint16 little endian). */
@@ -65,8 +66,10 @@ export function createVorkRenderer({ assetBase, version }: { assetBase: string; 
       fs.writeFileSync(sceneFile, JSON.stringify(sceneForRender(scene, dir)));
       const out = path.join(dir, `${profile}.png`);
       const args = ['render', sceneFile, '--out', out, '--profile', PROFILES[profile], '--channels', 'color,object_index'];
-      const t0 = Date.now();
-      const r = await run('vork', args, { timeout: LIMITS[profile], cwd: dir, signal });
+      // One vork render at a time on this machine, across Directors and tests (#49). Waiting is not render time.
+      let t0 = Date.now();
+      const r = await withGpuLock(() => { t0 = Date.now(); return run('vork', args, { timeout: LIMITS[profile], cwd: dir, signal }); }, { signal })
+        ?? { code: -1, stdout: '', stderr: 'cancelled while waiting for another vork render', timedOut: false };
       const seconds = (Date.now() - t0) / 1000;
       if (r.code !== 0) return { ok: false, code: r.code, timedOut: r.timedOut, log: (r.stderr + r.stdout).slice(-4000), seconds };
       const meta = JSON.parse(fs.readFileSync(`${out}.meta.json`, 'utf8')) as VorkMeta;

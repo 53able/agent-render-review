@@ -23,7 +23,7 @@ if (!fs.existsSync(CHROME)) {
 await acquireGpuLock('e2e');
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vd-e2e-')));
 // The README images in docs/ are rewritten only with E2E_UPDATE_SCREENSHOTS=1; otherwise screenshots go to the temp folder.
-const SHOTS = process.env.E2E_UPDATE_SCREENSHOTS === '1' ? path.join(ROOT, 'docs') : tmp;
+const SHOTS = process.env.E2E_UPDATE_SCREENSHOTS === '1' ? path.join(ROOT, 'docs') : process.env.E2E_SHOTS_DIR || tmp; // E2E_SHOTS_DIR: keep them to look at
 interface SceneNode { name: string; energy?: number; materials?: { inputs: Record<string, number> }[] }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let pass = 0, failures = 0; const procs: ChildProcess[] = [];
@@ -47,7 +47,7 @@ const newPage = async () => {
   page.errors = []; page.on('pageerror', (e) => page.errors.push(String(e)));
   return page;
 };
-const idle = (page: Page, t = 120000) => page.waitForFunction(() => document.querySelector<HTMLElement>('#cancelBtn')!.hidden, null, { timeout: t });
+const idle = (page: Page, t = 120000) => page.waitForFunction(() => !document.querySelector('#jobList [data-status="running"]'), null, { timeout: t });
 const clickObject = async (page: Page, fx: number, fy: number) => { await page.waitForSelector('#canvas[data-ready]'); const b = await page.locator('#canvas').boundingBox(); await page.mouse.click(b!.x + b!.width * fx, b!.y + b!.height * fy); };
 
 // ---------------- Part A: standalone ----------------
@@ -75,11 +75,25 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     assert.equal(await page.locator('#wipe').isVisible(), true);
     await page.uncheck('#compareToggle');
   });
-  await check('AC-11 standalone: final render needs dialog approval, then shows final', async () => {
-    await page.click('#finalBtn'); await sleep(300);
-    assert.equal(await page.locator('#finalDlg').evaluate<boolean, HTMLDialogElement>((d) => d.open), true);
-    await page.keyboard.press('Escape'); await sleep(200);
-    await page.click('#finalBtn'); await sleep(300); await page.click('#finalDlg button[value=approve]');
+  await check('#57 the final render plan opens inline: the wipe works meanwhile, and switching versions closes it', async () => {
+    const head = await page.evaluate(() => document.querySelector('.headmark')!.closest('button')!.getAttribute('data-id'));
+    await page.click('#finalBtn'); await page.waitForSelector('#finalPlanBox:not([hidden])');
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'h-fplan', 'focus moves to the plan');
+    assert.equal(await page.locator('dialog[open]').count(), 0, 'no modal');
+    await page.check('#compareToggle'); await page.waitForSelector('#wipe:not([hidden])');
+    await page.locator('#wipe').fill('20'); await page.uncheck('#compareToggle');
+    assert.equal(await page.locator('#finalPlanBox').isVisible(), true, 'the plan stays open while comparing');
+    await page.keyboard.press('Escape'); // focus is not in the plan: Escape there only
+    await page.focus('#finalApprove'); await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#finalPlanBox').isHidden(), true);
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'finalBtn', 'focus returns to Plan final render');
+    await page.click('#finalBtn'); await page.waitForSelector('#finalPlanBox:not([hidden])');
+    await page.click('button[data-id="v001"]'); await sleep(200);
+    assert.equal(await page.locator('#finalPlanBox').isHidden(), true, 'a plan for another version closes');
+    await page.click(`button[data-id="${head}"]`); await page.waitForSelector(`#canvas[data-ready="${head}:draft"]`);
+  });
+  await check('AC-11 standalone: final render needs approval, then shows final', async () => {
+    await page.click('#finalBtn'); await page.waitForSelector('#finalPlanBox:not([hidden])'); await page.click('#finalApprove');
     await page.waitForFunction(() => document.querySelector('[data-profile="final"]')!.getAttribute('aria-checked') === 'true', null, { timeout: 120000 });
     assert.match(await page.textContent('#measure') as string, /final/);
   });
@@ -88,10 +102,26 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
       await page.fill('#instruction', 'rimライトを強めて輪郭を際立たせる'); await page.click('#askBtn'); await sleep(800);
       await idle(page, 240000); await sleep(800);
       assert.match(await page.textContent('#viewing') as string, /proposed/);
-      await page.click('#discardBtn'); await sleep(800);
+      await page.click('#discardBtn'); await sleep(7500); // committed after the undo time (#55)
       assert.doesNotMatch(await page.textContent('#viewing') as string, /proposed/);
     });
   }
+  await check('#55 standalone: an accepted version that is not HEAD can be made HEAD again', async () => {
+    const headOf = () => page.evaluate(() => document.querySelector('.headmark')!.closest('button')!.getAttribute('data-id'));
+    const head = await headOf(); assert.notEqual(head, 'v001');
+    await page.click('button[data-id="v001"]'); await page.click('#headBtn');
+    await page.waitForFunction(() => document.querySelector('.headmark')?.closest('button')?.getAttribute('data-id') === 'v001', null, { timeout: 5000 });
+    assert.equal(await page.locator('#headBtn').count(), 0, 'HEAD needs no Make HEAD');
+    await page.click(`button[data-id="${head}"]`); await page.click('#headBtn');
+    await page.waitForFunction((h) => document.querySelector('.headmark')?.closest('button')?.getAttribute('data-id') === h, head, { timeout: 5000 });
+    await page.click('#auditbox summary, .auditbox summary');
+    assert.match(await page.textContent('#audit') as string, /checkout v001/);
+  });
+  await check('#53 standalone: when Director stops, the page says so instead of showing stale data silently', async () => {
+    procs[0].kill('SIGTERM');
+    await page.waitForSelector('#conn:not([hidden])', { timeout: 10000 });
+    assert.match(await page.textContent('#conn') as string, /Director is not responding/);
+  });
   await check('AC-11 standalone: no page errors', async () => assert.deepEqual(page.errors, []));
   await page.close();
 }
@@ -107,7 +137,11 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     if (!f.startsWith(path.join(PROJECT, 'public')) || !fs.existsSync(f) || fs.statSync(f).isDirectory()) { res.writeHead(404); return res.end(); }
     res.writeHead(200, { 'content-type': f.endsWith('.html') ? 'text/html; charset=utf-8' : 'image/png' }); res.end(fs.readFileSync(f));
   }).listen(4794, '127.0.0.1');
-  const url = await startDirector(['--project', PROJECT, '--port', '4793']);
+  // Test-only vork wrapper: while GATE exists, a final render waits before it runs, so a test can act during one.
+  const BIN = path.join(tmp, 'bin'); fs.mkdirSync(BIN); const GATE = path.join(tmp, 'gate');
+  const realVork = process.env.PATH!.split(path.delimiter).map((d) => path.join(d, 'vork')).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return true; } catch { return false; } });
+  fs.writeFileSync(path.join(BIN, 'vork'), `#!/bin/sh\ncase "$*" in *std/final*) while [ -e '${GATE}' ]; do sleep 0.05; done;; esac\nexec '${realVork}' "$@"\n`, { mode: 0o755 });
+  const url = await startDirector(['--project', PROJECT, '--port', '4793'], { PATH: `${BIN}${path.delimiter}${process.env.PATH}` });
   const cfgFile = path.join(PROJECT, '.vork', 'config.json');
   const setConfig = (c: Record<string, string>) => fs.writeFileSync(cfgFile, JSON.stringify({ assetDir: 'public/vork', ...c }, null, 2));
   setConfig({ pageUrl: 'http://127.0.0.1:4794/', assetUrlPattern: '**/vork/hero.png' });
@@ -147,10 +181,40 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     const r = await agent('POST', '/api/agent/propose', { scene, interpretation: '夜のヒーロー: seedを主光源に', claimed_changes: [{ node: 'key', what: 'energy 60', why: 'night' }, { node: 'seed', what: 'emission 40', why: 'hero light' }] });
     vid = r.version; assert.ok(vid, JSON.stringify(r));
     await page.waitForSelector('#notice:not([hidden])', { timeout: 10000 });
-    assert.doesNotMatch(await page.textContent('#viewing') as string, new RegExp(`^${vid}`), 'the view must not switch by itself');
+    assert.doesNotMatch(await page.textContent('#viewing') as string, new RegExp(`^Showing ${vid} `), 'the view must not switch by itself');
     await page.click('#notice button');
     await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`, { timeout: 15000 });
     assert.match(await page.textContent('#review') as string, /Proposed by your ADE agent via MCP/);
+  });
+
+  await check('#56 at 1440×900 an opened proposal shows the render and Accept together, without scrolling', async () => {
+    await page.setViewportSize({ width: 1440, height: 900 }); await sleep(300);
+    const inView = async (sel: string) => { const b = (await page.locator(sel).boundingBox())!; return b.y >= 0 && b.y + b.height <= 900 && b.x >= 0 && b.x + b.width <= 1440; };
+    assert.equal(await page.evaluate(() => [document.scrollingElement!.scrollTop, document.querySelector('.inspector')!.scrollTop].join()), '0,0');
+    assert.ok(await inView('#acceptBtn'), 'Accept is on screen'); assert.ok(await inView('#canvas'), 'the render is on screen');
+    assert.match(await page.textContent('#h-insp') as string, new RegExp(`^${vid} · Proposal`));
+    // keyboard order follows the DOM: version list, then the viewport, then the inspector's actions
+    assert.ok(await page.evaluate(() => {
+      const [a, b, c] = ['#versionList', '#canvas', '#acceptBtn'].map((q) => document.querySelector(q)!);
+      return !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) && !!(b.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }));
+    await page.screenshot({ path: path.join(SHOTS, 'screenshot-proposal.png') });
+    await page.setViewportSize({ width: 1500, height: 1000 });
+  });
+
+  await check('#60 at 1024 px the render stays on top and Accept is within one screen of scrolling', async () => {
+    await page.setViewportSize({ width: 1024, height: 768 }); await sleep(300);
+    const top = (sel: string) => page.evaluate((q) => document.querySelector(q)!.getBoundingClientRect().top + window.scrollY, sel);
+    assert.ok(await top('#canvas') < 768, 'the render starts on the first screen');
+    assert.ok(await top('#acceptBtn') < 768 * 2, `Accept is within one scroll (at ${await top('#acceptBtn')} px)`);
+    await page.evaluate(() => window.scrollTo(0, 600)); await sleep(100);
+    const b = (await page.locator('#canvas').boundingBox())!; assert.ok(b.y >= 0 && b.y < 200, 'the render stays in view while scrolling');
+    await page.click('#tab-versions');
+    assert.equal(await page.locator('#versionList').isVisible(), true); assert.equal(await page.locator('#acceptBtn').isVisible(), false);
+    await page.click('#tab-insp'); assert.equal(await page.locator('#acceptBtn').isVisible(), true);
+    await page.screenshot({ path: path.join(process.env.E2E_SHOTS_DIR || tmp, 'narrow.png') }); // not a README image
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.setViewportSize({ width: 1500, height: 1000 });
   });
 
   await check('ADE: feedback with a clicked selection reaches the agent and shows as read', async () => {
@@ -163,6 +227,69 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.waitForFunction(() => document.querySelector('#eventList')!.textContent!.includes('read by agent'), null, { timeout: 8000 });
   });
 
+  await check('#59 the feedback box names the version it goes to and follows the view; direct edit says what unlocks it', async () => {
+    await page.click(`button[data-id="${vid}"]`); await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`);
+    assert.match(await page.textContent('#askTarget') as string, new RegExp(`Feedback on ${vid} \\(proposed`));
+    assert.equal(await page.locator('#quick #qAccept').count(), 1); assert.equal(await page.locator('#quick #qHead').count(), 1);
+    await page.click('#refineBtn'); assert.equal(await page.evaluate(() => document.activeElement?.id), 'instruction');
+    await page.click('#quick #qHead'); await page.waitForSelector('#canvas[data-ready="v001:draft"]');
+    assert.match(await page.textContent('#askTarget') as string, /Feedback on v001 \(accepted/);
+    await agent('GET', '/api/agent/feedback?wait=0'); // drain
+    await page.fill('#instruction', 'about the starter'); await page.click('#askBtn');
+    await page.waitForFunction(() => document.querySelector('#eventList')!.textContent!.includes('about the starter'), null, { timeout: 5000 });
+    const ev = (await agent('GET', '/api/agent/feedback?wait=0')).events.find((e: { type: string }) => e.type === 'feedback');
+    assert.equal(ev.version, 'v001', 'sent to the version the box named');
+    assert.equal(await page.locator('#compareToggle').isDisabled(), true, 'v001 has no parent'); assert.match(await page.textContent('#compareWhy') as string, /no parent/);
+  });
+
+  await check('#53 refused feedback and decisions stay on screen for 5 s and keep what was typed', async () => {
+    await page.click(`button[data-id="${vid}"]`); await page.waitForSelector('#acceptBtn');
+    await page.route('**/api/feedback', (r) => r.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'disk full' }) }));
+    await page.route('**/api/decide', (r) => r.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: 'this version is being adopted' }) }));
+    try {
+      await page.fill('#instruction', 'keep me'); await page.click('#askBtn');
+      await page.click('#acceptBtn');
+      await sleep(5000);
+      assert.match(await page.textContent('#err-ask') as string, /Could not send: disk full/); assert.equal(await page.inputValue('#instruction'), 'keep me');
+      assert.match(await page.textContent('#err-review') as string, new RegExp(`Cannot accept ${vid}: this version is being adopted`));
+      assert.equal(await page.locator('#err-ask .err[role=alert]').isVisible(), true); assert.equal(await page.locator('#err-review .err[role=alert]').isVisible(), true);
+    } finally { await page.unroute('**/api/feedback'); await page.unroute('**/api/decide'); }
+    await page.click('#err-ask button[aria-label=Dismiss]'); await page.click('#err-review button[aria-label=Dismiss]'); await page.fill('#instruction', '');
+  });
+
+  await check('#54 while a final render runs, the page keeps updating and other versions can be viewed', async () => {
+    fs.writeFileSync(GATE, '');
+    try {
+      await page.click(`button[data-id="${vid}"]`); await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`);
+      await page.click('#finalBtn'); await page.waitForSelector('#finalPlanBox:not([hidden])'); await page.click('#finalApprove');
+      await page.waitForSelector(`#jobList [data-status="running"][data-version="${vid}"]`, { timeout: 10000 });
+      assert.equal(await page.locator('#finalBtn').isDisabled(), true, 'no second final render of the same version');
+      assert.match(await page.textContent('#finalBusy') as string, new RegExp(`${vid} has a running job`));
+      // the agent asks for an adoption meanwhile: the request shows up within the poll interval
+      const r = await agent('POST', '/api/agent/adoption-request', { version: vid, slug: 'during-job', reason: 'x' });
+      await page.waitForFunction(() => document.querySelector('#adoptList')!.textContent!.includes('during-job'), null, { timeout: 3500 });
+      // a proposal made now waits for the GPU (its validation render queues behind the final render, #49)
+      const scene: { nodes: SceneNode[] } = (await agent('GET', '/api/agent/scene?version=v001')).scene;
+      scene.nodes.find((n) => n.name === 'key')!.energy = 77;
+      const queued = agent('POST', '/api/agent/propose', { base: 'v001', scene, interpretation: 'made during a final render', claimed_changes: [{ node: 'key', what: 'energy 77', why: 'test' }] });
+      // another version can be opened and compared while the job runs
+      await page.click('button[data-id="v001"]'); await page.waitForSelector('#canvas[data-ready="v001:draft"]', { timeout: 10000 });
+      assert.equal(await page.locator('#finalBtn').isDisabled(), false, 'v001 has no job');
+      assert.ok(await page.locator(`#versionList button.busy[data-id="${vid}"]`).count(), 'the version list marks the busy version');
+      await page.click(`#jobList [data-version="${vid}"] button[data-cancel-job]`);
+      await page.waitForSelector(`#jobList [data-status="cancelled"][data-version="${vid}"]`, { timeout: 10000 });
+      await sleep(2000);
+      assert.equal(await page.locator(`#jobList [data-status="cancelled"][data-version="${vid}"]`).count(), 1, 'a cancelled job stays listed');
+      await page.click(`#jobList [data-version="${vid}"] button[data-dismiss-job]`);
+      // once the GPU is free the queued proposal is made, listed and announced
+      const made = (await queued).version; assert.ok(made);
+      await page.waitForFunction((id) => !!document.querySelector(`#versionList button[data-id="${id}"]`), made, { timeout: 10000 });
+      await page.waitForSelector('#notice:not([hidden])', { timeout: 10000 }); await page.click('#notice button[aria-label=Dismiss]');
+      assert.equal(await page.evaluate(async (id) => (await fetch('/api/adopt/reject', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: id }) })).status, r.request), 200);
+      await page.click(`button[data-id="${vid}"]`); await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`);
+    } finally { fs.rmSync(GATE, { force: true }); }
+  });
+
   await check('AC-09 page preview substitutes the candidate without touching project files', async () => {
     const before = projectMtimes();
     const original = await newPage();
@@ -171,6 +298,9 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.click('#pageBtn');
     await page.waitForFunction(() => document.querySelector('#measure')!.textContent!.includes('substituted'), null, { timeout: 60000 });
     const m = (await page.textContent('#measure'))!.match(/substituted requests\s*(\d+)/); assert.ok(Number(m![1]) >= 1, await page.textContent('#measure') as string);
+    // #59: what is shown is spelled out, and Compare says why it cannot be used on page
+    assert.match(await page.textContent('#viewing') as string, new RegExp(`^Showing ${vid} · proposed · draft on page`));
+    assert.equal(await page.locator('#compareToggle').isDisabled(), true); assert.match(await page.textContent('#compareWhy') as string, /not on page/);
     const shot = fs.readFileSync(path.join(PROJECT, '.vork', vid, 'page-draft.png'));
     assert.notDeepEqual(shot, origShot, 'page with candidate must differ from the original page');
     assert.deepEqual(projectMtimes(), before);
@@ -190,10 +320,15 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.click(`button[data-id="${vid}"]`); await sleep(500);
     await page.click('[data-profile="previs"]'); await sleep(300); // no cached page preview for previs yet
     await page.click('#pageBtn');
-    await page.waitForFunction(() => document.querySelector('#alert')!.textContent!.includes('unavailable'), null, { timeout: 60000 });
-    await sleep(3000);
+    await page.waitForFunction(() => document.querySelector('#err-preview')!.textContent!.includes('unavailable'), null, { timeout: 60000 });
+    await sleep(5000);
+    // #53: the reason stays on screen (not only for screen readers) next to the render shown instead
+    assert.equal(await page.locator('#err-preview .err[role=alert]').isVisible(), true);
     assert.doesNotMatch(await page.textContent('#viewing') as string, /on page/);
     assert.equal(await page.locator('#pageBtn').getAttribute('aria-pressed'), 'false');
+    await page.focus('#pageBtn'); await page.click('#err-preview .err button[aria-label=Dismiss]');
+    assert.equal(await page.locator('#err-preview .err').count(), 0);
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'pageBtn', 'dismissing returns focus to the control');
     await page.click('[data-profile="draft"]');
   });
 
@@ -203,12 +338,119 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.waitForSelector('#adoptBox:not([hidden])', { timeout: 10000 });
     await page.click('#adoptList button'); await sleep(500);
     assert.match(await page.textContent('#adoptPlan') as string, /public\/vork\/hero\.png/);
+    // #58: the image to be written is inside the dialog; nothing is replaced yet
+    await page.waitForFunction(() => (document.querySelector('#adoptDlg img.write') as HTMLImageElement | null)?.naturalWidth! > 0, null, { timeout: 5000 });
+    assert.match(await page.textContent('#adoptImages') as string, /Replaces nothing/);
     await page.screenshot({ path: path.join(SHOTS, 'screenshot-adoption.png') });
     await page.click('#adoptDlg button[value=approve]');
     await sleep(500); await idle(page, 180000); await sleep(800);
     assert.ok(fs.existsSync(path.join(PROJECT, 'public', 'vork', 'hero.png')));
     assert.ok(fs.existsSync(path.join(PROJECT, '.vork', 'adopted', 'hero.json')));
     assert.equal(await page.locator('#adoptBox').isHidden(), true);
+  });
+
+  // A large proposal: 400 added nodes (#35, #36, #37, #38), then one that changes each of them (#37 "Show remaining").
+  const BIRDS = 400;
+  const bird = (i: number) => ({ type: 'mesh', name: `b${i}`, translation: [-1 + (i % 40) * 0.05, 0.7 + Math.floor(i / 40) * 0.03, -0.3], geometry: { std: 'rounded_box', size: [0.02, 0.02, 0.02], radius: 0.002 }, materials: [{ inputs: { base_color: [0.1, 0.1, 0.1] } }] });
+  let flock: string, recolor: string;
+  await check('#38 #40 a large proposal is announced with a fixed notice and a "(1)" title until it is opened', async () => {
+    assert.match(await page.textContent('#meta') as string, /project landing ·/); assert.equal(await page.getAttribute('#meta', 'title'), PROJECT);
+    const scene: { nodes: unknown[] } = (await agent('GET', '/api/agent/scene')).scene;
+    scene.nodes.push(...Array.from({ length: BIRDS }, (_, i) => bird(i)));
+    const r = await agent('POST', '/api/agent/propose', { scene, interpretation: 'a flock of birds', claimed_changes: [{ node: 'b*', what: 'birds', why: 'flock' }, { node: 'zz*', what: 'nothing', why: 'ghost' }] });
+    flock = r.version; assert.ok(flock, JSON.stringify(r));
+    await page.waitForSelector('#notice:not([hidden])', { timeout: 10000 });
+    assert.match(await page.title(), /^\(1\) /);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.click('#notice button');
+    await page.waitForSelector(`#canvas[data-ready="${flock}:draft"]`, { timeout: 60000 });
+    assert.doesNotMatch(await page.title(), /^\(1\)/); assert.equal(await page.locator('#notice').isHidden(), true);
+  });
+  await check('#36 a prefix claim shows how many nodes it matched; a prefix that matches nothing is flagged', async () => {
+    assert.match(await page.textContent('#review') as string, new RegExp(`b\\*\\s*→ ${BIRDS} nodes: b0 … b${BIRDS - 1} \\(${BIRDS}\\):`));
+    assert.match(await page.textContent('#review') as string, /Claimed but not changed: zz\*/);
+    assert.equal(await page.locator('#review tr.unclaimed').count(), 0, 'every added bird is claimed');
+  });
+  await check('#37 the added nodes collapse into one row that stays open across the 2.5 s refresh', async () => {
+    const summary = page.locator('#review details[data-group] summary').first();
+    assert.match(await summary.textContent() as string, new RegExp(`^${BIRDS} mesh nodes added: b0 … b${BIRDS - 1} \\(${BIRDS}\\)`));
+    await summary.click();
+    await page.waitForFunction((n) => document.querySelectorAll('#review details[data-group] tbody tr').length === n, BIRDS, { timeout: 5000 });
+    // a new agent version changes the state signature, so the poll re-renders the review panel
+    await agent('POST', '/api/agent/adoption-request', { version: flock, slug: 'flock', reason: 'refresh' });
+    await page.waitForSelector('#adoptBox:not([hidden])', { timeout: 10000 });
+    assert.equal(await page.locator('#review details[data-group][open]').count(), 1);
+  });
+  await check('#35 the OBJECTS list shows at most 200 rows, filters by name, and a selection updates its row', async () => {
+    assert.equal(await page.locator('#objectList li').count(), 200);
+    assert.match(await page.textContent('#objectMore') as string, /more — type to filter/);
+    await page.fill('#objectFilter', 'b39'); await sleep(100);
+    assert.deepEqual(await page.locator('#objectList li').evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.name)), ['b39', 'b390', 'b391', 'b392', 'b393', 'b394', 'b395', 'b396', 'b397', 'b398', 'b399']);
+    await page.locator('#objectList li[data-name="b391"] input').check();
+    assert.match(await page.textContent('#selCount') as string, /b391/);
+    assert.equal(await page.locator('#objectList label.sel').count(), 1);
+    await page.fill('#objectFilter', ''); await sleep(100);
+    // #46: the selected object is past the first 200, so it is listed first
+    assert.equal(await page.locator('#objectList li').first().getAttribute('data-name'), 'b391');
+    assert.equal(await page.locator('#objectList li[data-name="b391"] label.sel').count(), 1);
+    await page.locator('#objectList li[data-name="b391"] input').uncheck(); await sleep(100);
+    assert.equal(await page.locator('#objectList li').first().getAttribute('data-name'), 'b391', 'a deselected row stays where it was');
+    assert.equal(await page.locator('#objectList label.sel').count(), 0);
+  });
+  await check('#37 more than 200 changed fields: the rest is behind "Show remaining", which stays shown across the refresh', async () => {
+    const scene: { nodes: { name: string; materials?: { inputs: Record<string, unknown> }[] }[] } = (await agent('GET', `/api/agent/scene?version=${flock}`)).scene;
+    for (const n of scene.nodes) if (/^b\d+$/.test(n.name)) n.materials![0].inputs.base_color = [0.9, 0.9, 0.9];
+    const r = await agent('POST', '/api/agent/propose', { base: flock, scene, interpretation: 'white birds', claimed_changes: [{ node: 'b*', what: 'white', why: 'contrast' }] });
+    recolor = r.version; assert.ok(recolor, JSON.stringify(r));
+    await page.waitForSelector('#notice:not([hidden])', { timeout: 10000 }); await page.click('#notice button');
+    await page.waitForSelector(`#canvas[data-ready="${recolor}:draft"]`, { timeout: 60000 });
+    // #52: built on an unaccepted proposal, so by default it shows what accepting it changes: HEAD → this version
+    assert.equal(await page.locator('#review input[name=diffBase][value=head]').isChecked(), true);
+    assert.match(await page.textContent('#review') as string, new RegExp(`Includes the changes of ${flock}`));
+    assert.match(await page.locator('#review details[data-group] summary').first().textContent() as string, new RegExp(`^${BIRDS} mesh nodes added`));
+    assert.equal(await page.locator('#review tr.unclaimed').count(), 0, "the flock's own claim covers its birds");
+    assert.match(await page.textContent('#compareBase') as string, /^HEAD/);
+    await page.check('#review input[name=diffBase][value=parent]');
+    assert.match(await page.textContent('#review') as string, new RegExp(`Built on ${flock}, which is proposed`));
+    assert.equal(await page.textContent('#compareBase'), 'parent');
+    assert.equal(await page.locator('#review .difftable > tbody > tr:not(.group)').count(), 200);
+    await page.click('#moreDiff');
+    assert.equal(await page.locator('#review .difftable > tbody > tr:not(.group)').count(), BIRDS);
+    await agent('POST', '/api/agent/adoption-request', { version: recolor, slug: 'flock-white', reason: 'refresh' });
+    await page.waitForFunction(() => document.querySelector('#adoptList')!.textContent!.includes('flock-white'), null, { timeout: 10000 });
+    assert.equal(await page.locator('#review .difftable > tbody > tr:not(.group)').count(), BIRDS);
+  });
+
+  await check('#55 Discard can be undone before it reaches the agent; when the time is up it is decided', async () => {
+    await agent('GET', '/api/agent/feedback?wait=0'); // drain
+    await page.click(`button[data-id="${recolor}"]`); await page.waitForSelector('#discardBtn');
+    await page.click('#discardBtn');
+    await page.waitForSelector('#undoBar:not([hidden])');
+    assert.equal(await page.locator(`#versionList li.st-discarded button[data-id="${recolor}"]`).count(), 1, 'shown as discarded at once');
+    await page.click('#undoBtn');
+    await sleep(7000);
+    assert.match(await page.textContent('#h-insp') as string, /Proposal/); assert.equal(await page.locator('#undoBar').isHidden(), true);
+    assert.deepEqual((await agent('GET', '/api/agent/feedback?wait=0')).events, [], 'the agent heard nothing');
+    await page.click('#discardBtn'); await sleep(7500);
+    const evs = (await agent('GET', '/api/agent/feedback?wait=0')).events;
+    assert.deepEqual(evs.map((e: { type: string }) => e.type), ['decision', 'adoption_rejected']);
+    assert.equal(evs[0].decision, 'discard'); assert.equal(evs[0].version, recolor);
+    assert.doesNotMatch(await page.textContent('#h-insp') as string, new RegExp(`^${recolor}`), 'the view moves to the parent');
+  });
+
+  await check('#58 an adoption that would overwrite shows the existing image; Cancel writes nothing and keeps the request', async () => {
+    const hero = path.join(PROJECT, 'public', 'vork', 'hero.png'); const before = fs.readFileSync(hero);
+    const r = await agent('POST', '/api/agent/adoption-request', { version: 'v001', slug: 'hero', reason: 'the starter instead' });
+    await page.waitForSelector(`#adoptList button[data-req="${r.request}"]`, { timeout: 10000 });
+    await page.click(`#adoptList button[data-req="${r.request}"]`);
+    await page.waitForFunction(() => (document.querySelector('#adoptDlg img.existing') as HTMLImageElement | null)?.naturalWidth! > 0, null, { timeout: 5000 });
+    assert.match(await page.textContent('#adoptImages') as string, /Replaces public\/vork\/hero\.png · modified/);
+    await page.click('#adoptDlg button[value=cancel]'); await sleep(300);
+    assert.equal(await page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset.req), r.request, 'focus returns to Review…');
+    assert.deepEqual(fs.readFileSync(hero), before);
+    const st = await page.evaluate(async () => (await fetch('/api/state')).json());
+    assert.equal(st.adoptionRequests.find((a: { id: string }) => a.id === r.request).status, 'pending');
+    assert.equal(await page.evaluate(async (id) => (await fetch('/api/adopt/reject', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: id }) })).status, r.request), 200);
   });
 
   await check('ADE: no page errors', async () => assert.deepEqual(page.errors, []));

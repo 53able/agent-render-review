@@ -25,6 +25,22 @@ class PayloadTooLarge extends Error {
 const MAX_BODY = 4e6;
 const REFUSAL_STATUS: Record<Refusal['kind'], number> = { invalid: 400, forbidden: 403, not_found: 404, conflict: 409, unprocessable: 422, too_many: 429, failed: 500 };
 
+// Hashes a /runs/ file may have: null if Director has no record of it, or a record without a hash (#43). A record
+// from before #26 has no hash for ids.bin; that file is not served until the render is made again.
+export function recordedHashes(getV: (id: string) => Version | undefined, pathname: string): string[] | null {
+  const m = /^\/runs\/(v\d{3})\/(page-)?(previs|draft|final)\.(png|ids\.bin)$/.exec(pathname); const v = m && getV(m[1]);
+  if (!m || !v) return null;
+  const [, , page, profile, ext] = m as unknown as [string, string, string | undefined, Profile, string];
+  if (page) {
+    if (ext !== 'png') return null;
+    const shots = Object.values(v.pagePreviews || {}).filter((p) => p.source === profile).map((p) => p.sha256).filter((h): h is string => !!h);
+    return shots.length ? shots : null;
+  }
+  const r = v.renders[profile]; if (!r) return null;
+  const h = ext === 'png' ? r.sha256 : r.idsSha256;
+  return h ? [h] : null;
+}
+
 export interface HttpOptions {
   director: Director;
   /** The folder of the app (paths in a final plan are shown relative to it in standalone mode). */
@@ -104,43 +120,38 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         opener = cmd;
       } catch (e: any) { console.error(`ignoring RENDER_DIRECTOR_BROWSER: ${e.message}`); }
     }
-    try { spawn(opener[0], [...opener.slice(1), link], { detached: true, stdio: 'ignore' }).on('error', (e) => console.error(`could not open the review tab with ${opener[0]}: ${e.message}`)).unref(); return true; } catch { return false; }
+    // RENDER_DIRECTOR_BROWSER_STDIN=1: the link goes to the command's standard input (one line) instead of its last
+    // argument, so a long-running command does not show it to ps for as long as it runs (#44).
+    const viaStdin = Boolean(custom) && process.env.RENDER_DIRECTOR_BROWSER_STDIN === '1';
+    try {
+      const child = spawn(opener[0], viaStdin ? opener.slice(1) : [...opener.slice(1), link], { detached: true, stdio: [viaStdin ? 'pipe' : 'ignore', 'ignore', 'ignore'] });
+      child.on('error', (e) => console.error(`could not open the review tab with ${opener[0]}: ${e.message}`));
+      if (viaStdin) { child.stdin!.on('error', () => {}); child.stdin!.end(`${link}\n`); }
+      child.unref(); return true;
+    } catch { return false; }
   }
   const cookie = (req: http.IncomingMessage, name: string): string | undefined => (req.headers.cookie || '').split(';').map((s) => s.trim().split('=')).find(([k]) => k === name)?.[1];
   const tokenEq = (a: unknown, b: string): boolean => typeof a === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
-  // Hashes a /runs/ file may have: null if Director has no record of it, [] if the record predates hashes.
-  const recordedHashes = (pathname: string): string[] | null => {
-    const m = /^\/runs\/(v\d{3})\/(page-)?(previs|draft|final)\.(png|ids\.bin)$/.exec(pathname); const v = m && getV(m[1]);
-    if (!m || !v) return null;
-    const [, , page, profile, ext] = m as unknown as [string, string, string | undefined, Profile, string];
-    if (page) {
-      if (ext !== 'png') return null;
-      const shots = Object.values(v.pagePreviews || {}).filter((p) => p.image.split('?')[0] === `/runs/${v.id}/page-${profile}.png`);
-      if (!shots.length) return null;
-      return shots.some((p) => !p.sha256) ? [] : shots.map((p) => p.sha256!);
-    }
-    const r = v.renders[profile]; if (!r) return null;
-    const h = ext === 'png' ? r.sha256 : r.idsSha256;
-    return h ? [h] : [];
-  };
   // Presenter: the URLs the browser loads are made here from the version, the profile and the recorded hash, so a
-  // URL changes exactly when the file does (#17). state.json still stores image and ids for older readers; a record
-  // without a hash (from before #26) keeps its stored URL.
-  const stamp = (h: string | undefined) => h && h.slice(0, 16);
-  const presentRender = (id: string, r: RenderInfo): RenderInfo => ({
-    ...r,
-    image: r.sha256 ? `/runs/${id}/${r.profile}.png?${stamp(r.sha256)}` : r.image,
-    ids: r.idsSha256 ? `/runs/${id}/${r.profile}.ids.bin?${stamp(r.idsSha256)}` : r.ids,
+  // URL changes exactly when the file does (#17). state.json keeps no URL (#42). ids is null when the record has no hash
+  // of ids.bin (made before #26): /runs/ does not serve it, and the UI asks for the render to be made again (#43).
+  const stamp = (h: string) => h.slice(0, 16);
+  const presentRender = (id: string, r: RenderInfo) => ({
+    ...r, image: `/runs/${id}/${r.profile}.png?${stamp(r.sha256)}`, ids: r.idsSha256 ? `/runs/${id}/${r.profile}.ids.bin?${stamp(r.idsSha256)}` : null,
   });
-  const presentPreview = (p: PagePreviewOk): PagePreviewOk => (p.sha256 ? { ...p, image: `${p.image.split('?')[0]}?${stamp(p.sha256)}` } : p);
+  const presentPreview = (id: string, p: PagePreviewOk & { sha256: string }) => ({ ...p, image: `/runs/${id}/page-${p.source}.png?${stamp(p.sha256)}` });
   const versionView = (v: Version) => {
     const base = v.parent ? sceneOf(v.parent) : null; const scene = sceneOf(v.id);
     const renders = Object.fromEntries(Object.entries(v.renders).map(([k, r]) => [k, r && presentRender(v.id, r)]));
-    const pagePreviews = v.pagePreviews && Object.fromEntries(Object.entries(v.pagePreviews).map(([k, p]) => [k, presentPreview(p)]));
-    return { ...v, renders, pagePreviews, scene, diff: base ? diffScenes(base, scene) : [], hash: hashScene(v.id) };
+    const pagePreviews = v.pagePreviews && Object.fromEntries(Object.entries(v.pagePreviews).map(([k, p]) => [k, presentPreview(v.id, p)]));
+    // headDiff: what accepting this version would change, when its parent is not HEAD (#52). null otherwise.
+    const head = state.head;
+    const headDiff = v.parent && head && v.parent !== head && v.id !== head ? diffScenes(sceneOf(head), scene) : null;
+    return { ...v, renders, pagePreviews, scene, diff: base ? diffScenes(base, scene) : [], headDiff, hash: hashScene(v.id) };
   };
-  const renderSummary = (r: RenderInfo | undefined): RenderSummary | undefined => r && { profile: r.profile, seconds: r.seconds, width: r.width, height: r.height, file: r.file, exposure: r.exposure, objects: r.objects, warnings: r.warnings };
+  // file: the absolute path is made here for mcp.mts, which reads the image from it; state.json keeps no path (#42).
+  const renderSummary = (id: string, r: RenderInfo | undefined): RenderSummary | undefined => r && { profile: r.profile, seconds: r.seconds, width: r.width, height: r.height, file: director.renderFile(id, r.profile), exposure: r.exposure, objects: r.objects, warnings: r.warnings };
 
   async function handleAgent(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
     if (url.pathname === '/api/agent/status' && req.method === 'GET') {
@@ -159,11 +170,11 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
     if (url.pathname === '/api/agent/propose' && req.method === 'POST') {
       const b = await readBody<{ base?: string; interpretation?: unknown; assumptions?: unknown; claimed_changes?: unknown; scene: Scene; responds_to?: unknown }>(req);
       const { v, draft, baseId, flags } = await director.agentPropose(b);
-      return send(res, 200, { version: v.id, status: v.status, head: state.head, render: draft.ok ? renderSummary(draft.info) : null, renderError: draft.ok ? null : draft.log, diff: diffScenes(sceneOf(baseId), b.scene), flags } satisfies AgentProposeResponse);
+      return send(res, 200, { version: v.id, status: v.status, head: state.head, render: draft.ok ? renderSummary(v.id, draft.info) : null, renderError: draft.ok ? null : draft.log, diff: diffScenes(sceneOf(baseId), b.scene), flags } satisfies AgentProposeResponse);
     }
     if (url.pathname === '/api/agent/render' && req.method === 'GET') {
       const { v, render } = await director.agentRender(url.searchParams.get('version'), url.searchParams.get('profile') || 'draft');
-      return send(res, 200, { version: v.id, status: v.status, render: renderSummary(render) } satisfies AgentRenderResponse);
+      return send(res, 200, { version: v.id, status: v.status, render: renderSummary(v.id, render) } satisfies AgentRenderResponse);
     }
     if (url.pathname === '/api/agent/feedback' && req.method === 'GET') {
       const wait = Math.min(Math.max(Number(url.searchParams.get('wait') || 60), 0), 120); const t0 = Date.now();
@@ -256,8 +267,19 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         return send(res, 200, { ok: true });
       }
 
-      if (req.method === 'POST' && url.pathname === '/api/adopt/plan')
-        return send(res, 200, director.planAdoption(await readBody<{ requestId: string; slug?: unknown }>(req)));
+      if (req.method === 'POST' && url.pathname === '/api/adopt/plan') {
+        const plan = director.planAdoption(await readBody<{ requestId: string; slug?: unknown }>(req)); const v = getV(plan.versionId)!;
+        return send(res, 200, {
+          ...plan, image: plan.shows ? presentRender(v.id, v.renders[plan.shows]!).image : null,
+          existing: plan.existing && { ...plan.existing, image: plan.existing.viewable ? `/api/adopt/existing?ticket=${encodeURIComponent(plan.ticket)}` : null },
+        });
+      }
+
+      // The project file an adoption would overwrite, while its plan is valid and the file unchanged (#58).
+      if (req.method === 'GET' && url.pathname === '/api/adopt/existing') {
+        const data = director.existingOfPlan(url.searchParams.get('ticket') || '');
+        return data ? send(res, 200, data, 'image/png', { 'x-content-type-options': 'nosniff' }) : send(res, 404, { error: 'no such file to show' });
+      }
 
       if (req.method === 'POST' && url.pathname === '/api/adopt/reject') {
         director.rejectAdoption(await readBody<{ requestId: string; comment?: unknown }>(req));
@@ -275,7 +297,7 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         if (!isProfile(profile)) return send(res, 400, { error: 'profile must be previs, draft or final' });
         const r = await pagePreview(director, v, profile);
         if (r.ok) director.recordPagePreview(v, profile, r);
-        return send(res, 200, r.ok ? presentPreview(r) : r);
+        return send(res, 200, r.ok ? presentPreview(v.id, r) : r);
       }
 
       if (req.method === 'POST' && url.pathname === '/api/edit') {
@@ -319,11 +341,10 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         const data = fs.readFileSync(fd);
         // The checks above narrow a race but cannot close it: Node has no openat, so a directory on the path can be
         // swapped for a symlink between the check and the open (#26). A render file is served only if its bytes are
-        // the ones Director recorded. State written before #26 has no hash for ids.bin and page-*.png; those keep
-        // the path checks only.
+        // the ones Director recorded; a file whose record has no hash is not served at all (#43).
         if (root === RUNS) {
-          const hashes = recordedHashes(url.pathname);
-          if (!hashes || (hashes.length && !hashes.includes(sha256(data)))) return send(res, 404, 'not found', 'text/plain');
+          const hashes = recordedHashes(getV, url.pathname);
+          if (!hashes || !hashes.includes(sha256(data))) return send(res, 404, 'not found', 'text/plain');
         }
         return send(res, 200, data, MIME[path.extname(real)] || 'application/octet-stream');
       } finally { fs.closeSync(fd); }

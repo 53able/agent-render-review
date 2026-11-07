@@ -5,7 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {
   LIMITS, PROFILES, SLUG, DEFAULT_CONFIG, MAX_REASON, MAX_ASSUMPTIONS, MAX_ASSUMPTION, MAX_PENDING_ADOPTIONS, MAX_INTERPRETATION, MAX_CLAIMED, MAX_CLAIMED_NODE, MAX_CLAIMED_TEXT,
-  isProfile, isPlainObject, isClaimedChange, sha256, policyCheck, resolveInside, applyDirectEdit, adoptionRels,
+  isProfile, isPlainObject, isClaimedChange, sha256, renderFailure, policyCheck, resolveInside, applyDirectEdit, adoptionRels,
   isLive, nextVersionId, nextRequestId, acceptVersion, discardVersion, checkoutVersion, settleRequest, requestsOfDiscarded, normalizeState,
 } from './policy.mts';
 import type { Profile, Scene, PolicyResult, Config, RenderInfo, AgentOutput, Proposal, VersionStatus, Version, AgentEvent, AgentEventBody, DirectorState, PagePreviewOk } from './policy.mts';
@@ -28,7 +28,7 @@ export interface Job {
 
 type TicketData =
   | { kind: 'final'; versionId: string; hash: string }
-  | { kind: 'adopt'; versionId: string; hash: string; requestId: string; slug: string; sceneText: string; assetRel: string; overwrites: boolean };
+  | { kind: 'adopt'; versionId: string; hash: string; requestId: string; slug: string; sceneText: string; assetRel: string; overwrites: boolean; existingSha256: string | null };
 type Ticket = TicketData & { expires: number };
 
 /** The built-in proposer (standalone mode): a structured proposal for a prompt, or null when signal was aborted. */
@@ -82,6 +82,8 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   // Check it when a request arrives, when a ticket is used, and again after every await before state changes.
   const liveV = (id: string | null | undefined): Version | undefined => { const v = getV(id); return isLive(v) ? v : undefined; };
   const vdir = (id: string) => path.join(RUNS, id);
+  /** Where a stored render of a version is; state.json does not keep the path (#42). */
+  const renderFile = (id: string, profile: Profile) => path.join(vdir(id), `${profile}.png`);
   const sceneOf = (id: string): Scene => JSON.parse(fs.readFileSync(path.join(vdir(id), 'scene.json'), 'utf8'));
   const hashScene = (id: string) => sha256(fs.readFileSync(path.join(vdir(id), 'scene.json'))).slice(0, 16);
 
@@ -162,11 +164,9 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
       const r = await renderer.render({ scene: scene || JSON.parse(sceneText!), dir: out, profile, signal: job.ac.signal });
       if (job.status === 'cancelled') return { ok: false, cancelled: true };
       if (!r.ok) return { ok: false, code: r.code, timedOut: r.timedOut, log: r.log, seconds: r.seconds };
-      const file = path.join(dir, `${profile}.png`);
-      const stamp = clock();
+      const file = renderFile(v.id, profile);
       const info: RenderInfo = {
-        profile, seconds: r.seconds, width: r.width, height: r.height, image: `/runs/${v.id}/${profile}.png?${stamp}`, ids: `/runs/${v.id}/${profile}.ids.bin?${stamp}`,
-        file: scene ? r.file : file, sha256: sha256(fs.readFileSync(r.file)), idsSha256: sha256(r.ids),
+        profile, seconds: r.seconds, width: r.width, height: r.height, sha256: sha256(fs.readFileSync(r.file)), idsSha256: sha256(r.ids),
         sceneHash: sceneText ? sha256(sceneText).slice(0, 16) : null,
         objects: r.objects, exposure: r.exposure, settings: r.settings, warnings: r.warnings,
       };
@@ -204,7 +204,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     step(job, 'Rendering draft preview of the proposal');
     const draft = await renderVersion(job, v, 'draft');
     if (draft.cancelled) return { v, draft };
-    if (!draft.ok) step(job, 'Draft render failed (previs is still available)', 'failed', draft.log);
+    if (!draft.ok) step(job, `Draft render failed: ${renderFailure(draft, LIMITS.draft / 1000)} (previs is still available)`, 'failed', draft.log);
     else await renderVersion(job, v, 'previs');
     audit('proposed', { version: v.id, parent: baseId, instruction, cost: proposal.cost ?? null, flags: proposal.policy.flags.length, via: proposal.via });
     return { v, draft };
@@ -233,8 +233,8 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   };
   rejectRequestsOfDiscarded(); // requests left pending by a Director from before #27
   const finalMatches = (v: Version, hash: string) => {
-    const f = v.renders.final; if (!f || f.sceneHash !== hash || !fs.existsSync(f.file)) return false;
-    return sha256(fs.readFileSync(f.file)) === f.sha256;
+    const f = v.renders.final; const file = renderFile(v.id, 'final'); if (!f || f.sceneHash !== hash || !fs.existsSync(file)) return false;
+    return sha256(fs.readFileSync(file)) === f.sha256;
   };
   const takeTicket = <K extends Ticket['kind']>(id: string, kind: K): Extract<Ticket, { kind: K }> | null => {
     const t = tickets.get(id);
@@ -247,6 +247,32 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     if (typeof slug !== 'string' || !SLUG.test(slug)) throw new Error('slug must match [a-z0-9][a-z0-9-]{0,63}');
     const { assetRel, manifestRel } = adoptionRels(slug, String(readConfig().assetDir || DEFAULT_CONFIG.assetDir));
     return { slug, assetRel, manifestRel, asset: resolveInside(PROJECT, assetRel), manifest: resolveInside(PROJECT, manifestRel) };
+  }
+
+  /**
+   * Reads a file only if it is a plain file with one link, opened without following a symlink, and still the file at
+   * that path after opening (the checks /runs/ uses, #19 #26). null otherwise.
+   */
+  function readPlainFile(file: string): { data: Buffer; mtime: string } | null {
+    let fd: number;
+    try { fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); } catch { return null; }
+    try {
+      const st = fs.fstatSync(fd); const at = fs.lstatSync(file);
+      if (!st.isFile() || st.nlink !== 1 || at.dev !== st.dev || at.ino !== st.ino) return null;
+      return { data: fs.readFileSync(fd), mtime: st.mtime.toISOString() };
+    } catch { return null; } finally { fs.closeSync(fd); }
+  }
+
+  /**
+   * Writes each new file next to its target, then renames them into place: an existing file's inode, and anything
+   * hard-linked to it, is never written. Temporary files left by a failure are removed.
+   */
+  function replaceFiles(files: [target: string, data: string | Buffer][]) {
+    const tmps = files.map(([target]) => `${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+    try {
+      files.forEach(([, data], i) => fs.writeFileSync(tmps[i], data, { flag: 'wx' }));
+      files.forEach(([target], i) => fs.renameSync(tmps[i], target));
+    } finally { for (const t of tmps) fs.rmSync(t, { force: true }); }
   }
 
   // ---------- adoption: the agent asks, the human plans and approves, a job writes into the project ----------
@@ -280,13 +306,37 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     const sceneText = fs.readFileSync(path.join(vdir(v.id), 'scene.json'), 'utf8');
     const hash = sha256(sceneText).slice(0, 16);
     const overwrites = fs.existsSync(t.asset);
+    // What would be replaced, so the human can see it next to the new image (#58). Read through the same checks as
+    // a /runs/ file; null when it cannot be shown (not a plain file with one link).
+    const old = overwrites ? readPlainFile(t.asset) : null;
+    // A file that cannot be read this way (a hard link, a FIFO, …) is neither shown nor replaced: the approval would
+    // not be bound to its contents, and writing through a hard link changes the file it links to.
+    if (overwrites && !old) throw new Refusal('conflict', `${t.assetRel} exists but is not a plain file with a single link; Director does not replace it`);
+    // The manifest is replaced too: the same rule applies to it.
+    if (fs.existsSync(t.manifest) && !readPlainFile(t.manifest)) throw new Refusal('conflict', `${t.manifestRel} exists but is not a plain file with a single link; Director does not replace it`);
+    const existing = old ? { bytes: old.data.length, modified: old.mtime, viewable: true } : null;
     const reusable = finalMatches(v, hash); const { slug } = t;
-    const ticket = issueTicket({ kind: 'adopt', versionId: v.id, hash, requestId, slug, sceneText, assetRel: t.assetRel, overwrites });
+    const ticket = issueTicket({ kind: 'adopt', versionId: v.id, hash, requestId, slug, sceneText, assetRel: t.assetRel, overwrites, existingSha256: old ? sha256(old.data) : null });
     return {
       ticket, requestId, versionId: v.id, versionStatus: v.status, hash, slug, reason: ar.reason,
-      writes: [t.assetRel, t.manifestRel], overwrites, needsFinalRender: !reusable,
+      writes: [t.assetRel, t.manifestRel], overwrites, existing, needsFinalRender: !reusable,
+      // the image the human approves: the final render that will be written, or the draft until final is rendered
+      shows: (reusable ? 'final' : v.renders.draft ? 'draft' : v.renders.previs ? 'previs' : null) as Profile | null,
       acceptsProposal: v.status === 'proposed', expiresInSec: 600,
     };
+  }
+
+  /**
+   * The project file an adoption plan would overwrite, as it was when the plan was made: null if the ticket is not a
+   * live adoption plan, or the file is no longer a plain file with those bytes (#58). The ticket is not used up.
+   */
+  function existingOfPlan(ticketId: string): Buffer | null {
+    const t = tickets.get(ticketId);
+    if (!t || t.kind !== 'adopt' || t.expires < clock() || !t.existingSha256) return null;
+    let asset: string;
+    try { asset = resolveInside(PROJECT!, t.assetRel); } catch { return null; } // the path the plan was made for
+    const now = readPlainFile(asset);
+    return now && sha256(now.data) === t.existingSha256 ? now.data : null;
   }
 
   function rejectAdoption({ requestId, comment }: { requestId: string; comment?: unknown }) {
@@ -313,7 +363,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
         if (!finalMatches(v, t.hash)) {
           step(job, 'vork render std/final (approved scene)');
           const r = await renderVersion(job, v, 'final', { pinnedText: t.sceneText }); if (job.status === 'cancelled') return;
-          if (!r.ok) throw new Error(`final render failed: ${r.log?.slice(-400)}`);
+          if (!r.ok) throw new Error(`final render failed: ${r.log && /device lost/i.test(r.log) ? renderFailure(r, LIMITS.final / 1000) : r.log?.slice(-400)}`);
           audit('final_rendered', { version: v.id, seconds: r.info.seconds });
         }
         step(job, 'Writing into the project');
@@ -322,18 +372,25 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
         const targets = adoptionTargets(t.slug); // re-resolve right before writing
         if (targets.assetRel !== t.assetRel) throw new Error(`asset path changed since approval (${t.assetRel} → ${targets.assetRel}); plan again`);
         if (fs.existsSync(targets.asset) !== t.overwrites) throw new Error('the target file appeared or disappeared since approval; plan again');
-        const png = fs.readFileSync(v.renders.final!.file);
+        // The human approved replacing the file they were shown (#58); a different file there needs a new look.
+        if (t.existingSha256) {
+          const now = readPlainFile(targets.asset);
+          if (!now || sha256(now.data) !== t.existingSha256) throw new Error('the existing file changed since approval; plan again');
+        }
+        const png = fs.readFileSync(renderFile(v.id, 'final'));
         if (sha256(png) !== v.renders.final!.sha256) throw new Error('final.png changed after rendering; plan again');
         fs.mkdirSync(path.dirname(targets.asset), { recursive: true }); fs.mkdirSync(path.dirname(targets.manifest), { recursive: true });
         const overwrote = fs.existsSync(targets.asset);
-        fs.writeFileSync(targets.asset, png);
+        if (fs.existsSync(targets.manifest) && !readPlainFile(targets.manifest)) throw new Error(`${targets.manifestRel} is no longer a plain file with a single link; nothing was written`);
+
         const pngSha = sha256(png);
         const manifest = {
           slug: t.slug, asset: targets.assetRel, sha256: pngSha, version: v.id, sceneHash: t.hash, vork: renderer.version, profile: PROFILES.final,
           resolution: [v.renders.final!.width, v.renders.final!.height], reason: ar.reason, interpretation: v.proposal?.interpretation ?? v.instruction,
           adoptedAt: new Date().toISOString(), approvedVia: 'Render Director UI', scene: JSON.parse(t.sceneText),
         };
-        fs.writeFileSync(targets.manifest, JSON.stringify(manifest, null, 2));
+        // Both new files are written before either replaces anything, so a failed write leaves the project as it was.
+        replaceFiles([[targets.asset, png], [targets.manifest, JSON.stringify(manifest, null, 2)]]);
         if (v.status === 'proposed') { acceptVersion(state, v); audit('accept', { version: v.id, via: 'adoption' }); }
         settleRequest(ar, 'adopted'); save();
         audit('adopted', { request: ar.id, version: v.id, hash: t.hash, asset: targets.assetRel, sha256: pngSha, overwrote });
@@ -444,7 +501,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     if (!v.renders[profile]) {
       if (profile === 'final') throw new Refusal('forbidden', 'final renders need human approval in Director');
       const r = await renderVersion(newJob('agent-render', v.id, { listed: false }), v, profile);
-      if (!r.ok) throw new Refusal('failed', 'render failed', { log: r.log });
+      if (!r.ok) throw new Refusal('failed', `render failed: ${renderFailure(r, LIMITS[profile] / 1000)}`, { log: r.log });
     }
     return { v, render: v.renders[profile]! };
   }
@@ -462,7 +519,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     renderVersion(job, v, profile).then((r) => {
       if (job.status === 'cancelled') return;
       if (r.ok) { step(job, 'Done', 'done'); job.status = 'done'; job.result = r.info; if (profile === 'final') audit('final_rendered', { version: versionId, seconds: r.info.seconds }); }
-      else { job.status = 'failed'; job.error = r.timedOut ? `timed out after ${LIMITS[profile] / 1000}s` : `vork exited ${r.code}`; step(job, job.error, 'failed', r.log); }
+      else { job.status = 'failed'; job.error = renderFailure(r, LIMITS[profile] / 1000); step(job, job.error, 'failed', r.log); }
     }).catch((e) => failJob(job, e));
     return job;
   }
@@ -517,7 +574,8 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     renderVersion(job, v, 'draft').then(async (r) => {
       if (r.ok && job.status !== 'cancelled') await renderVersion(job, v, 'previs');
       if (job.status === 'cancelled') return;
-      job.status = r.ok ? 'done' : 'failed'; job.result = r.info; step(job, r.ok ? 'Done' : 'Render failed', r.ok ? 'done' : 'failed', r.log);
+      job.status = r.ok ? 'done' : 'failed'; job.result = r.info; if (!r.ok) job.error = renderFailure(r, LIMITS.draft / 1000);
+      step(job, r.ok ? 'Done' : `Render failed: ${job.error}`, r.ok ? 'done' : 'failed', r.log);
     }).catch((e) => failJob(job, e));
     return { v, job };
   }
@@ -541,9 +599,9 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   }
 
   return {
-    mode: MODE, project: PROJECT, runs: RUNS, renderer, state, readConfig, save, audit, getV, liveV, vdir, sceneOf, hashScene, waiters, pushEvent, addVersion,
+    mode: MODE, project: PROJECT, runs: RUNS, renderer, state, readConfig, save, audit, getV, liveV, vdir, renderFile, sceneOf, hashScene, waiters, pushEvent, addVersion,
     jobs, tickets, newJob, step, failJob, renderLocks, renderVersion, validateScene, createProposal,
-    adoptionJobs, requestAdoption, planAdoption, rejectAdoption, startAdoption, agentPropose, checkCanPropose, startPropose,
+    adoptionJobs, requestAdoption, planAdoption, existingOfPlan, rejectAdoption, startAdoption, agentPropose, checkCanPropose, startPropose,
     cancelJob, agentRender, startRender, planFinal, feedback, decide, checkout, directEdit, rendersQueued, recordPagePreview, waitForEvents, takeEvents,
   };
 }

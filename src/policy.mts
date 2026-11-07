@@ -26,9 +26,13 @@ export interface Config { assetDir: string; pageUrl: string | null; assetUrlPatt
 export interface Exposure { mean: number; clipped: number; near_black: number }
 /** An object of the scene as vork numbers it in the object index channel. */
 export interface RenderObject { pass_index: number; name: string }
+/**
+ * A render as state.json keeps it. The file is <version folder>/<profile>.png and the URLs are made by the presenter
+ * (http.mts), so the record holds neither a path nor a URL and survives moving the project (#42).
+ */
 export interface RenderInfo {
-  profile: Profile; seconds: number; width: number; height: number; image: string; ids: string;
-  file: string; sha256: string; idsSha256?: string; sceneHash: string | null; objects: RenderObject[]; exposure: Exposure;
+  profile: Profile; seconds: number; width: number; height: number;
+  sha256: string; idsSha256?: string; sceneHash: string | null; objects: RenderObject[]; exposure: Exposure;
   settings: { integrator: unknown; samples: number; denoiser: unknown }; warnings: string[];
 }
 export interface ClaimedChange { node: string; what: string; why: string }
@@ -39,7 +43,8 @@ export interface Proposal {
   via: 'built-in' | 'mcp'; cost?: number; clarifying_question?: string | null; scene?: undefined; respondsTo?: unknown;
 }
 export type VersionStatus = 'proposed' | 'accepted' | 'discarded';
-export interface PagePreviewOk { ok: true; matched: number; image: string; warning: string | null; sha256?: string }
+/** A page preview as state.json keeps it: the screenshot is <version folder>/page-<source>.png, source being the render it used. */
+export interface PagePreviewOk { ok: true; matched: number; warning: string | null; sha256: string; source: Profile }
 export type PagePreviewResult = { ok: false; reason: string } | PagePreviewOk;
 export interface Version {
   id: string; parent: string | null; origin: 'starter' | 'agent' | 'human'; instruction: string | null; proposal: Proposal | null;
@@ -73,6 +78,14 @@ export const MAX_REASON = 4000, MAX_ASSUMPTIONS = 20, MAX_ASSUMPTION = 1000, MAX
 export const MAX_INTERPRETATION = 4000, MAX_CLAIMED = 50, MAX_CLAIMED_NODE = 200, MAX_CLAIMED_TEXT = 1000;
 export const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
 export const isClaimedChange = (x: unknown): x is ClaimedChange => isPlainObject(x) && typeof x.node === 'string' && typeof x.what === 'string' && typeof x.why === 'string';
+
+/**
+ * Why a failed vork render failed, in words a human can act on. "GPU device lost" is what vork reports when another
+ * render took the GPU at the same time (#29, #49): nothing is wrong with the scene, and rendering again usually works.
+ */
+export const renderFailure = (r: { timedOut?: boolean; code?: number | null; log?: string }, timeoutSec: number): string =>
+  /device lost/i.test(r.log || '') ? 'the GPU was busy with another render (GPU device lost); render again'
+    : r.timedOut ? `timed out after ${timeoutSec}s` : `vork exited ${r.code}`;
 
 export const sha256 = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex');
 
@@ -231,9 +244,30 @@ export function settleRequest(ar: AdoptionRequest, status: 'rejected' | 'adopted
 /** Pending requests whose version is discarded (or gone), except those busy() says are being adopted. */
 export const requestsOfDiscarded = (state: DirectorState, busy: (requestId: string) => boolean): AdoptionRequest[] =>
   state.adoptionRequests.filter((ar) => ar.status === 'pending' && !isLive(state.versions.find((v) => v.id === ar.version)) && !busy(ar.id));
-/** Fills in what a state.json from an older Director lacks. */
+/**
+ * Fills in what a state.json from an older Director lacks, and drops what it kept that Director no longer stores:
+ * the URLs and the absolute path of a render, and the URL of a page preview (its source render is read from it) (#42).
+ * A page preview without a hash is dropped (#43).
+ */
 export function normalizeState(raw: Partial<DirectorState>): DirectorState {
   const state = raw as DirectorState;
   state.versions ||= []; state.head ??= null; state.audit ||= []; state.events ||= []; state.agentCursor ||= 0; state.adoptionRequests ||= [];
+  for (const v of state.versions) {
+    v.renders ||= {};
+    for (const [k, r] of Object.entries(v.renders)) {
+      // a render without a hash of its PNG cannot be served (#26, #43); it is made again when needed
+      if (!r || typeof r.sha256 !== 'string') { delete v.renders[k as Profile]; continue; }
+      for (const f of ['image', 'ids', 'file']) delete (r as unknown as Record<string, unknown>)[f];
+    }
+    if (!v.pagePreviews) continue;
+    for (const [k, p] of Object.entries(v.pagePreviews)) {
+      const old = p as PagePreviewOk & { image?: unknown };
+      const from = typeof old.image === 'string' ? /\/page-(previs|draft|final)\.png(\?|$)/.exec(old.image)?.[1] : undefined;
+      old.source ||= from as Profile;
+      delete old.image;
+      // A preview without a hash (from before #26) cannot be served (#43); the UI takes a new one when it is opened.
+      if (!isProfile(old.source) || typeof old.sha256 !== 'string') delete v.pagePreviews[k];
+    }
+  }
   return state;
 }

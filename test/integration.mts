@@ -112,6 +112,25 @@ await check('AC-03 policy violations create no version', async () => {
   assert.equal((await state()).versions.length, versionsBefore);
 });
 
+await check('#51 a bad scene_file is refused before Director sees it, and creates no version', async () => {
+  fs.writeFileSync(path.join(PROJECT, 'bad.json'), '{ not json'); fs.writeFileSync(path.join(tmp, 'outside.json'), JSON.stringify(base));
+  fs.symlinkSync(path.join(tmp, 'outside.json'), path.join(PROJECT, 'link.json'));
+  fs.linkSync(path.join(tmp, 'outside.json'), path.join(PROJECT, 'hard.json'));
+  fs.writeFileSync(path.join(PROJECT, 'secret.json'), 'AWS_SECRET=abc');
+  try {
+    for (const [args, why] of [
+      [{ scene: base, scene_file: 'scene.json' }, /exactly one/], [{}, /exactly one/], [{ scene_file: '../outside.json' }, /inside the project/],
+      [{ scene_file: path.join(tmp, 'outside.json') }, /inside the project/], [{ scene_file: 'link.json' }, /outside the project|symlink/], [{ scene_file: 'bad.json' }, /not valid JSON/], [{ scene_file: 'missing.json' }, /not a file/], [{ scene_file: 'hard.json' }, /more than one link/],
+    ] as const) {
+      const r = await tool('propose_scene', { ...args, interpretation: 'file', claimed_changes: [] });
+      assert.equal(r.isError, true, JSON.stringify(args)); assert.match(r.content[0].text, why); assert.match(r.content[0].text, /No version was created/);
+    }
+    const leak = await tool('propose_scene', { scene_file: 'secret.json', interpretation: 'file', claimed_changes: [] });
+    assert.doesNotMatch(leak.content[0].text, /AWS_SECRET/, 'a parse error does not quote the file');
+  } finally { for (const f of ['bad.json', 'link.json', 'hard.json', 'secret.json']) fs.rmSync(path.join(PROJECT, f), { force: true }); }
+  assert.equal((await state()).versions.length, versionsBefore);
+});
+
 let proposed: string;
 await check('propose_scene creates a proposed agent version, HEAD unchanged, draft image returned', async () => {
   const scene = structuredClone(base); scene.nodes.find((n: SceneNode) => n.name === 'vase').materials[0].inputs.base_color = [0.1, 0.3, 0.6];
@@ -283,7 +302,7 @@ const atLeast = (spec: Record<string, Spec>): Spec => (x, at) => { assert.equal(
 const EXPOSURE = atLeast({ mean: 'number', clipped: 'number', near_black: 'number' });
 const OBJECTS: Spec = [atLeast({ pass_index: 'number', name: 'string' })];
 const RENDER_INFO: Spec = {
-  profile: 'string', seconds: 'number', width: 'number', height: 'number', image: 'string', ids: 'string', file: 'string', sha256: 'string',
+  profile: 'string', seconds: 'number', width: 'number', height: 'number', image: 'string', ids: 'string|null', sha256: 'string',
   'idsSha256?': 'string', sceneHash: 'string|null', objects: OBJECTS, exposure: EXPOSURE, settings: { integrator: 'any', samples: 'number', denoiser: 'any' }, warnings: ['string'],
 };
 const RENDER_SUMMARY: Spec = { profile: 'string', seconds: 'number', width: 'number', height: 'number', file: 'string', exposure: EXPOSURE, objects: OBJECTS, warnings: ['string'] };
@@ -293,11 +312,11 @@ const PROPOSAL: Spec = {
   interpretation: 'string', assumptions: ['string'], claimed_changes: [{ node: 'string', what: 'string', why: 'string' }], policy: POLICY, context: ['string'],
   via: 'string', 'cost?': 'number|null', 'clarifying_question?': 'string|null', 'respondsTo?': 'number|null',
 };
-const PAGE_PREVIEW: Spec = { ok: 'boolean', matched: 'number', image: 'string', warning: 'string|null', 'sha256?': 'string' };
+const PAGE_PREVIEW: Spec = { ok: 'boolean', matched: 'number', image: 'string', warning: 'string|null', sha256: 'string', source: 'string' };
 const VERSION: Spec = {
   id: 'string', parent: 'string|null', origin: 'string', instruction: 'string|null', proposal: orNull(PROPOSAL), status: 'string', created: 'string',
   renders: { 'previs?': RENDER_INFO, 'draft?': RENDER_INFO, 'final?': RENDER_INFO }, 'pagePreviews?': { 'previs?': PAGE_PREVIEW, 'draft?': PAGE_PREVIEW, 'final?': PAGE_PREVIEW },
-  scene: 'object', diff: DIFF, hash: 'string',
+  scene: 'object', diff: DIFF, headDiff: orNull(DIFF), hash: 'string',
 };
 const EVENT_BODIES: Record<string, Record<string, Spec>> = {
   feedback: { version: 'string', versionStatus: 'string', selection: ['string'], comment: 'string' },
@@ -610,9 +629,8 @@ const versionOf = async (id: string): Promise<Json> => (await state()).versions.
 
 await check('#30 page preview waits for a running render of the version and refuses a PNG that is not the recorded one', async () => {
   const cfgFile = path.join(PROJECT, '.vork', 'config.json'); const cfg = fs.readFileSync(cfgFile, 'utf8');
-  const chrome = process.env.CHROME_PATH || ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome', '/usr/bin/chromium'].find((p) => fs.existsSync(p));
-  if (!chrome) { console.log('     (skipped: Chrome not found)'); return; }
-  // Nothing listens on port 9, so a preview that gets past the checks fails at page.goto with "could not open".
+  // The render checks come before Chrome is looked for (#48), so this runs without Chrome too. Nothing listens on port 9:
+  // a preview that gets past the checks fails at page.goto with "could not open", or with "Chrome not found".
   fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(cfg), pageUrl: 'http://127.0.0.1:9/', assetUrlPattern: '**/vork/hero.png' }));
   const draft = path.join(PROJECT, '.vork', proposed, 'draft.png'); let rendered: Buffer | null = null;
   try {
@@ -625,7 +643,7 @@ await check('#30 page preview waits for a running render of the version and refu
     assert.equal(settled, false, 'preview must wait for the render of the same version');
     releaseRenders(); await waitJob(job.id);
     const r = await preview;
-    assert.equal(r.json.ok, false); assert.match(r.json.reason, /could not open/);
+    assert.equal(r.json.ok, false); assert.match(r.json.reason, /could not open|Chrome not found/);
     rendered = fs.readFileSync(draft);
     fs.writeFileSync(draft, Buffer.from('not the recorded png'));
     const bad = await human('/api/preview', { versionId: proposed, profile: 'draft' });
@@ -904,6 +922,24 @@ await check('#39 RENDER_DIRECTOR_BROWSER opens the pairing link with the given c
   } finally { proc.kill('SIGTERM'); }
 });
 
+await check('#44 RENDER_DIRECTOR_BROWSER_STDIN=1 passes the pairing link on standard input, not as an argument', async () => {
+  const { spawn } = await import('node:child_process'); const net = await import('node:net');
+  const port = await new Promise<number>((ok) => { const srv = net.createServer().listen(0, '127.0.0.1', () => { const p = (srv.address() as { port: number }).port; srv.close(() => ok(p)); }); });
+  const got = path.join(tmp, 'browser-stdin'); const opener = path.join(BIN, 'fake-browser-stdin');
+  fs.writeFileSync(opener, `#!/bin/sh\nread link\n{ printf 'args:%s\\n' "$*"; printf 'stdin:%s\\n' "$link"; } > '${got}.tmp' && mv '${got}.tmp' '${got}'\n`, { mode: 0o755 });
+  const env: NodeJS.ProcessEnv = { ...process.env, RENDER_DIRECTOR_RUNS: path.join(tmp, 'browser-stdin-runs'), RENDER_DIRECTOR_BROWSER: JSON.stringify([opener, '--profile', 'review']), RENDER_DIRECTOR_BROWSER_STDIN: '1' };
+  delete env.RENDER_DIRECTOR_NO_OPEN; delete env.RENDER_DIRECTOR_PAIR_TOKEN;
+  const proc = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !fs.existsSync(got); i++) await sleep(150);
+    const [args, input] = fs.readFileSync(got, 'utf8').trim().split('\n');
+    assert.equal(args, 'args:--profile review', 'the link is not an argument');
+    const m = new RegExp(`^stdin:http://127\\.0\\.0\\.1:${port}/#pair=([0-9a-f]+)$`).exec(input); assert.ok(m, input);
+    const pr = await fetch(`http://127.0.0.1:${port}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: m[1] }) });
+    assert.equal(pr.status, 200);
+  } finally { proc.kill('SIGTERM'); }
+});
+
 await check('#17 /api/state keeps its shape', async () => {
   const s = await state();
   assertShape(s, {
@@ -940,6 +976,16 @@ await check('#17 /api/agent/* responses keep their shape', async () => {
   assert.equal(ar.status, 200); assertShape(ar.json, { request: 'string', status: 'string', note: 'string' });
   assert.equal((await human('/api/adopt/reject', { requestId: ar.json.request })).status, 200);
   assertShape((await get('/api/agent/scene?version=v999')).json, { error: 'string' });
+});
+
+await check('#51 propose_scene reads a scene from scene_file and shows the same diff as an inline scene', async () => {
+  const scene = structuredClone(base); scene.nodes.find((n: SceneNode) => n.name === 'vase').materials[0].inputs.base_color = [0.7, 0.2, 0.1];
+  fs.mkdirSync(path.join(PROJECT, 'gen'), { recursive: true }); fs.writeFileSync(path.join(PROJECT, 'gen', 'scene.json'), JSON.stringify(scene));
+  const r = await tool('propose_scene', { base: 'v001', scene_file: 'gen/scene.json', interpretation: 'red vase from a file', claimed_changes: [{ node: 'vase', what: 'red', why: 'test' }] });
+  assert.ok(!r.isError, r.content[0].text);
+  const t = textOf(r); assert.equal(t.status, 'proposed'); assert.deepEqual(t.diff.map((d: Json) => d.path), ['materials[0].inputs.base_color']);
+  const agentScene = (await raw(`/api/agent/scene?version=${t.version}`, '', { agent: true, method: 'GET' })).json.scene;
+  assert.deepEqual(agentScene, scene);
 });
 
 await check('AC-01 nothing new was written under render-director/runs', async () => {

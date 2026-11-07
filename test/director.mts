@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createDirector, Refusal } from '../src/director.mts';
 import type { Proposer } from '../src/director.mts';
 import type { Renderer, RenderOutcome } from '../src/vork.mts';
-import type { Scene } from '../src/policy.mts';
+import type { Scene, Version } from '../src/policy.mts';
 import { sha256 } from '../src/policy.mts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -74,11 +74,41 @@ await check('a state.json from an older Director is filled with defaults on load
   assert.equal(d.state.head, null); assert.deepEqual([d.state.audit, d.state.events, d.state.adoptionRequests, d.state.agentCursor], [[], [], [], 0]);
 });
 
+await check('#42 loading an older state.json drops stored URLs and paths and keeps the source of a page preview', async () => {
+  const runs = path.join(tmp, 'old42'); fs.mkdirSync(path.join(runs, 'v001'), { recursive: true });
+  fs.writeFileSync(path.join(runs, 'v001', 'scene.json'), JSON.stringify(starter));
+  const draft = { profile: 'draft', seconds: 1, width: 2, height: 1, image: '/runs/v001/draft.png?1', ids: '/runs/v001/draft.ids.bin?1', file: '/elsewhere/v001/draft.png', sha256: 'a', idsSha256: 'b', sceneHash: null, objects: [], exposure: { mean: 0, clipped: 0, near_black: 0 }, settings: { integrator: null, samples: 1, denoiser: null }, warnings: [] };
+  const pagePreviews = { final: { ok: true, matched: 1, image: '/runs/v001/page-draft.png?9', warning: null, sha256: 'c' }, previs: { ok: true, matched: 1, image: 'nonsense', warning: null, sha256: 'd' }, draft: { ok: true, matched: 1, image: '/runs/v001/page-draft.png?1', warning: null } };
+  fs.writeFileSync(path.join(runs, 'state.json'), JSON.stringify({ versions: [{ id: 'v001', parent: null, origin: 'starter', instruction: null, proposal: null, status: 'accepted', created: 'x', renders: { draft, previs: { profile: 'previs' } }, pagePreviews }] }));
+  const d = createDirector({ runs, project: null, renderer: fakeRenderer().renderer, starter });
+  const v = d.getV('v001')!;
+  assert.deepEqual(Object.keys(v.renders.draft!).filter((k) => ['image', 'ids', 'file'].includes(k)), []);
+  assert.equal(v.renders.previs, undefined, 'a render without a PNG hash is dropped');
+  assert.deepEqual(v.pagePreviews, { final: { ok: true, matched: 1, warning: null, sha256: 'c', source: 'draft' } }, 'a preview whose source cannot be read, or that has no hash (#43), is dropped');
+  assert.equal(d.renderFile('v001', 'draft'), path.join(runs, 'v001', 'draft.png'));
+});
+
+await check('#43 /runs/ serves only files whose record has a hash', async () => {
+  const { recordedHashes } = await import('../src/http.mts');
+  const v = { id: 'v001', renders: { draft: { profile: 'draft', sha256: 'p' }, previs: { profile: 'previs', sha256: 'q', idsSha256: 'r' } }, pagePreviews: { final: { source: 'draft', sha256: 's' } } } as unknown as Version;
+  const get = (id: string) => (id === 'v001' ? v : undefined);
+  assert.deepEqual(recordedHashes(get, '/runs/v001/draft.png'), ['p']);
+  assert.equal(recordedHashes(get, '/runs/v001/draft.ids.bin'), null, 'ids.bin of a render recorded before #26');
+  assert.deepEqual(recordedHashes(get, '/runs/v001/previs.ids.bin'), ['r']);
+  assert.deepEqual(recordedHashes(get, '/runs/v001/page-draft.png'), ['s']);
+  assert.equal(recordedHashes(get, '/runs/v001/page-previs.png'), null);
+  assert.equal(recordedHashes(get, '/runs/v001/final.png'), null);
+  assert.equal(recordedHashes(get, '/runs/v002/draft.png'), null);
+});
+
 await check('a render is stored with hashes of the file and the object ids', async () => {
   const { d } = setup(); const v = d.getV('v001')!;
   const r = await d.renderVersion(d.newJob('render', v.id), v, 'draft');
   assert.ok(r.ok); const info = v.renders.draft!;
-  assert.match(info.image, /^\/runs\/v001\/draft\.png\?\d+$/); assert.equal(info.sceneHash, d.hashScene('v001'));
+  assert.equal(info.sceneHash, d.hashScene('v001')); assert.equal(info.sha256, sha256(fs.readFileSync(d.renderFile('v001', 'draft'))));
+  // #42: state.json keeps neither a URL nor a path, so a moved project still finds its renders
+  const saved = JSON.parse(fs.readFileSync(path.join(d.runs, 'state.json'), 'utf8')).versions[0].renders.draft;
+  for (const k of ['image', 'ids', 'file']) assert.ok(!(k in saved), `${k} is not stored`);
   assert.equal(fs.readFileSync(path.join(d.vdir('v001'), 'draft.ids.bin')).length, 4);
 });
 
@@ -122,17 +152,17 @@ await check('#15 a final render of a version discarded while it runs is not kept
 await check('#15 #26 a render that is not kept leaves the recorded files of the version as they were', async () => {
   const { d, fake } = setup(); const v = d.getV('v001')!;
   assert.ok((await d.renderVersion(d.newJob('render', v.id), v, 'final')).ok);
-  const kept = fs.readFileSync(v.renders.final!.file); assert.equal(sha256(kept), v.renders.final!.sha256);
+  const kept = fs.readFileSync(d.renderFile(v.id, 'final')); assert.equal(sha256(kept), v.renders.final!.sha256);
   await tick(); // a request made before the finished render is unregistered would share its result (#28)
   const release = fake.hold();
   const p = d.renderVersion(d.newJob('render', v.id), v, 'final');
   await tick(); v.status = 'discarded'; release();
   assert.equal((await p).ok, false);
-  assert.deepEqual(fs.readFileSync(v.renders.final!.file), kept, 'the file still has the recorded bytes');
+  assert.deepEqual(fs.readFileSync(d.renderFile(v.id, 'final')), kept, 'the file still has the recorded bytes');
   assert.deepEqual(fs.readdirSync(d.vdir('v001')).filter((f) => f.startsWith('.render-')), [], 'no render folder is left behind');
   fake.fail('boom'); v.status = 'accepted'; await tick();
   assert.equal((await d.renderVersion(d.newJob('render', v.id), v, 'final')).ok, false);
-  assert.deepEqual(fs.readFileSync(v.renders.final!.file), kept, 'a failed render changes nothing either');
+  assert.deepEqual(fs.readFileSync(d.renderFile(v.id, 'final')), kept, 'a failed render changes nothing either');
 });
 
 await check('#30 rendersQueued resolves only after the renders of the version queued so far', async () => {
@@ -259,6 +289,41 @@ await check('adoption: request, plan, adopt writes the asset and manifest, accep
   await refused('conflict', () => setup().d.requestAdoption({ version: 'v001', slug: 'x' }), /--project/);
 });
 
+await check('#58 an adoption plan shows what it overwrites; the write needs that same file to still be there', async () => {
+  const { d, project } = setup({ ade: true });
+  const { v } = await agentProposal(d, [0.2, 0.2, 0.9]);
+  const asset = path.join(project!, 'public/vork/hero.png'); fs.mkdirSync(path.dirname(asset), { recursive: true }); fs.writeFileSync(asset, 'old hero');
+  const requestId = d.requestAdoption({ version: v.id, slug: 'hero' });
+  const plan = d.planAdoption({ requestId });
+  assert.equal(plan.overwrites, true); assert.equal(plan.existing!.viewable, true); assert.equal(plan.existing!.bytes, 8); assert.equal(plan.shows, 'draft');
+  assert.equal(d.existingOfPlan(plan.ticket)!.toString(), 'old hero'); assert.equal(d.existingOfPlan('nope'), null);
+  fs.writeFileSync(asset, 'other hero');
+  assert.equal(d.existingOfPlan(plan.ticket), null, 'a changed file is not shown as the one approved');
+  const job = await waitJob(d.startAdoption(plan.ticket));
+  assert.equal(job.status, 'failed'); assert.match(String(job.error), /existing file changed since approval/);
+  assert.equal(fs.readFileSync(asset, 'utf8'), 'other hero', 'nothing was written');
+  // a hard link (e.g. to state.json) is neither shown nor replaced
+  fs.rmSync(asset); fs.linkSync(path.join(d.runs, 'state.json'), asset);
+  await refused('conflict', () => d.planAdoption({ requestId }), /not a plain file with a single link/);
+  fs.rmSync(asset);
+  // the manifest too
+  const manifest = path.join(project!, '.vork/adopted/hero.json'); fs.mkdirSync(path.dirname(manifest), { recursive: true });
+  fs.linkSync(path.join(d.runs, 'state.json'), manifest);
+  await refused('conflict', () => d.planAdoption({ requestId }), /hero\.json exists but is not a plain file/);
+  fs.rmSync(manifest);
+  const fresh = d.planAdoption({ requestId }); assert.equal(fresh.overwrites, false); assert.equal(fresh.existing, null);
+  // a hard link made after planning is caught before writing; the linked file keeps its bytes
+  fs.writeFileSync(asset, 'old again');
+  const again = d.planAdoption({ requestId }); const keep = path.join(project!, 'keep.png');
+  fs.linkSync(asset, keep);
+  const linked = await waitJob(d.startAdoption(again.ticket));
+  assert.equal(linked.status, 'failed'); assert.equal(fs.readFileSync(keep, 'utf8'), 'old again');
+  fs.rmSync(keep);
+  const done = await waitJob(d.startAdoption(d.planAdoption({ requestId }).ticket));
+  assert.equal(done.status, 'done', JSON.stringify(done)); assert.ok(fs.readFileSync(asset).toString().startsWith('png final'));
+  assert.deepEqual(fs.readdirSync(path.dirname(asset)).filter((f) => f.endsWith('.tmp')), [], 'no temporary file is left');
+});
+
 await check('#14 #27 while an adoption renders, discard is refused; discarding later rejects pending requests', async () => {
   const { d, fake, project } = setup({ ade: true });
   const { v } = await agentProposal(d, [0.3, 0.6, 0.3]);
@@ -285,6 +350,63 @@ await check('final render: needs a ticket for the exact scene; a ticket of a dis
   await refused('conflict', () => d.startRender({ versionId: v.id, profile: 'final', ticket }), /discarded/);
   await refused('not_found', () => d.agentRender('v999', 'draft'));
   await refused('forbidden', () => d.agentRender(v.id, 'final'), /human approval/);
+});
+
+await check('#49 a render that failed with GPU device lost says the GPU was busy', async () => {
+  const { d, fake } = setup(); fake.fail('error: GPU device lost (Metal)');
+  const job = await waitJob(d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }));
+  assert.equal(job.status, 'failed'); assert.match(String(job.error), /GPU was busy.*render again/);
+  fake.fail('some other error');
+  const other = await waitJob(d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }));
+  assert.equal(other.error, 'vork exited 1');
+});
+
+await check('#49 withGpuLock runs one render at a time, in this process and across processes', async () => {
+  const { withGpuLock } = await import('../src/gpu-lock.mts');
+  const file = path.join(tmp, 'gpu.lock'); let running = 0, most = 0;
+  const work = () => withGpuLock(async () => { running++; most = Math.max(most, running); await tick(); running--; return 'ok'; }, { file });
+  assert.deepEqual(await Promise.all([work(), work(), work()]), ['ok', 'ok', 'ok']); assert.equal(most, 1);
+  assert.ok(!fs.existsSync(file), 'released');
+  // Another process holds the lock: a render waits, and a cancelled wait gives up without running.
+  const { spawn } = await import('node:child_process');
+  const holder = spawn(process.execPath, ['-e', `require('fs').writeFileSync(${JSON.stringify(file)}, String(process.pid)); setTimeout(() => require('fs').rmSync(${JSON.stringify(file)}), 400)`]);
+  try {
+    for (let i = 0; i < 100 && !fs.existsSync(file); i++) await tick();
+    let waited = false; const t0 = Date.now();
+    assert.equal(await withGpuLock(async () => Date.now() - t0, { file, onWait: () => { waited = true; } }).then((ms) => (ms! >= 250 ? 'after' : 'before')), 'after');
+    assert.ok(waited);
+  } finally { holder.kill(); }
+  // a caller queued behind another one in this process stops waiting when it is cancelled
+  let release!: () => void; const holding = withGpuLock(() => new Promise<void>((r) => (release = r)), { file });
+  const qc = new AbortController(); const queued = withGpuLock(async () => 'ran', { file, signal: qc.signal });
+  await tick(); qc.abort(); assert.equal(await queued, null, 'gave up its place'); release(); await holding;
+  // a lock that cannot be read is retried with a pause, not in a busy loop (the event loop keeps running)
+  fs.mkdirSync(file); let ticks = 0; const timer = setInterval(() => ticks++, 5);
+  const ac2 = new AbortController(); setTimeout(() => ac2.abort(), 100);
+  assert.equal(await withGpuLock(async () => 'ran', { file, signal: ac2.signal }), null); clearInterval(timer); fs.rmdirSync(file);
+  assert.ok(ticks > 3, `timers ran ${ticks} times while waiting`);
+  fs.writeFileSync(file, String(process.ppid)); // a live process that is not us
+  const ac = new AbortController(); setTimeout(() => ac.abort(), 50);
+  assert.equal(await withGpuLock(async () => 'ran', { file, signal: ac.signal }), null);
+  fs.rmSync(file);
+});
+
+await check('#30 #48 a page preview uses only the recorded bytes of a finished render', async () => {
+  const { recordedPng } = await import('../src/preview.mts');
+  const { d, fake } = setup(); const v = d.getV('v001')!;
+  assert.deepEqual(await recordedPng(d, v, 'final'), { ok: false, reason: 'render the version first' });
+  await d.renderVersion(d.newJob('render', v.id), v, 'draft');
+  const ok = await recordedPng(d, v, 'final'); // no final: falls back to the draft
+  assert.ok(ok.ok); assert.equal(ok.source, 'draft'); assert.equal(sha256(ok.png), v.renders.draft!.sha256);
+  // A render of the version that is running is waited for, and the preview reads what it recorded.
+  const release = fake.hold(); const running = d.renderVersion(d.newJob('render', v.id), v, 'draft');
+  let settled = false; const waiting = recordedPng(d, v, 'draft').then((r) => { settled = true; return r; });
+  await tick(); assert.equal(settled, false, 'waits for the running render'); release(); await running;
+  const after = await waiting; assert.ok(after.ok); assert.equal(sha256(after.png), v.renders.draft!.sha256);
+  fs.writeFileSync(d.renderFile(v.id, 'draft'), 'changed on disk');
+  assert.deepEqual(await recordedPng(d, v, 'draft'), { ok: false, reason: 'the render is being updated; try again when it finishes' });
+  fs.rmSync(d.renderFile(v.id, 'draft'));
+  assert.match((await recordedPng(d, v, 'draft') as { reason: string }).reason, /missing/);
 });
 
 await check('#17 policy.mts and director.mts do not load node:http, node:child_process or playwright-core, also through their imports', async () => {

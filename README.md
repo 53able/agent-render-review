@@ -67,7 +67,7 @@ default_tools_approval_mode = "approve"   # 無いと承認ポリシーによっ
 | `director_status` | 人間が開くURL、HEAD、版の一覧 |
 | `vork_help` | vork のドキュメント |
 | `get_scene` | 版のシーンJSON |
-| `propose_scene` | シーンを提案する。ポリシー検査とvork検証を通ると `proposed` の版になり、draft画像が返る。HEADは動かない |
+| `propose_scene` | シーンを提案する。シーンは引数 `scene` か、プロジェクト内の JSON ファイル `scene_file`（スクリプトで作った大きなシーン向け）で渡す。ポリシー検査とvork検証を通ると `proposed` の版になり、draft画像が返る。HEADは動かない |
 | `get_render` | 版の画像（MCPのimageコンテンツ）と露出・オブジェクトID |
 | `wait_for_feedback` | 人間のフィードバック、採否、直接編集、採用結果を待つ（最大120秒） |
 | `request_adoption` | 採用を依頼する。書き込むのは人間が承認したときだけ |
@@ -78,12 +78,13 @@ default_tools_approval_mode = "approve"   # 無いと承認ポリシーによっ
 
 Director は起動時に、ブラウザでレビュー用のタブを開きます。このタブは1回限りのペアリングリンク（URLの `#pair=...`）で Director と結び付きます。URL（既定 http://127.0.0.1:4747 。使用中なら次の番号）を直接開いただけのタブでは何も操作できません。タブを閉じてしまったら、エージェントに `open_review_tab` を頼むか、Director のプロセスに `kill -USR1 <pid>` を送ると新しいタブが開きます。Director を端末で直接起動した場合は、ペアリングリンクが端末に表示されます。
 
-既定のブラウザ以外で開くには、環境変数 `RENDER_DIRECTOR_BROWSER` にブラウザを開くコマンドを指定します。値は実行ファイル1つか、文字列の JSON 配列です。リンクは最後の引数として渡されます。MCP から起動する Director には、MCP の登録時に渡します（例: `claude mcp add vork -e 'RENDER_DIRECTOR_BROWSER=["open","-a","Firefox"]' -- node /path/to/render-director/mcp.mjs --project .`）。`.vork/config.json` では指定できません（エージェントが書き換えられるため、リンクがエージェントに渡る経路になる）。リンクはコマンドの引数として渡るので、そのプロセスが動いている間は `ps` で見えます。起動後すぐ終わるコマンド（`open` など）を使い、常駐するコマンドは避けてください。
+既定のブラウザ以外で開くには、環境変数 `RENDER_DIRECTOR_BROWSER` にブラウザを開くコマンドを指定します。値は実行ファイル1つか、文字列の JSON 配列です。リンクは最後の引数として渡されます。MCP から起動する Director には、MCP の登録時に渡します（例: `claude mcp add vork -e 'RENDER_DIRECTOR_BROWSER=["open","-a","Firefox"]' -- node /path/to/render-director/mcp.mjs --project .`）。`.vork/config.json` では指定できません（エージェントが書き換えられるため、リンクがエージェントに渡る経路になる）。リンクはコマンドの引数として渡るので、そのプロセスが動いている間は `ps` で見えます。起動後すぐ終わるコマンド（`open` など）を使ってください。自動操作のブラウザを起動するスクリプトのように常駐するコマンドを使うときは、`RENDER_DIRECTOR_BROWSER_STDIN=1` も指定します。リンクは引数ではなく、末尾に改行を付けた1行として標準入力に渡ります。
 
-- エージェントの新しい提案は通知されます。「View」で開き、親の版とワイプで比べられます。見ている版が勝手に切り替わることはありません。
+- エージェントの新しい提案は通知されます。「View」で開き、親の版とワイプで比べられます。まだ採用していない提案の上に作られた提案では、差分とワイプの基準を「HEAD」（採用すると何が変わるか。既定）と「親」（その一歩で何が変わったか）から選べます。見ている版が勝手に切り替わることはありません。別のタブを見ている間は、タブのタイトルに `(1)` が付きます。ブラウザは隠れたタブのタイマーを間引くので、印が付くまでに表示中のタブ（2.5秒ごと）より時間がかかることがあります（Chrome では最大1分程度）。
+- 「Discard」は6秒間「Undo」で取り消せます。その間はエージェントに何も届かず、時間が来たときに破棄が確定します（その前にタブを閉じると破棄されません）。採用済みでHEADでない版には「Make HEAD」が出て、HEADを戻せます（Accept の取り消し）。
 - 物体をクリックして選び、コメントを「Send to agent」で送ります。エージェントが読んだかどうかが表示されます。
 - 「On page」で、開発中のページに候補を当てはめた状態を見られます。プロジェクトのファイルは変えません。
-- 採用依頼が来たら「Review…」で書き込み先と上書きの有無を確認して承認します。採用の処理中は「adopting…」と表示され、却下やその版の破棄はできません。止めるにはジョブを取り消します（依頼は保留に戻ります）。保留中の依頼の版を破棄すると、その依頼は自動で却下され、エージェントには `adoption_rejected`（comment: `version discarded`）が届きます。
+- 採用依頼が来たら「Review…」で書き込み先と上書きの有無を確認して承認します。ダイアログには書き込む画像（final 描画がまだなら draft。書き込む前に final で描き直す）と、上書きされる既存の画像が並びます。承認は表示した既存ファイルにも結び付き、承認後にそのファイルが変わったら書き込みを中止します。採用の処理中は「adopting…」と表示され、却下やその版の破棄はできません。止めるにはジョブを取り消します（依頼は保留に戻ります）。保留中の依頼の版を破棄すると、その依頼は自動で却下され、エージェントには `adoption_rejected`（comment: `version discarded`）が届きます。
 
 ### 設定（`<project>/.vork/config.json`）
 
@@ -115,12 +116,12 @@ node server.mts             # http://127.0.0.1:4747 、状態は runs/
 ```sh
 npm run typecheck           # TypeScript 7 で型検査（サーバー側 .mts と public/app.js の JSDoc）
 npm test                    # test:unit + 統合試験（実MCPクライアント、vork が必要）
-npm run test:unit           # 自己テスト（ポリシー、差分、書き込み先の検査）。vork も Chrome も不要
+npm run test:unit           # 自己テスト（ポリシー、差分、書き込み先の検査）、Director の use case、レビュー画面の照合（public/review-model.js）。vork も Chrome も不要
 npm run test:e2e            # ブラウザE2E（Chrome）。E2E_AGENT=1 で内蔵エージェントも試す。E2E_REQUIRED=1 なら Chrome が無いと失敗にする。README の画像（docs/screenshot-*.png）は E2E_UPDATE_SCREENSHOTS=1 のときだけ書き換える
 npm run report -- <project> # 最初の提案から採用までの時間、フィードバック回数など
 ```
 
-vork を使う試験（`npm test` の統合試験と `npm run test:e2e`）は、同じマシンでは同時に1本しか描画しません。同じ GPU で複数の vork が同時に描画すると `GPU device lost` で失敗することがあるため、試験は開始時に `os.tmpdir()` のロックファイル（`render-director-gpu-test.lock`）を取り、ほかの試験が終わるまで待ちます。Director 本体や他の GPU 処理との同時実行は防げません。
+同じ GPU で複数の vork が同時に描画すると `GPU device lost` で失敗することがあります。そのため Director は、vork で描画するたびにロックファイル（`os.tmpdir()` 内の、そのユーザーだけが書けるフォルダ `render-director-<uid>/vork.lock`）を取り、同じマシンのほかの Director の描画が終わるまで待ちます（待ち時間は描画の上限時間に含めません）。vork を使う試験（`npm test` の統合試験と `npm run test:e2e`）は、加えて開始時に `render-director-gpu-test.lock` を取り、試験を1本ずつ流します。Director を通さない vork の描画との同時実行は防げません。その失敗は画面に「GPU was busy … render again」と出るので、描画をやり直してください。
 
 実験の手順は [docs/experiment.md](docs/experiment.md)、設計判断とリスクは [docs/ai-interface-design.md](docs/ai-interface-design.md) にあります。サンプルのページは [examples/landing](examples/landing) です。
 
@@ -130,6 +131,7 @@ vork を使う試験（`npm test` の統合試験と `npm run test:e2e`）は、
 - サーバーは127.0.0.1だけで待ち受け、Hostヘッダー、Origin、`application/json` を検査します。
 - 書き戻し先はプロジェクトの内側に限ります（`..`、絶対パス、外へ向くシンボリックリンクを拒否）。
 - 人間用のAPIと描画ファイルは、ペアリング済みのブラウザセッション（HttpOnly、SameSite=Strict のCookie）でしか使えません。ペアリング用トークンは、Director からOSのブラウザ起動コマンドへ渡すだけで、ファイルにもログにも書きません。エージェント用のトークン（`.vork/server.json`）では人間用APIは403になります。
+- 起動中の Director に新しいペアリング用リンクを発行させて端末に表示するコマンドは、用意していません。端末のコマンドが Director に届く経路は、同じユーザーで動くエージェントも使えるので、エージェントがそのコマンドを1回呼ぶだけでリンクを得られてしまうためです。リンクを得る方法は、ブラウザで開く（既定のブラウザか `RENDER_DIRECTOR_BROWSER`。`kill -USR1` も同じ）と、Director を端末で直接起動したときの表示の2つです。
 - 書き戻しの承認は、そのときのシーン本文、書き込み先、上書きの有無に結び付きます。承認後にシーンや `config.json` が変わったら書き込みを中止します。
 - **これは同じユーザー権限で動くエージェントへの強制力を持ちません。** シェルを持つエージェントは、`.vork/state.json` を直接書き換える、プロセスの引数を覗く、ファイルを直接置く、といった方法で回避できます。境界が防ぐのは、エージェントが通常の手順として承認を代行することです。強制が必要なら、ADE側のサンドボックス（書き込み先やプロセスの制限）と組み合わせてください。manifest もエージェントが書けるので、改ざんの証明にはなりません。
 - vork 自体はサンドボックス化していません。
