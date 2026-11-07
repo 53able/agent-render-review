@@ -1,4 +1,4 @@
-// vork Director — a review surface for renders made with vork.
+// Render Director — a review surface for renders made with vork (unofficial).
 // Standalone mode: `node server.mts` (built-in proposer via `claude -p`).
 // ADE mode:        `node server.mts --project <dir>` (your ADE agent proposes through mcp.mts; you review and adopt here).
 import http from 'node:http';
@@ -522,7 +522,7 @@ async function main() {
       scene: { type: 'object', description: 'The complete revised vork scene (version 2).' },
     },
   };
-  const SYSTEM = `You are the scene assistant inside "vork Director". A human director looks at renders and asks for changes.
+  const SYSTEM = `You are the scene assistant inside "Render Director". A human director looks at renders and asks for changes.
 You edit vork scene JSON (API v2). You do NOT render; the app renders and the director judges the image.
 Rules:
 - Return the COMPLETE revised scene in "scene". Keep every node "name" stable; give every new node a unique, non-empty name that does not start with "#".
@@ -968,7 +968,7 @@ ${VORK_HELP}`;
             const manifest = {
               slug: t.slug, asset: targets.assetRel, sha256: pngSha, version: v.id, sceneHash: t.hash, vork: VORK_VERSION, profile: PROFILES.final,
               resolution: [v.renders.final!.width, v.renders.final!.height], reason: ar.reason, interpretation: v.proposal?.interpretation ?? v.instruction,
-              adoptedAt: new Date().toISOString(), approvedVia: 'vork Director UI', scene: JSON.parse(t.sceneText),
+              adoptedAt: new Date().toISOString(), approvedVia: 'Render Director UI', scene: JSON.parse(t.sceneText),
             };
             fs.writeFileSync(targets.manifest, JSON.stringify(manifest, null, 2));
             if (v.status === 'proposed') { v.status = 'accepted'; state.head = v.id; audit('accept', { version: v.id, via: 'adoption' }); }
@@ -1084,5 +1084,5 @@ ${VORK_HELP}`;
   process.on('SIGINT', cleanup); process.on('SIGTERM', cleanup);
   process.on('SIGUSR1', () => { rotatePair(); openPairing(); });
   openPairing();
-  console.log(`vork Director on http://127.0.0.1:${PORT}  mode=${MODE}${PROJECT ? `  project=${PROJECT}` : ''}  (${VORK_VERSION}${MODE === 'standalone' ? `, built-in agent: claude ${MODEL}` : ''})`);
+  console.log(`Render Director on http://127.0.0.1:${PORT}  mode=${MODE}${PROJECT ? `  project=${PROJECT}` : ''}  (${VORK_VERSION}${MODE === 'standalone' ? `, built-in agent: claude ${MODEL}` : ''})`);
 }

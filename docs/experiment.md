@@ -16,7 +16,7 @@ ai-builder-mentor のレビュー（2026-11-07）で提案された7日実験の
 
 ## 準備（参加者ごと）
 
-1. vork と vork Director を導入する（README の「ADEモード」）。
+1. vork と Render Director を導入する（README の「ADEモード」）。
 2. 参加者のプロジェクトで MCP を登録する。
 3. `.vork/config.json` に `pageUrl` と `assetUrlPattern` を書く（開発サーバーのURL、ヒーロー画像のパス）。
 4. 観察者は画面共有で見るだけにし、操作の説明は最初の5分に限る。

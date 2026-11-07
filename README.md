@@ -1,6 +1,6 @@
-# agent-render-review
+# Render Director
 
-アプリ内の表示名は「vork Director」です。
+vork で描画するエージェントのための、非公式のレビュー画面です。旧称は vork Director、agent-render-review です。
 
 本プロジェクトは独立した非公式の連携ツールです。Voyager / Nullframe が提供・承認する製品ではなく、同社との提携関係もありません。
 
@@ -32,12 +32,12 @@ npm install
 
 ### 1. MCP を登録する
 
-プロジェクトのルートで登録します。Director はエージェントが最初にツールを呼んだときに自動で起動し、状態を `<project>/.vork/` に保存します。
+プロジェクトのルートで登録します。`/path/to/render-director` は、このリポジトリを clone した場所に置き換えてください。Director はエージェントが最初にツールを呼んだときに自動で起動し、状態を `<project>/.vork/` に保存します。
 
 **Claude Code**
 
 ```sh
-claude mcp add vork -- node /path/to/vork-director/mcp.mjs --project .
+claude mcp add vork -- node /path/to/render-director/mcp.mjs --project .
 ```
 
 **Codex**（`~/.codex/config.toml`）
@@ -45,7 +45,7 @@ claude mcp add vork -- node /path/to/vork-director/mcp.mjs --project .
 ```toml
 [mcp_servers.vork]
 command = "node"
-args = ["/path/to/vork-director/mcp.mjs", "--project", "/path/to/your/project"]
+args = ["/path/to/render-director/mcp.mjs", "--project", "/path/to/your/project"]
 startup_timeout_sec = 30
 tool_timeout_sec = 300
 default_tools_approval_mode = "approve"   # 無いと承認ポリシーによってはツール呼び出しが拒否される

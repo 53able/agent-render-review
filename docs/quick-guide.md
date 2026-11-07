@@ -11,12 +11,14 @@ Claude Code に vork でヒーロー画像を作らせ、あなたが Director �
 - Claude Code（ログイン済み）
 - このリポジトリで `npm install` を済ませてある
 
+以下の `/path/to/render-director` は、このリポジトリを clone した場所に置き換えてください。
+
 ## 1. サンプルを作業用に複製する
 
 採用した画像はプロジェクトに書き込まれます。このリポジトリを汚さないよう、サンプルを別の場所に複製して使います。
 
 ```sh
-cp -R /path/to/agent-render-review/examples/landing ~/vork-try
+cp -R /path/to/render-director/examples/landing ~/vork-try
 cd ~/vork-try
 ```
 
@@ -46,7 +48,7 @@ EOF
 `~/vork-try` で登録し、Claude Code を起動します。
 
 ```sh
-claude mcp add vork -- node /path/to/agent-render-review/mcp.mjs --project .
+claude mcp add vork -- node /path/to/render-director/mcp.mjs --project .
 claude
 ```
 

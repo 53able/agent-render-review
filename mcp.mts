@@ -1,5 +1,5 @@
 // MCP server for ADE agents (Claude Code, Codex, ...). Register it once per project:
-//   claude mcp add vork -- node /path/to/vork-director/mcp.mjs --project .
+//   claude mcp add vork -- node /path/to/render-director/mcp.mjs --project .
 // The agent writes vork scenes and sees renders; a human reviews, gives feedback and adopts in Director.
 // The agent has no tool to accept, discard, approve a final render or approve an adoption.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -64,7 +64,7 @@ const renderText = (r: RenderInfo | null | undefined) => r && {
   object_ids: r.objects, warnings: r.warnings,
 };
 
-const server = new McpServer({ name: 'vork-director', version: '0.2.0' });
+const server = new McpServer({ name: 'render-director', version: '0.2.0' });
 
 server.registerTool('director_status', {
   annotations: { readOnlyHint: true },

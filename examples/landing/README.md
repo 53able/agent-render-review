@@ -1,6 +1,6 @@
 # examples/landing
 
-vork Director の ADE モードを試すための静的ページです。ヒーロー画像は `public/vork/hero.png` を参照しています（最初は存在しません）。
+Render Director の ADE モードを試すための静的ページです。ヒーロー画像は `public/vork/hero.png` を参照しています（最初は存在しません）。
 
 ```sh
 # 1. ページを配信（例）
