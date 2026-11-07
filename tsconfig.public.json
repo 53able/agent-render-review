@@ -12,5 +12,5 @@
     "moduleDetection": "force",
     "skipLibCheck": true
   },
-  "include": ["public/app.js"]
+  "include": ["public/app.js", "public/review-model.js"]
 }

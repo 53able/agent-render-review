@@ -346,6 +346,24 @@ await check('#49 withGpuLock runs one render at a time, in this process and acro
   fs.rmSync(file);
 });
 
+await check('#30 #48 a page preview uses only the recorded bytes of a finished render', async () => {
+  const { recordedPng } = await import('../src/preview.mts');
+  const { d, fake } = setup(); const v = d.getV('v001')!;
+  assert.deepEqual(await recordedPng(d, v, 'final'), { ok: false, reason: 'render the version first' });
+  await d.renderVersion(d.newJob('render', v.id), v, 'draft');
+  const ok = await recordedPng(d, v, 'final'); // no final: falls back to the draft
+  assert.ok(ok.ok); assert.equal(ok.source, 'draft'); assert.equal(sha256(ok.png), v.renders.draft!.sha256);
+  // A render of the version that is running is waited for, and the preview reads what it recorded.
+  const release = fake.hold(); const running = d.renderVersion(d.newJob('render', v.id), v, 'draft');
+  let settled = false; const waiting = recordedPng(d, v, 'draft').then((r) => { settled = true; return r; });
+  await tick(); assert.equal(settled, false, 'waits for the running render'); release(); await running;
+  const after = await waiting; assert.ok(after.ok); assert.equal(sha256(after.png), v.renders.draft!.sha256);
+  fs.writeFileSync(d.renderFile(v.id, 'draft'), 'changed on disk');
+  assert.deepEqual(await recordedPng(d, v, 'draft'), { ok: false, reason: 'the render is being updated; try again when it finishes' });
+  fs.rmSync(d.renderFile(v.id, 'draft'));
+  assert.match((await recordedPng(d, v, 'draft') as { reason: string }).reason, /missing/);
+});
+
 await check('#17 policy.mts and director.mts do not load node:http, node:child_process or playwright-core, also through their imports', async () => {
   const forbidden = /^(node:)?(http|child_process)$|^playwright-core(\/|$)/;
   // Runtime imports only: `import type` is erased, so it loads nothing.

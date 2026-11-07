@@ -115,7 +115,7 @@ node server.mts             # http://127.0.0.1:4747 、状態は runs/
 ```sh
 npm run typecheck           # TypeScript 7 で型検査（サーバー側 .mts と public/app.js の JSDoc）
 npm test                    # test:unit + 統合試験（実MCPクライアント、vork が必要）
-npm run test:unit           # 自己テスト（ポリシー、差分、書き込み先の検査）。vork も Chrome も不要
+npm run test:unit           # 自己テスト（ポリシー、差分、書き込み先の検査）、Director の use case、レビュー画面の照合（public/review-model.js）。vork も Chrome も不要
 npm run test:e2e            # ブラウザE2E（Chrome）。E2E_AGENT=1 で内蔵エージェントも試す。E2E_REQUIRED=1 なら Chrome が無いと失敗にする。README の画像（docs/screenshot-*.png）は E2E_UPDATE_SCREENSHOTS=1 のときだけ書き換える
 npm run report -- <project> # 最初の提案から採用までの時間、フィードバック回数など
 ```

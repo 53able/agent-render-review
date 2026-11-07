@@ -211,6 +211,63 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     assert.equal(await page.locator('#adoptBox').isHidden(), true);
   });
 
+  // A large proposal: 400 added nodes (#35, #36, #37, #38), then one that changes each of them (#37 "Show remaining").
+  const BIRDS = 400;
+  const bird = (i: number) => ({ type: 'mesh', name: `b${i}`, translation: [-1 + (i % 40) * 0.05, 0.7 + Math.floor(i / 40) * 0.03, -0.3], geometry: { std: 'rounded_box', size: [0.02, 0.02, 0.02], radius: 0.002 }, materials: [{ inputs: { base_color: [0.1, 0.1, 0.1] } }] });
+  let flock: string, recolor: string;
+  await check('#38 #40 a large proposal is announced with a fixed notice and a "(1)" title until it is opened', async () => {
+    assert.match(await page.textContent('#meta') as string, /project landing ·/); assert.equal(await page.getAttribute('#meta', 'title'), PROJECT);
+    const scene: { nodes: unknown[] } = (await agent('GET', '/api/agent/scene')).scene;
+    scene.nodes.push(...Array.from({ length: BIRDS }, (_, i) => bird(i)));
+    const r = await agent('POST', '/api/agent/propose', { scene, interpretation: 'a flock of birds', claimed_changes: [{ node: 'b*', what: 'birds', why: 'flock' }, { node: 'zz*', what: 'nothing', why: 'ghost' }] });
+    flock = r.version; assert.ok(flock, JSON.stringify(r));
+    await page.waitForSelector('#notice:not([hidden])', { timeout: 10000 });
+    assert.match(await page.title(), /^\(1\) /);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.click('#notice button');
+    await page.waitForSelector(`#canvas[data-ready="${flock}:draft"]`, { timeout: 60000 });
+    assert.doesNotMatch(await page.title(), /^\(1\)/); assert.equal(await page.locator('#notice').isHidden(), true);
+  });
+  await check('#36 a prefix claim shows how many nodes it matched; a prefix that matches nothing is flagged', async () => {
+    assert.match(await page.textContent('#review') as string, new RegExp(`b\\*\\s*→ ${BIRDS} nodes`));
+    assert.match(await page.textContent('#review') as string, /Claimed but not changed: zz\*/);
+    assert.equal(await page.locator('#review tr.unclaimed').count(), 0, 'every added bird is claimed');
+  });
+  await check('#37 the added nodes collapse into one row that stays open across the 2.5 s refresh', async () => {
+    const summary = page.locator('#review details[data-group] summary').first();
+    assert.match(await summary.textContent() as string, new RegExp(`^${BIRDS} mesh nodes added`));
+    await summary.click();
+    await page.waitForFunction((n) => document.querySelectorAll('#review details[data-group] tbody tr').length === n, BIRDS, { timeout: 5000 });
+    // a new agent version changes the state signature, so the poll re-renders the review panel
+    await agent('POST', '/api/agent/adoption-request', { version: flock, slug: 'flock', reason: 'refresh' });
+    await page.waitForSelector('#adoptBox:not([hidden])', { timeout: 10000 });
+    assert.equal(await page.locator('#review details[data-group][open]').count(), 1);
+  });
+  await check('#35 the OBJECTS list shows at most 200 rows, filters by name, and a selection updates its row', async () => {
+    assert.equal(await page.locator('#objectList li').count(), 200);
+    assert.match(await page.textContent('#objectMore') as string, /more — type to filter/);
+    await page.fill('#objectFilter', 'b39'); await sleep(100);
+    assert.deepEqual(await page.locator('#objectList li').evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.name)), ['b39', 'b390', 'b391', 'b392', 'b393', 'b394', 'b395', 'b396', 'b397', 'b398', 'b399']);
+    await page.locator('#objectList li[data-name="b391"] input').check();
+    assert.match(await page.textContent('#selCount') as string, /b391/);
+    assert.equal(await page.locator('#objectList label.sel').count(), 1);
+    await page.locator('#objectList li[data-name="b391"] input').uncheck(); await page.fill('#objectFilter', ''); await sleep(100);
+  });
+  await check('#37 more than 200 changed fields: the rest is behind "Show remaining", which stays shown across the refresh', async () => {
+    const scene: { nodes: { name: string; materials?: { inputs: Record<string, unknown> }[] }[] } = (await agent('GET', `/api/agent/scene?version=${flock}`)).scene;
+    for (const n of scene.nodes) if (/^b\d+$/.test(n.name)) n.materials![0].inputs.base_color = [0.9, 0.9, 0.9];
+    const r = await agent('POST', '/api/agent/propose', { base: flock, scene, interpretation: 'white birds', claimed_changes: [{ node: 'b*', what: 'white', why: 'contrast' }] });
+    recolor = r.version; assert.ok(recolor, JSON.stringify(r));
+    await page.waitForSelector('#notice:not([hidden])', { timeout: 10000 }); await page.click('#notice button');
+    await page.waitForSelector(`#canvas[data-ready="${recolor}:draft"]`, { timeout: 60000 });
+    assert.equal(await page.locator('#review .difftable > tbody > tr:not(.group)').count(), 200);
+    await page.click('#moreDiff');
+    assert.equal(await page.locator('#review .difftable > tbody > tr:not(.group)').count(), BIRDS);
+    await agent('POST', '/api/agent/adoption-request', { version: recolor, slug: 'flock-white', reason: 'refresh' });
+    await page.waitForFunction(() => document.querySelector('#adoptList')!.textContent!.includes('flock-white'), null, { timeout: 10000 });
+    assert.equal(await page.locator('#review .difftable > tbody > tr:not(.group)').count(), BIRDS);
+  });
+
   await check('ADE: no page errors', async () => assert.deepEqual(page.errors, []));
   site.close();
 }
