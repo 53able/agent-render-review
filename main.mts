@@ -48,7 +48,8 @@ export async function main(argv: string[]) {
   setupLogging({ dir: RUNS });
   const L = log('main');
   // A monitor only observes: Node still prints the error and exits with code 1.
-  process.on('uncaughtExceptionMonitor', (e, origin) => L.fatal('director.fatal', 'Director crashed', { origin, ...errFields(e) }));
+  // No message for a SyntaxError: JSON.parse quotes the text it could not parse.
+  process.on('uncaughtExceptionMonitor', (e, origin) => L.fatal('director.fatal', 'Director crashed', { origin, ...errFields(e, { message: !(e instanceof SyntaxError) }) }));
   process.on('exit', shutdownLogging);
 
   const vork = vorkInstalled();

@@ -48,6 +48,11 @@ const API_ROUTES = new Set([
   '/api/pair', '/api/state', '/api/render', '/api/final/plan', '/api/propose', '/api/feedback', '/api/decide', '/api/checkout',
   '/api/adopt/plan', '/api/adopt/existing', '/api/adopt/reject', '/api/adopt', '/api/preview', '/api/edit',
 ]);
+/** The URL of a request target, or null when it cannot be parsed (e.g. `//x:99999`, where new URL throws). */
+export function parseTarget(target: string | undefined): URL | null {
+  try { return new URL(target || '/', 'http://x'); } catch { return null; }
+}
+
 /** The route of a path as http.request logs it: never the raw path, which can hold ids, file names or anything a client sent. */
 export function routeOf(pathname: string): string {
   if (pathname.startsWith('/runs/')) return '/runs/*';
@@ -216,7 +221,8 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
   // request's context, so reqId, method and route are taken from this closure.
   const server = http.createServer((req, res) => {
     const reqId = crypto.randomUUID().slice(0, 8); const t0 = Date.now(); const method = req.method || '';
-    const route = routeOf(new URL(req.url!, 'http://x').pathname);
+    const url = parseTarget(req.url);
+    const route = url ? routeOf(url.pathname) : '/invalid';
     const rctx: { error?: unknown } = {};
     let logged = false;
     const record = (aborted: boolean) => {
@@ -224,16 +230,17 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
       const status = !aborted || res.headersSent ? res.statusCode : null;
       const props = { reqId, method, route, status, ms: Date.now() - t0, ...(aborted ? { aborted: true } : {}), ...(rctx.error !== undefined ? errFields(rctx.error) : {}) };
       if (status !== null && status >= 500) L.error('http.request', 'HTTP request failed', props);
-      else if (method === 'GET' && status !== null && status < 400) L.debug('http.request', 'HTTP request', props);
+      // A GET answered 401/403/404 is also debug: a tab left open after a restart polls with a stale session forever.
+      else if (method === 'GET' && status !== null && (status < 400 || status === 401 || status === 403 || status === 404)) L.debug('http.request', 'HTTP request', props);
       else L.info('http.request', 'HTTP request', props);
     };
     res.on('finish', () => record(false));
     res.on('close', () => record(!res.writableFinished));
-    return withRequest(reqId, () => handle(req, res, rctx));
+    if (!url) return send(res, 400, { error: 'bad request target' });
+    return withRequest(reqId, () => handle(req, res, url, rctx));
   });
 
-  async function handle(req: http.IncomingMessage, res: http.ServerResponse, rctx: { error?: unknown }): Promise<void> {
-    const url = new URL(req.url!, 'http://x');
+  async function handle(req: http.IncomingMessage, res: http.ServerResponse, url: URL, rctx: { error?: unknown }): Promise<void> {
     // Local-only guard: reject other Host names (DNS rebinding) and cross-site or simple-request POSTs (CSRF).
     const okHosts = [`127.0.0.1:${PORT}`, `localhost:${PORT}`];
     if (!okHosts.includes(req.headers.host as string)) return send(res, 421, { error: 'unexpected Host' });
