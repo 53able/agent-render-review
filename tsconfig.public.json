@@ -12,5 +12,5 @@
     "moduleDetection": "force",
     "skipLibCheck": true
   },
-  "include": ["app.js"]
+  "include": ["public/app.js"]
 }

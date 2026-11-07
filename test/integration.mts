@@ -347,9 +347,18 @@ await check('#19 /runs/ does not serve a hard link (to server.json); normal rend
 });
 
 await check('#10 a static .json file is served as its contents, not as a serialized Buffer', async () => {
-  const r = await fetch(`${BASE}/tsconfig.json`);
-  assert.equal(r.status, 200); assert.match(r.headers.get('content-type')!, /application\/json/);
-  assert.equal(await r.text(), fs.readFileSync(path.join(ROOT, 'public', 'tsconfig.json'), 'utf8'));
+  // public/ holds no .json file of its own (#22), so the check places one for the duration of the test.
+  const name = `int-${process.pid}.json`; const file = path.join(ROOT, 'public', name);
+  fs.writeFileSync(file, '{"a":[1,2]}\n');
+  try {
+    const r = await fetch(`${BASE}/${name}`);
+    assert.equal(r.status, 200); assert.match(r.headers.get('content-type')!, /application\/json/);
+    assert.equal(await r.text(), '{"a":[1,2]}\n');
+  } finally { fs.rmSync(file, { force: true }); }
+});
+
+await check('#22 the type-check config is not served', async () => {
+  for (const name of ['tsconfig.json', 'tsconfig.public.json']) assert.equal((await fetch(`${BASE}/${name}`)).status, 404, name);
 });
 
 await check('#8 propose refuses unnamed and "#"-named nodes before rendering; edit needs a string node', async () => {

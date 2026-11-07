@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server.mts",
     "mcp": "node mcp.mts",
-    "typecheck": "tsc -p . && tsc -p public",
+    "typecheck": "tsc -p . && tsc -p tsconfig.public.json",
     "test": "npm run test:unit && node test/integration.mts",
     "test:unit": "node server.mts --selftest",
     "test:e2e": "node test/e2e.mts",
