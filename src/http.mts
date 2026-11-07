@@ -1,5 +1,6 @@
 // HTTP: the local-only guards (Host, Origin, Content-Type), the agent API (bearer token) and the human API (paired
-// browser session), and the presenter that turns Director state into the responses public/app.js and mcp.mts read.
+// browser session), and the presenter that turns Director state into the responses the web UI (web/, served from
+// dist/) and mcp.mts read.
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -356,8 +357,16 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
       if (url.pathname.startsWith('/api/')) return send(res, 404, { error: 'unknown endpoint' });
 
       // static
-      if (url.pathname === '/' || url.pathname === '/index.html')
-        return send(res, 200, fs.readFileSync(path.join(PUBLIC, 'index.html')), MIME['.html']);
+      if (url.pathname === '/' || url.pathname === '/index.html') {
+        let html: Buffer;
+        try { html = fs.readFileSync(path.join(PUBLIC, 'index.html')); }
+        catch (e: any) {
+          if (e.code !== 'ENOENT') throw e;
+          // RENDER_DIRECTOR_DEV without a build, or a rebuild between its two renames.
+          return send(res, 404, 'The web UI is not built here. In development, open the URL `npm run dev` prints; otherwise run `npm run build`.', 'text/plain');
+        }
+        return send(res, 200, html, MIME['.html']);
+      }
       // Each route serves only its own root: render files from RUNS (session checked above), the app from PUBLIC.
       let root, rel;
       if (url.pathname.startsWith('/runs/')) {
@@ -371,7 +380,10 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
       // No symlinks below the root: the real path must be the literal one. A link that stays inside RUNS
       // (v001/final.png -> ../server.json) would otherwise still pass a "real path is inside the root" check.
       // .native also makes a URL whose letter case differs from the file on disk a 404.
-      const rootReal = fs.realpathSync.native(root); const want = path.resolve(rootReal, '.' + path.sep + rel);
+      // root itself may be missing (no build in DEV, or a rebuild between its two renames): 404, not 500.
+      let rootReal: string;
+      try { rootReal = fs.realpathSync.native(root); } catch { return send(res, 404, 'not found', 'text/plain'); }
+      const want = path.resolve(rootReal, '.' + path.sep + rel);
       let real: string;
       try { real = fs.realpathSync.native(want); } catch { return send(res, 404, 'not found', 'text/plain'); }
       if (real !== want || !real.startsWith(rootReal + path.sep)) return send(res, 404, 'not found', 'text/plain');

@@ -27,7 +27,7 @@ const starter = JSON.parse(fs.readFileSync(path.join(ROOT, 'scenes', 'starter.js
 const renderer: Renderer = { version: 'fake 1.0', render: async () => ({ ok: false, code: 1, timedOut: false, log: 'not used', seconds: 0 }) };
 const runs = path.join(tmp, 'runs'); fs.mkdirSync(runs);
 const director = createDirector({ runs, project: null, renderer, starter });
-const web = createHttp({ director, root: ROOT, publicDir: path.join(ROOT, 'public'), vorkVersion: 'fake 1.0', model: 'none', port: 0 });
+const web = createHttp({ director, root: ROOT, publicDir: path.join(ROOT, 'dist'), vorkVersion: 'fake 1.0', model: 'none', port: 0 });
 await new Promise<void>((ok) => web.server.listen(0, '127.0.0.1', ok));
 web.port = (web.server.address() as AddressInfo).port;
 const BASE = `http://127.0.0.1:${web.port}`;

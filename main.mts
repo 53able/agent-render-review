@@ -10,9 +10,10 @@ import { createDirector } from './src/director.mts';
 import { createClaudeProposer } from './src/proposer.mts';
 import { createHttp } from './src/http.mts';
 import { setupLogging, shutdownLogging, log, errFields } from './src/log.mts';
+import { distProblem } from './src/build-id.mts';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const PUBLIC = path.join(ROOT, 'public');
+const PUBLIC = path.join(ROOT, 'dist');
 
 export async function main(argv: string[]) {
   const arg = (name: string): string | undefined => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
@@ -24,7 +25,16 @@ export async function main(argv: string[]) {
   // Checked before mkdir, on the real path of the nearest existing ancestor.
   // realpathSync.native returns the on-disk letter case, so PUBLIC/x is caught on case-insensitive file systems.
   const realish = (p: string): string => { let probe = p; while (!fs.existsSync(probe)) probe = path.dirname(probe); return path.join(fs.realpathSync.native(probe), path.relative(probe, p)); };
-  const runsReal = realish(RUNS), publicReal = fs.realpathSync.native(PUBLIC);
+  // A missing or stale build would serve no UI or an old one. RENDER_DIRECTOR_DEV=1 (vite dev serves the UI) skips this.
+  if (process.env.RENDER_DIRECTOR_DEV === '1') {
+    console.error('build check skipped (RENDER_DIRECTOR_DEV)');
+    if (!fs.existsSync(path.join(PUBLIC, 'index.html'))) console.error(`${PUBLIC}/index.html is missing: the UI is served by vite dev (\`npm run dev\`)`);
+  } else {
+    const problem = distProblem(ROOT);
+    if (problem) { console.error(`refusing to start: ${problem}`); process.exit(2); }
+  }
+  // realish, not realpathSync: PUBLIC may not exist (DEV, or between the two renames of a rebuild).
+  const runsReal = realish(RUNS), publicReal = realish(PUBLIC);
   if (runsReal === publicReal || runsReal.startsWith(publicReal + path.sep)) { console.error(`refusing to start: the runs folder ${RUNS} is inside ${PUBLIC}, which is served without a session`); process.exit(2); }
   fs.mkdirSync(RUNS, { recursive: true });
   const LOCK = path.join(RUNS, 'lock');

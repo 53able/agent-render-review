@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RenderSummary } from './src/contract.mts';
 import { resolveInside } from './src/policy.mts';
+import { distProblem } from './src/build-id.mts';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -33,17 +34,27 @@ async function director() {
   if (conn && (await ping(conn))) return conn;
   const existing = readServerFile();
   if (existing && existing.project === PROJECT && (await ping(existing))) return (conn = existing);
+  // The same build check as main.mts, before spawning, so the agent gets the instructions at once.
+  if (process.env.RENDER_DIRECTOR_DEV !== '1') { const problem = distProblem(ROOT); if (problem) throw new Error(`Director cannot start: ${problem}`); }
   log('starting Director for', PROJECT);
   fs.mkdirSync(path.dirname(SERVER_FILE), { recursive: true });
-  const out = fs.openSync(path.join(PROJECT, '.vork', 'server.log'), 'a');
+  const LOG = path.join(PROJECT, '.vork', 'server.log');
+  const out = fs.openSync(LOG, 'a');
   const child = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--project', PROJECT], { detached: true, stdio: ['ignore', out, out] });
+  fs.closeSync(out);
+  let exitCode: number | null = null;
+  child.on('exit', (code) => { exitCode = code; });
   child.unref();
+  const logTail = () => { try { return fs.readFileSync(LOG, 'utf8').trimEnd().split('\n').slice(-20).join('\n'); } catch { return ''; } };
   for (let t = 0; t < 60; t++) {
     await new Promise((r) => setTimeout(r, 250));
+    // 2: Director refused to start (missing or stale build, runs folder inside dist). 3: another session's Director
+    // holds the lock, which is normal: keep waiting for its server.json. Anything else: wait, then report the log.
+    if (exitCode === 2) throw new Error(`Director refused to start (exit 2). ${LOG} ends with:\n${logTail()}`);
     const s = readServerFile(); // our child, or another session's Director that won the lock
     if (s && s.project === PROJECT && (await ping(s))) return (conn = s);
   }
-  throw new Error(`Director did not start; see ${path.join(PROJECT, '.vork', 'server.log')}`);
+  throw new Error(`Director did not start; see ${LOG}. It ends with:\n${logTail()}`);
 }
 
 async function call(method: string, route: string, body?: unknown) {

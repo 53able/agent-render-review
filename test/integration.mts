@@ -374,13 +374,13 @@ await check('#2 inherited keys (toString, constructor, __proto__) are not valid 
   }
 });
 
-await check('#6 static serving cannot reach server.json or state.json outside public/', async () => {
+await check('#6 static serving cannot reach server.json or state.json outside dist/', async () => {
   const http = await import('node:http');
-  const get = (rawPath: string) => new Promise<{ status: number; body: string }>((ok, bad) => {
+  const get = (rawPath: string) => new Promise<{ status: number; body: string; type?: string }>((ok, bad) => {
     const u = new URL(BASE);
-    http.get({ host: u.hostname, port: u.port, path: rawPath, headers: { host: u.host } }, (r) => { let b = ''; r.on('data', (d) => { b += d; }); r.on('end', () => ok({ status: r.statusCode!, body: b })); }).on('error', bad);
+    http.get({ host: u.hostname, port: u.port, path: rawPath, headers: { host: u.host } }, (r) => { let b = ''; r.on('data', (d) => { b += d; }); r.on('end', () => ok({ status: r.statusCode!, body: b, type: r.headers['content-type'] })); }).on('error', bad);
   });
-  const rel = path.relative(path.join(ROOT, 'public'), path.join(PROJECT, '.vork')).split(path.sep);
+  const rel = path.relative(path.join(ROOT, 'dist'), path.join(PROJECT, '.vork')).split(path.sep);
   for (const file of ['server.json', 'state.json', 'config.json']) {
     for (const sep of ['%2F', '%5C']) {
       const r = await get(`/${[...rel, file].join(sep)}`);
@@ -394,9 +394,12 @@ await check('#6 static serving cannot reach server.json or state.json outside pu
     .filter((u) => !/^data:/i.test(u) && new URL(u, BASE).origin === new URL(BASE).origin);
   assert.ok(refs.length >= 2, `index.html references its script and stylesheet: ${JSON.stringify(refs)}`);
   for (const u of refs) assert.equal((await get(new URL(u, BASE).pathname)).status, 200, `normal static file ${u} still served`);
+  const scripts = refs.filter((u) => /^\/assets\/[^/]+\.js$/.test(new URL(u, BASE).pathname));
+  assert.ok(scripts.length >= 1, `index.html references /assets/*.js: ${JSON.stringify(refs)}`);
+  for (const u of scripts) assert.match((await get(new URL(u, BASE).pathname)).type ?? '', /^text\/javascript/, `${u} content-type`);
 });
 
-await check('#11 /runs/ does not follow a symlink out of .vork; a runs folder inside public/ is refused', async () => {
+await check('#11 /runs/ does not follow a symlink out of .vork; a runs folder inside dist/ is refused', async () => {
   const link = path.join(PROJECT, '.vork', 'v001', 'page-previs.png');
   assert.ok(!fs.existsSync(link), 'test needs an unused render name');
   fs.symlinkSync('../server.json', link);
@@ -406,9 +409,9 @@ await check('#11 /runs/ does not follow a symlink out of .vork; a runs folder in
     assert.equal(r.status, 404); assert.doesNotMatch(body, /agentToken/);
   } finally { fs.rmSync(link); }
   const { spawnSync } = await import('node:child_process');
-  // The upper-case spelling only names public/ on a case-insensitive file system; there it must be refused too.
-  const caseInsensitive = fs.existsSync(path.join(ROOT, 'PUBLIC'));
-  for (const dir of ['public', ...(caseInsensitive ? ['PUBLIC', 'Public'] : [])]) {
+  // The upper-case spelling only names dist/ on a case-insensitive file system; there it must be refused too.
+  const caseInsensitive = fs.existsSync(path.join(ROOT, 'DIST'));
+  for (const dir of ['dist', ...(caseInsensitive ? ['DIST', 'Dist'] : [])]) {
     const inside = path.join(ROOT, dir, `runs-${process.pid}`);
     try {
       const p = spawnSync(process.execPath, [path.join(ROOT, 'server.mts'), '--port', '0'], { env: { ...process.env, RENDER_DIRECTOR_NO_OPEN: '1', RENDER_DIRECTOR_RUNS: inside }, encoding: 'utf8', timeout: 20000 });
@@ -430,9 +433,9 @@ await check('#19 /runs/ does not serve a hard link (to server.json); normal rend
   assert.equal((await fetch(`${BASE}/runs/${proposed}/draft.png`, { headers: { cookie: uiCookie } })).status, 200);
 });
 
-await check('#19 a FIFO under /runs/ or public/ gets 404 and does not block the server', async () => {
+await check('#19 a FIFO under /runs/ or dist/ gets 404 and does not block the server', async () => {
   const { execFileSync } = await import('node:child_process');
-  const fifos = [path.join(PROJECT, '.vork', 'v001', 'page-previs.png'), path.join(ROOT, 'public', `int-${process.pid}.js`)];
+  const fifos = [path.join(PROJECT, '.vork', 'v001', 'page-previs.png'), path.join(ROOT, 'dist', `int-${process.pid}.js`)];
   for (const f of fifos) execFileSync('mkfifo', [f]);
   try {
     for (const url of [`${BASE}/runs/v001/page-previs.png`, `${BASE}/int-${process.pid}.js`]) {
@@ -443,8 +446,8 @@ await check('#19 a FIFO under /runs/ or public/ gets 404 and does not block the 
 });
 
 await check('#10 a static .json file is served as its contents, not as a serialized Buffer', async () => {
-  // public/ holds no .json file of its own (#22), so the check places one for the duration of the test.
-  const name = `int-${process.pid}.json`; const file = path.join(ROOT, 'public', name);
+  // dist/ holds no .json file of its own (#22), so the check places one for the duration of the test.
+  const name = `int-${process.pid}.json`; const file = path.join(ROOT, 'dist', name);
   fs.writeFileSync(file, '{"a":[1,2]}\n');
   try {
     const r = await fetch(`${BASE}/${name}`);
@@ -455,6 +458,16 @@ await check('#10 a static .json file is served as its contents, not as a seriali
 
 await check('#22 the type-check config is not served', async () => {
   for (const name of ['tsconfig.json', 'tsconfig.public.json']) assert.equal((await fetch(`${BASE}/${name}`)).status, 404, name);
+});
+
+// After #19 and #10 have removed their temporary files: what the build put in dist/ is all that is served.
+await check('dist/ holds only index.html and assets/*.js, assets/*.css', async () => {
+  const DIST = path.join(ROOT, 'dist');
+  const files = fs.readdirSync(DIST, { recursive: true, withFileTypes: true }).filter((e) => !e.isDirectory())
+    .map((e) => path.relative(DIST, path.join(e.parentPath, e.name)).split(path.sep).join('/'));
+  assert.ok(files.includes('index.html'), JSON.stringify(files));
+  assert.ok(files.some((f) => /^assets\/[^/]+\.js$/.test(f)) && files.some((f) => /^assets\/[^/]+\.css$/.test(f)), JSON.stringify(files));
+  for (const f of files) assert.match(f, /^(index\.html|assets\/[^/]+\.(js|css))$/, f);
 });
 
 await check('#8 propose refuses unnamed and "#"-named nodes before rendering; edit needs a string node', async () => {
