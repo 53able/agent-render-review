@@ -10,6 +10,7 @@ import type { Profile, Scene, RenderInfo, Version, PagePreviewOk } from './polic
 import { Refusal } from './director.mts';
 import type { Director, Job } from './director.mts';
 import { pagePreview } from './preview.mts';
+import { log, errFields, withRequest } from './log.mts';
 import type {
   RenderSummary, AgentStatusResponse, AgentSceneResponse, AgentProposeResponse, AgentRenderResponse, AgentFeedbackResponse, AdoptionRequestResponse,
   OpenTabResponse, AgentErrorResponse,
@@ -41,6 +42,21 @@ export function recordedHashes(getV: (id: string) => Version | undefined, pathna
   return h ? [h] : null;
 }
 
+// The /api/ paths logged as they are; any other /api/ path is logged as /api/other.
+const API_ROUTES = new Set([
+  '/api/agent/status', '/api/agent/open-tab', '/api/agent/scene', '/api/agent/propose', '/api/agent/render', '/api/agent/feedback', '/api/agent/adoption-request',
+  '/api/pair', '/api/state', '/api/render', '/api/final/plan', '/api/propose', '/api/feedback', '/api/decide', '/api/checkout',
+  '/api/adopt/plan', '/api/adopt/existing', '/api/adopt/reject', '/api/adopt', '/api/preview', '/api/edit',
+]);
+/** The route of a path as http.request logs it: never the raw path, which can hold ids, file names or anything a client sent. */
+export function routeOf(pathname: string): string {
+  if (pathname.startsWith('/runs/')) return '/runs/*';
+  if (/^\/api\/jobs\/[^/]+$/.test(pathname)) return '/api/jobs/:id';
+  if (/^\/api\/jobs\/[^/]+\/cancel$/.test(pathname)) return '/api/jobs/:id/cancel';
+  if (pathname.startsWith('/api/')) return API_ROUTES.has(pathname) ? pathname : '/api/other';
+  return '/static';
+}
+
 export interface HttpOptions {
   director: Director;
   /** The folder of the app (paths in a final plan are shown relative to it in standalone mode). */
@@ -57,6 +73,7 @@ export interface HttpOptions {
 export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersion: VORK_VERSION, model: MODEL, port }: HttpOptions) {
   const { state, readConfig, audit, getV, sceneOf, hashScene, jobs, adoptionJobs, mode: MODE, project: PROJECT, runs: RUNS } = director;
   let PORT = port;
+  const L = log('http');
   const publicJob = (j: Job) => ({ id: j.id, kind: j.kind, versionId: j.versionId, status: j.status, steps: j.steps, elapsed: Date.now() - j.started, result: j.result, error: j.error });
 
   // ---------- http ----------
@@ -118,17 +135,20 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         const cmd: unknown = custom.trimStart().startsWith('[') ? JSON.parse(custom) : [custom];
         if (!Array.isArray(cmd) || !cmd.length || !cmd.every((x) => typeof x === 'string' && x)) throw new Error('must be a non-empty array of strings');
         opener = cmd;
-      } catch (e: any) { console.error(`ignoring RENDER_DIRECTOR_BROWSER: ${e.message}`); }
+      // No message: a JSON parse error quotes the value.
+      } catch (e) { L.warn('config.invalid', 'Ignoring RENDER_DIRECTOR_BROWSER', { source: 'RENDER_DIRECTOR_BROWSER', errorType: errFields(e, { message: false }).errorType }); }
     }
     // RENDER_DIRECTOR_BROWSER_STDIN=1: the link goes to the command's standard input (one line) instead of its last
     // argument, so a long-running command does not show it to ps for as long as it runs (#44).
     const viaStdin = Boolean(custom) && process.env.RENDER_DIRECTOR_BROWSER_STDIN === '1';
+    // Only opener[0] and the code are logged: the Error's own spawnargs (and the stdin text) hold the link.
+    const failed = (e: unknown) => L.warn('browser.open_failed', 'Could not open the review tab', { opener: opener[0], code: (e as NodeJS.ErrnoException)?.code ?? null });
     try {
       const child = spawn(opener[0], viaStdin ? opener.slice(1) : [...opener.slice(1), link], { detached: true, stdio: [viaStdin ? 'pipe' : 'ignore', 'ignore', 'ignore'] });
-      child.on('error', (e) => console.error(`could not open the review tab with ${opener[0]}: ${e.message}`));
+      child.on('error', failed);
       if (viaStdin) { child.stdin!.on('error', () => {}); child.stdin!.end(`${link}\n`); }
       child.unref(); return true;
-    } catch { return false; }
+    } catch (e) { failed(e); return false; }
   }
   const cookie = (req: http.IncomingMessage, name: string): string | undefined => (req.headers.cookie || '').split(';').map((s) => s.trim().split('=')).find(([k]) => k === name)?.[1];
   const tokenEq = (a: unknown, b: string): boolean => typeof a === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -192,7 +212,27 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
     return send(res, 404, { error: 'unknown agent endpoint' });
   }
 
-  const server = http.createServer(async (req, res) => {
+  // One http.request per request, from whichever of finish and close comes first. Listeners of res do not see the
+  // request's context, so reqId, method and route are taken from this closure.
+  const server = http.createServer((req, res) => {
+    const reqId = crypto.randomUUID().slice(0, 8); const t0 = Date.now(); const method = req.method || '';
+    const route = routeOf(new URL(req.url!, 'http://x').pathname);
+    const rctx: { error?: unknown } = {};
+    let logged = false;
+    const record = (aborted: boolean) => {
+      if (logged) return; logged = true;
+      const status = !aborted || res.headersSent ? res.statusCode : null;
+      const props = { reqId, method, route, status, ms: Date.now() - t0, ...(aborted ? { aborted: true } : {}), ...(rctx.error !== undefined ? errFields(rctx.error) : {}) };
+      if (status !== null && status >= 500) L.error('http.request', 'HTTP request failed', props);
+      else if (method === 'GET' && status !== null && status < 400) L.debug('http.request', 'HTTP request', props);
+      else L.info('http.request', 'HTTP request', props);
+    };
+    res.on('finish', () => record(false));
+    res.on('close', () => record(!res.writableFinished));
+    return withRequest(reqId, () => handle(req, res, rctx));
+  });
+
+  async function handle(req: http.IncomingMessage, res: http.ServerResponse, rctx: { error?: unknown }): Promise<void> {
     const url = new URL(req.url!, 'http://x');
     // Local-only guard: reject other Host names (DNS rebinding) and cross-site or simple-request POSTs (CSRF).
     const okHosts = [`127.0.0.1:${PORT}`, `localhost:${PORT}`];
@@ -349,7 +389,10 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         return send(res, 200, data, MIME[path.extname(real)] || 'application/octet-stream');
       } finally { fs.closeSync(fd); }
     } catch (e: any) {
-      if (e instanceof Refusal) return send(res, REFUSAL_STATUS[e.kind], { error: e.message, ...e.extra } satisfies AgentErrorResponse);
+      if (e instanceof Refusal) {
+        if (e.kind === 'failed') rctx.error = e;
+        return send(res, REFUSAL_STATUS[e.kind], { error: e.message, ...e.extra } satisfies AgentErrorResponse);
+      }
       if (e instanceof BadRequest) return send(res, 400, { error: e.message });
       if (e instanceof PayloadTooLarge) {
         const reply = () => { if (!res.headersSent && !res.destroyed) send(res, 413, { error: `request body is larger than ${MAX_BODY / 1e6} MB` }); };
@@ -364,9 +407,9 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         return req.readableEnded ? reply() : void req.once('end', reply);
       }
       if (res.destroyed) return; // client went away mid-body
-      console.error(e); return send(res, 500, { error: 'internal error' });
+      rctx.error = e; return send(res, 500, { error: 'internal error' });
     }
-  });
+  }
 
   return {
     server, agentToken: AGENT_TOKEN, openPairing, rotatePair,

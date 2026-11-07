@@ -94,6 +94,12 @@ export function withJob<T>(job: { id: string; kind: string; versionId: string },
   return withContext({ jobId: job.id, kind: job.kind, versionId: job.versionId }, fn);
 }
 
+/** Runs fn with reqId on every event it logs, across awaits, and on the jobs it starts (#79). */
+export function withRequest<T>(reqId: string, fn: () => T): T {
+  if (!active) return fn();
+  return withContext({ reqId }, fn);
+}
+
 export interface ErrFields { errorType: string; error?: string; stack?: string }
 
 /**
