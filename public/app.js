@@ -408,7 +408,9 @@ function trackJob(job, onEnd) {
   let lastCount = 0;
   const tick = async () => {
     /** @type {Job | null} */
-    const j = await api(`/api/jobs/${job.id}`).catch(() => null); if (!j) return;
+    // 'no job': Director drops finished jobs after a while (#32); treat it as ended instead of polling forever.
+    /** @type {Job | null} */
+    const j = await api(`/api/jobs/${job.id}`).catch((e) => (/** @type {Error} */ (e).message === 'no job' ? { ...job, status: 'gone', steps: [], elapsed: 0, error: 'the job is no longer tracked by Director' } : null)); if (!j) return;
     $('#jobSteps').innerHTML = j.steps.map((s) => `<li class="${s.status}"><span class="ic" aria-hidden="true"></span><span>${esc(s.label)}</span><span class="t">${(s.t / 1000).toFixed(1)}s</span>${s.detail ? `<pre>${esc(s.detail)}</pre>` : ''}</li>`).join('');
     $('#jobElapsed').textContent = `elapsed ${(j.elapsed / 1000).toFixed(0)}s (no ETA: agent and GPU time vary)`;
     if (j.steps.length !== lastCount) { lastCount = j.steps.length; say(j.steps.at(-1)?.label || ''); }

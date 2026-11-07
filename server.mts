@@ -409,10 +409,16 @@ async function main() {
   }
 
   // ---------- jobs (cancellable, observable steps) ----------
+  // Jobs the UI polls by id. A finished job is kept JOB_TTL after its last step so the UI can read the result,
+  // then dropped (#32); /api/jobs/:id then answers 404. Agent API jobs are not listed: nobody can poll them.
   const jobs = new Map<string, Job>();
-  const newJob = (kind: string, versionId: string) => {
-    const job: Job = { id: crypto.randomUUID(), kind, versionId, status: 'running', steps: [], started: Date.now(), result: null, error: null, child: null };
-    jobs.set(job.id, job); return job;
+  const JOB_TTL = 10 * 60_000;
+  const newJob = (kind: string, versionId: string, { listed = true } = {}) => {
+    const now = Date.now();
+    for (const [id, j] of jobs) if (j.status !== 'running' && j.started + (j.steps.at(-1)?.t ?? 0) < now - JOB_TTL) jobs.delete(id);
+    const job: Job = { id: crypto.randomUUID(), kind, versionId, status: 'running', steps: [], started: now, result: null, error: null, child: null };
+    if (listed) jobs.set(job.id, job);
+    return job;
   };
   const step = (job: Job, label: string, status: JobStep['status'] = 'running', detail: string | null | undefined = null) => {
     const prev = job.steps.at(-1); if (prev && prev.status === 'running') prev.status = 'done';
@@ -602,6 +608,7 @@ ${VORK_HELP}`;
   const issueTicket = (data: TicketData) => {
     // A new adoption plan replaces the older ones for the same request, so two tickets cannot both adopt it.
     if (data.kind === 'adopt') for (const [id, t] of tickets) if (t.kind === 'adopt' && t.requestId === data.requestId) tickets.delete(id);
+    for (const [id, t] of tickets) if (t.expires < Date.now()) tickets.delete(id); // unused tickets are not kept past expiry (#32)
     const id = crypto.randomUUID(); tickets.set(id, { ...data, expires: Date.now() + 10 * 60_000 }); return id;
   };
   // Adoption requests whose adopt job is running. Kept in memory only: a job does not survive a restart,
@@ -750,7 +757,7 @@ ${VORK_HELP}`;
       if (b.responds_to != null && !Number.isInteger(b.responds_to)) return send(res, 400, { error: 'responds_to must be an integer' });
       const assumptions: string[] = (b.assumptions as string[] | null | undefined) ?? [];
       const respondsTo = (b.responds_to as number | null | undefined) ?? null;
-      const job = newJob('agent-propose', baseId!);
+      const job = newJob('agent-propose', baseId!, { listed: false });
       const check = await validateScene(job, b.scene);
       if (!check.ok) { audit('agent_proposal_rejected', { kind: check.kind, base: baseId }); return send(res, 422, { error: check.kind === 'blocked' ? 'policy' : 'vork rejected the scene', blockers: check.policy?.blockers || [], log: check.log || null, version: null }); }
       // The human may have discarded the base during the validation render.
@@ -765,7 +772,7 @@ ${VORK_HELP}`;
       if (!isProfile(profile)) return send(res, 400, { error: 'profile must be previs, draft or final' });
       if (!v.renders[profile]) {
         if (profile === 'final') return send(res, 403, { error: 'final renders need human approval in Director' });
-        const r = await renderVersion(newJob('agent-render', v.id), v, profile);
+        const r = await renderVersion(newJob('agent-render', v.id, { listed: false }), v, profile);
         if (!r.ok) return send(res, 500, { error: 'render failed', log: r.log });
       }
       return send(res, 200, { version: v.id, status: v.status, render: renderSummary(v.renders[profile]) });
