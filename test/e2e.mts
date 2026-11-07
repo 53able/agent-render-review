@@ -162,7 +162,7 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     assert.equal(await page.evaluate(() => document.activeElement?.id), 'h-fplan', 'focus moves to the plan');
     assert.equal(await page.locator('dialog[open]').count(), 0, 'no modal');
     await page.check('#compareToggle'); await page.waitForSelector('#wipe:not([hidden])');
-    await page.locator('#wipe').fill('20'); await page.uncheck('#compareToggle');
+    const thumb = page.locator('#wipe [role=slider]'); await thumb.press('Home'); await thumb.press('PageUp'); await thumb.press('PageUp'); assert.equal(await thumb.getAttribute('aria-valuenow'), '20'); await page.uncheck('#compareToggle');
     assert.equal(await page.locator('#finalPlanBox').isVisible(), true, 'the plan stays open while comparing');
     await page.keyboard.press('Escape'); // focus is not in the plan: Escape there only
     await page.focus('#finalApprove'); await page.keyboard.press('Escape');
@@ -264,7 +264,7 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     assert.equal(await page.locator('#headBtn').count(), 0, 'HEAD needs no Make HEAD');
     await page.click(`button[data-id="${head}"]`); await page.click('#headBtn');
     await page.waitForFunction((h) => document.querySelector('.headmark')?.closest('button')?.getAttribute('data-id') === h, head, { timeout: 5000 });
-    await page.click('#auditbox summary, .auditbox summary');
+    await page.click('#auditbox summary, .auditbox summary, #auditbox [aria-expanded]');
     assert.match(await page.textContent('#audit') as string, /checkout v001/);
   });
   await check('#53 standalone: when Director stops, the page says so instead of showing stale data silently', async () => {
@@ -522,28 +522,28 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     assert.equal(await page.locator('#review tr.unclaimed').count(), 0, 'every added bird is claimed');
   });
   await check('#37 the added nodes collapse into one row that stays open across the 2.5 s refresh', async () => {
-    const summary = page.locator('#review details[data-group] summary').first();
+    const summary = page.locator('#review [data-group] [aria-expanded]').first();
     assert.match(await summary.textContent() as string, new RegExp(`^${BIRDS} mesh nodes added: b0 … b${BIRDS - 1} \\(${BIRDS}\\)`));
     await summary.click();
-    await page.waitForFunction((n) => document.querySelectorAll('#review details[data-group] tbody tr').length === n, BIRDS, { timeout: 5000 });
+    await page.waitForFunction((n) => document.querySelectorAll('#review [data-group] tbody tr').length === n, BIRDS, { timeout: 5000 });
     // a new agent version changes the state signature, so the poll re-renders the review panel
     await agent('POST', '/api/agent/adoption-request', { version: flock, slug: 'flock', reason: 'refresh' });
     await page.waitForSelector('#adoptBox:not([hidden])', { timeout: 10000 });
-    assert.equal(await page.locator('#review details[data-group][open]').count(), 1);
+    assert.equal(await page.locator('#review [data-group][data-state=open]').count(), 1);
   });
   await check('#35 the OBJECTS list shows at most 200 rows, filters by name, and a selection updates its row', async () => {
     assert.equal(await page.locator('#objectList li').count(), 200);
     assert.match(await page.textContent('#objectMore') as string, /more — type to filter/);
     await page.fill('#objectFilter', 'b39'); await sleep(100);
     assert.deepEqual(await page.locator('#objectList li').evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.name)), ['b39', 'b390', 'b391', 'b392', 'b393', 'b394', 'b395', 'b396', 'b397', 'b398', 'b399']);
-    await page.locator('#objectList li[data-name="b391"] input').check();
+    await page.locator('#objectList li[data-name="b391"] [role=checkbox]').check();
     assert.match(await page.textContent('#selCount') as string, /b391/);
     assert.equal(await page.locator('#objectList label.sel').count(), 1);
     await page.fill('#objectFilter', ''); await sleep(100);
     // #46: the selected object is past the first 200, so it is listed first
     assert.equal(await page.locator('#objectList li').first().getAttribute('data-name'), 'b391');
     assert.equal(await page.locator('#objectList li[data-name="b391"] label.sel').count(), 1);
-    await page.locator('#objectList li[data-name="b391"] input').uncheck(); await sleep(100);
+    await page.locator('#objectList li[data-name="b391"] [role=checkbox]').uncheck(); await sleep(100);
     assert.equal(await page.locator('#objectList li').first().getAttribute('data-name'), 'b391', 'a deselected row stays where it was');
     assert.equal(await page.locator('#objectList label.sel').count(), 0);
   });
@@ -555,12 +555,12 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     await page.waitForSelector('#notice:not([hidden])', { timeout: 10000 }); await page.click('#notice button');
     await page.waitForSelector(`#canvas[data-ready="${recolor}:draft"]`, { timeout: 60000 });
     // #52: built on an unaccepted proposal, so by default it shows what accepting it changes: HEAD → this version
-    assert.equal(await page.locator('#review input[name=diffBase][value=head]').isChecked(), true);
+    assert.equal(await page.locator('#review [role=radio][value=head]').isChecked(), true);
     assert.match(await page.textContent('#review') as string, new RegExp(`Includes the changes of ${flock}`));
-    assert.match(await page.locator('#review details[data-group] summary').first().textContent() as string, new RegExp(`^${BIRDS} mesh nodes added`));
+    assert.match(await page.locator('#review [data-group] [aria-expanded]').first().textContent() as string, new RegExp(`^${BIRDS} mesh nodes added`));
     assert.equal(await page.locator('#review tr.unclaimed').count(), 0, "the flock's own claim covers its birds");
     assert.match(await page.textContent('#compareBase') as string, /^HEAD/);
-    await page.check('#review input[name=diffBase][value=parent]');
+    await page.check('#review [role=radio][value=parent]');
     assert.match(await page.textContent('#review') as string, new RegExp(`Built on ${flock}, which is proposed`));
     assert.equal(await page.textContent('#compareBase'), 'parent');
     assert.equal(await page.locator('#review .difftable > tbody > tr:not(.group)').count(), 200);
