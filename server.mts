@@ -907,13 +907,18 @@ ${VORK_HELP}`;
       // static
       if (url.pathname === '/' || url.pathname === '/index.html')
         return send(res, 200, fs.readFileSync(path.join(PUBLIC, 'index.html')), MIME['.html']);
-      let file;
+      // Each route serves only its own root: render files from RUNS (session checked above), the app from PUBLIC.
+      let root, rel;
       if (url.pathname.startsWith('/runs/')) {
         if (!/^\/runs\/v\d{3}\/(previs|draft|final|page-previs|page-draft|page-final)\.(png|ids\.bin)$/.test(url.pathname)) return send(res, 404, 'not found', 'text/plain');
-        file = path.join(RUNS, url.pathname.slice(6));
-      } else file = path.join(PUBLIC, decodeURIComponent(url.pathname));
-      const real = path.resolve(file);
-      if (!(real.startsWith(PUBLIC + path.sep) || real.startsWith(RUNS + path.sep)) || !fs.existsSync(real) || !fs.statSync(real).isFile())
+        root = RUNS; rel = url.pathname.slice(6);
+      } else {
+        try { rel = decodeURIComponent(url.pathname); } catch { return send(res, 400, 'bad path', 'text/plain'); }
+        root = PUBLIC;
+      }
+      if (rel.includes('\0') || rel.split(/[\\/]/).includes('..')) return send(res, 404, 'not found', 'text/plain');
+      const real = path.resolve(root, '.' + path.sep + rel);
+      if (!real.startsWith(root + path.sep) || !fs.existsSync(real) || !fs.statSync(real).isFile())
         return send(res, 404, 'not found', 'text/plain');
       return send(res, 200, fs.readFileSync(real), MIME[path.extname(real)] || 'application/octet-stream');
     } catch (e: any) {

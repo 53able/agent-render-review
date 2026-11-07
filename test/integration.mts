@@ -278,6 +278,23 @@ await check('#2 inherited keys (toString, constructor, __proto__) are not valid 
   }
 });
 
+await check('#6 static serving cannot reach server.json or state.json outside public/', async () => {
+  const http = await import('node:http');
+  const get = (rawPath: string) => new Promise<{ status: number; body: string }>((ok, bad) => {
+    const u = new URL(BASE);
+    http.get({ host: u.hostname, port: u.port, path: rawPath, headers: { host: u.host } }, (r) => { let b = ''; r.on('data', (d) => { b += d; }); r.on('end', () => ok({ status: r.statusCode!, body: b })); }).on('error', bad);
+  });
+  const rel = path.relative(path.join(ROOT, 'public'), path.join(PROJECT, '.vork')).split(path.sep);
+  for (const file of ['server.json', 'state.json', 'config.json']) {
+    for (const sep of ['%2F', '%5C']) {
+      const r = await get(`/${[...rel, file].join(sep)}`);
+      assert.notEqual(r.status, 200, `${file} via ${sep}`); assert.doesNotMatch(r.body, /agentToken|versions/);
+    }
+  }
+  assert.equal((await get('/%E0%A4%A')).status, 400, 'malformed escape');
+  assert.equal((await get('/app.js')).status, 200, 'normal static files still served');
+});
+
 await check('AC-10 report: fixture gives exact numbers; live project counts match', async () => {
   const fixture = [
     { t: '2026-01-01T10:00:00.000Z', event: 'init' }, { t: '2026-01-01T10:02:00.000Z', event: 'proposed' },
