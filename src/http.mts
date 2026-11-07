@@ -145,7 +145,10 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
     const base = v.parent ? sceneOf(v.parent) : null; const scene = sceneOf(v.id);
     const renders = Object.fromEntries(Object.entries(v.renders).map(([k, r]) => [k, r && presentRender(v.id, r)]));
     const pagePreviews = v.pagePreviews && Object.fromEntries(Object.entries(v.pagePreviews).map(([k, p]) => [k, presentPreview(v.id, p)]));
-    return { ...v, renders, pagePreviews, scene, diff: base ? diffScenes(base, scene) : [], hash: hashScene(v.id) };
+    // headDiff: what accepting this version would change, when its parent is not HEAD (#52). null otherwise.
+    const head = state.head;
+    const headDiff = v.parent && head && v.parent !== head && v.id !== head ? diffScenes(sceneOf(head), scene) : null;
+    return { ...v, renders, pagePreviews, scene, diff: base ? diffScenes(base, scene) : [], headDiff, hash: hashScene(v.id) };
   };
   // file: the absolute path is made here for mcp.mts, which reads the image from it; state.json keeps no path (#42).
   const renderSummary = (id: string, r: RenderInfo | undefined): RenderSummary | undefined => r && { profile: r.profile, seconds: r.seconds, width: r.width, height: r.height, file: director.renderFile(id, r.profile), exposure: r.exposure, objects: r.objects, warnings: r.warnings };

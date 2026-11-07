@@ -312,7 +312,7 @@ const PAGE_PREVIEW: Spec = { ok: 'boolean', matched: 'number', image: 'string', 
 const VERSION: Spec = {
   id: 'string', parent: 'string|null', origin: 'string', instruction: 'string|null', proposal: orNull(PROPOSAL), status: 'string', created: 'string',
   renders: { 'previs?': RENDER_INFO, 'draft?': RENDER_INFO, 'final?': RENDER_INFO }, 'pagePreviews?': { 'previs?': PAGE_PREVIEW, 'draft?': PAGE_PREVIEW, 'final?': PAGE_PREVIEW },
-  scene: 'object', diff: DIFF, hash: 'string',
+  scene: 'object', diff: DIFF, headDiff: orNull(DIFF), hash: 'string',
 };
 const EVENT_BODIES: Record<string, Record<string, Spec>> = {
   feedback: { version: 'string', versionStatus: 'string', selection: ['string'], comment: 'string' },

@@ -8,7 +8,7 @@ import { isWildcard, checkClaims, groupDiff, nameRuns, describeNames, visibleObj
 /** @typedef {{ nodes: SceneNode[] }} Scene */
 /** @typedef {{ node: string, path: string, before?: unknown, after?: unknown }} Diff */
 /** @typedef {{ claimed_changes: { node: string, what: string, why: string }[], interpretation: string, assumptions: string[], policy: { flags: { level: string, msg: string }[] }, context: string[], via?: string, cost?: number }} Proposal */
-/** @typedef {{ id: string, parent?: string | null, status: string, origin: string, instruction?: string, hash: string, renders: Record<string, Render | undefined>, pagePreviews?: Record<string, PagePreview>, scene: Scene, proposal: Proposal, diff: Diff[] }} Version */
+/** @typedef {{ id: string, parent?: string | null, status: string, origin: string, instruction?: string, hash: string, renders: Record<string, Render | undefined>, pagePreviews?: Record<string, PagePreview>, scene: Scene, proposal: Proposal, diff: Diff[], headDiff: Diff[] | null }} Version */
 /** @typedef {{ seq: number, type: string, comment: string, selection: string[], decision: string, version: string, asset: string, node: string, field: string, request: string }} AgentEvent */
 /** @typedef {{ id: string, status: string, slug: string, version: string, reason: string, job?: string }} AdoptionRequest */
 /** @typedef {{ t: string, event: string, version?: string, instruction?: string }} AuditEntry */
@@ -18,7 +18,7 @@ import { isWildcard, checkClaims, groupDiff, nameRuns, describeNames, visibleObj
 /** @typedef {{ versionId: string, versionStatus: string, acceptsProposal?: boolean, hash: string, reason: string, writes: string[], overwrites?: boolean, existing: { bytes: number | null, modified: string | null, image: string | null } | null, needsFinalRender?: boolean, shows: string | null, image: string | null, expiresInSec: number, ticket: string }} AdoptPlan */
 /** @typedef {{ versionId: string, hash: string, profile: string, resolution: number[], output: string, overwrites?: boolean, reference: string, timeoutSec: number, expiresInSec: number, flags: { msg: string }[], ticket: string }} FinalPlan */
 /** @typedef {{ w: number, h: number, arr: Uint16Array, objects: Record<string, string> }} Ids */
-/** @typedef {{ data: Data, viewId: string, profile: string, selection: Set<string>, hover: string | null, compare: boolean, ids: Ids | null, img: HTMLImageElement, imgB: HTMLImageElement | null, lastResult: Job | null, sig?: string, onPage?: boolean, editing?: boolean, objKey?: string }} State */
+/** @typedef {{ data: Data, viewId: string, profile: string, selection: Set<string>, hover: string | null, compare: boolean, diffBase: Record<string, 'head' | 'parent'>, ids: Ids | null, img: HTMLImageElement, imgB: HTMLImageElement | null, lastResult: Job | null, sig?: string, onPage?: boolean, editing?: boolean, objKey?: string }} State */
 /** @typedef {[string, string, string, any, ...number[]]} QuickRow */
 
 /**
@@ -29,7 +29,7 @@ import { isWildcard, checkClaims, groupDiff, nameRuns, describeNames, visibleObj
  */
 const $ = (s) => /** @type {T} */ (document.querySelector(s));
 /** @type {State} */
-const S = { data: /** @type {Data} */ (/** @type {unknown} */ (null)), viewId: /** @type {string} */ (/** @type {unknown} */ (null)), profile: 'draft', selection: new Set(), hover: null, compare: false, ids: null, img: /** @type {HTMLImageElement} */ (/** @type {unknown} */ (null)), imgB: null, lastResult: null };
+const S = { data: /** @type {Data} */ (/** @type {unknown} */ (null)), viewId: /** @type {string} */ (/** @type {unknown} */ (null)), profile: 'draft', selection: new Set(), hover: null, compare: false, diffBase: {}, ids: null, img: /** @type {HTMLImageElement} */ (/** @type {unknown} */ (null)), imgB: null, lastResult: null };
 
 /**
  * @param {string} url
@@ -249,6 +249,17 @@ const /** @type {HTMLCanvasElement} */ cv = $('#canvas'), /** @type {HTMLCanvasE
  */
 const loadImg = (src) => new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = src; });
 
+/**
+ * What a version is compared with, in the diff and in the wipe (#52). When its parent is not HEAD, the human chooses
+ * between HEAD (what accepting it changes; the default for a proposal) and the parent (what this step changed).
+ * @param {Version} v
+ * @returns {{ id: string | null, kind: 'head' | 'parent', choice: boolean }}
+ */
+function baseOf(v) {
+  const choice = !!v.headDiff;
+  const kind = choice ? (S.diffBase[v.id] || (v.status === 'proposed' ? 'head' : 'parent')) : 'parent';
+  return { id: kind === 'head' ? S.data.head : v.parent || null, kind, choice };
+}
 let drawSeq = 0;
 /**
  * One line that says what the viewport shows: version, state, quality, what it is compared with, on page (#59).
@@ -257,11 +268,12 @@ let drawSeq = 0;
  * @param {Version | undefined} parent
  */
 function renderViewState(v, parent) {
-  const pr = parent?.renders[S.profile];
-  const noCompare = S.onPage ? 'not on page: the page shows one candidate' : !v.parent ? `${v.id} has no parent` : !pr ? `${v.parent} has no ${S.profile} render` : '';
+  const base = baseOf(v); const pr = parent?.renders[S.profile];
+  $('#compareBase').textContent = base.kind === 'head' ? `HEAD (${base.id})` : 'parent';
+  const noCompare = S.onPage ? 'not on page: the page shows one candidate' : !base.id ? `${v.id} has no parent` : !pr ? `${base.id} has no ${S.profile} render` : '';
   const box = /** @type {HTMLInputElement} */ ($('#compareToggle')); box.disabled = !!noCompare;
   $('#compareWhy').textContent = noCompare ? `(${noCompare})` : '';
-  const shown = S.onPage ? `${v.renders[S.profile] ? S.profile : 'draft'} on page ${S.data.config.pageUrl || '(no pageUrl)'}` : `${S.profile}${S.compare && !noCompare ? ` · wipe: ◀ ${v.parent} | ${v.id} ▶` : ''}`;
+  const shown = S.onPage ? `${v.renders[S.profile] ? S.profile : 'draft'} on page ${S.data.config.pageUrl || '(no pageUrl)'}` : `${S.profile}${S.compare && !noCompare ? ` · wipe: ◀ ${base.id} | ${v.id} ▶` : ''}`;
   $('#viewing').textContent = `Showing ${v.id} · ${v.status}${v.id === S.data.head ? ' · HEAD' : v.status === 'accepted' ? ' (not HEAD)' : ''} · ${shown} · scene ${v.hash}`;
 }
 /** @returns {Promise<void>} */
@@ -271,13 +283,13 @@ async function drawViewport() {
   const seq = ++drawSeq; const stale = () => seq !== drawSeq;
   const v = viewV(); const r = v.renders[S.profile];
   delete cv.dataset.ready; // clicks are ignored until this view's object ids are loaded
-  const p0 = /** @type {Version | undefined} */ (v.parent && V(v.parent));
-  renderViewState(v, p0);
+  const p = /** @type {Version | undefined} */ (V(/** @type {string} */ (baseOf(v).id)));
+  renderViewState(v, p);
   $('#empty').hidden = !!r;
   renderMeasure(r);
   if (!r) { ctx.clearRect(0, 0, cv.width, cv.height); octx.clearRect(0, 0, ov.width, ov.height); S.ids = null; return; }
   const img = await loadImg(r.image);
-  const p = /** @type {Version | undefined} */ (v.parent && V(v.parent)); const pr = p?.renders[S.profile];
+  const pr = p?.renders[S.profile];
   const imgB = S.compare && pr ? await loadImg(pr.image) : null;
   // ids is null for a render recorded before object ids were hashed: Director does not serve that file (#43).
   const buf = r.ids ? await (await fetch(r.ids)).arrayBuffer() : null;
@@ -332,7 +344,7 @@ function paint() {
     ctx.drawImage(S.imgB, 0, 0, x, cv.height, 0, 0, x, cv.height);
     ctx.fillStyle = '#3ee6f0'; ctx.fillRect(x - 1, 0, 2, cv.height);
     ctx.font = '600 14px system-ui'; ctx.fillStyle = '#fff';
-    ctx.fillText(`◀ ${viewV().parent}`, 10, 22); ctx.fillText(`${viewV().id} ▶`, cv.width - 70, 22);
+    ctx.fillText(`◀ ${baseOf(viewV()).id}`, 10, 22); ctx.fillText(`${viewV().id} ▶`, cv.width - 70, 22);
   }
   paintOverlay();
 }
@@ -592,6 +604,8 @@ function trackJob(job, onEnd) {
 }
 
 // ---------- review ----------
+/** @param {string} id @param {'head' | 'parent'} kind */
+function setBase(id, kind) { S.diffBase[id] = kind; renderReview(); drawViewport(); say(`Changes against ${kind === 'head' ? 'HEAD' : 'the parent'}`); }
 /** @param {unknown} v */
 function fmt(v) {
   if (v === undefined) return '<span class="hint">—</span>';
@@ -625,10 +639,13 @@ function renderReview() {
     return;
   }
   if (v.origin !== 'agent') { box.hidden = true; return; }
-  const p = v.proposal;
-  const { isClaimed, wildMatches, ghost } = checkClaims(p.claimed_changes, v.diff);
-  const typeOf = new Map([...(V(/** @type {string} */ (v.parent))?.scene.nodes || []), ...v.scene.nodes].map((n) => [n.name, n.type]));
-  const { groups: groupList, rest } = groupDiff(v.diff, typeOf);
+  const p = v.proposal; const base = baseOf(v); const diff = base.kind === 'head' ? /** @type {Diff[]} */ (v.headDiff) : v.diff;
+  // Against HEAD, the claims of the unaccepted versions in between count too: they describe changes this one carries.
+  const between = []; for (let a = V(/** @type {string} */ (v.parent)); base.kind === 'head' && a && a.id !== S.data.head && a.status !== 'accepted'; a = V(/** @type {string} */ (a.parent))) between.push(a);
+  const claims = [...p.claimed_changes, ...between.flatMap((a) => a.proposal?.claimed_changes || [])];
+  const { isClaimed, wildMatches, ghost } = checkClaims(claims, diff);
+  const typeOf = new Map([...(V(/** @type {string} */ (base.id))?.scene.nodes || []), ...v.scene.nodes].map((n) => [n.name, n.type]));
+  const { groups: groupList, rest } = groupDiff(diff, typeOf);
   /** @param {Diff} d */
   const row = (d) => `<tr class="${isClaimed(d) ? '' : 'unclaimed'}"><td>${esc(d.node)}${d.path ? '.' + esc(d.path) : ''}</td><td>${fmt(d.before)}</td><td>${fmt(d.after)}</td></tr>`;
   /** @param {Diff[]} ds */
@@ -638,13 +655,19 @@ function renderReview() {
     + rest.slice(0, CAP).map(row).join('')
     + (hidden.length ? `<tr class="group"><td colspan="3"><button type="button" class="ghost" id="moreDiff">Show remaining ${hidden.length} rows</button>${unclaimedNote(hidden)}</td></tr>` : '');
   // The poll re-renders this panel; keep what the human opened in the diff while it shows the same version.
-  const same = box.dataset.view === v.id;
+  const same = box.dataset.view === `${v.id}:${base.kind}`;
   const openGroups = same ? [...box.querySelectorAll('details[data-group]')].filter((el) => /** @type {HTMLDetailsElement} */ (el).open).map((el) => /** @type {HTMLElement} */ (el).dataset.group) : [];
   const shownMore = same && box.dataset.more === '1';
-  box.dataset.view = v.id; box.dataset.more = shownMore ? '1' : '';
+  box.dataset.view = `${v.id}:${base.kind}`; box.dataset.more = shownMore ? '1' : '';
   box.hidden = false;
   box.innerHTML = `
-    ${V(/** @type {string} */ (v.parent))?.status !== 'accepted' ? `<p class="flag">⚠ Built on ${esc(v.parent)}, which is ${esc(V(/** @type {string} */ (v.parent))?.status)}. Accepting this also accepts that version's changes (not shown in this diff).</p>` : ''}
+    ${base.choice ? `<div class="basepick" role="radiogroup" aria-label="Changes against">
+      <span>Changes against</span>
+      <label class="chk"><input type="radio" name="diffBase" value="head" ${base.kind === 'head' ? 'checked' : ''}> HEAD ${esc(S.data.head)} <span class="hint">(what accepting changes)</span></label>
+      <label class="chk"><input type="radio" name="diffBase" value="parent" ${base.kind === 'parent' ? 'checked' : ''}> parent ${esc(v.parent)} <span class="hint">(this step only)</span></label></div>
+      ${base.kind === 'head'
+        ? (between.length ? `<p class="hint">Includes the changes of ${between.map((a) => esc(a.id)).join(', ')} (${esc(V(/** @type {string} */ (v.parent))?.status)}), which accepting this also accepts; their claims count below.</p>` : '')
+        : `<p class="flag">⚠ Built on ${esc(v.parent)}, which is ${esc(V(/** @type {string} */ (v.parent))?.status)}. Accepting this also accepts that version's changes, not shown here. <button type="button" class="ghost" id="showHeadDiff">Show changes against HEAD</button></p>`}` : ''}
     <div><h3>Request</h3>${esc(v.instruction)}</div>
     <div><h3>Agent's reading</h3><p class="interp">${esc(p.interpretation)}</p>
       ${p.assumptions.length ? `<ul>${p.assumptions.map((a) => `<li>${esc(a)}</li>`).join('')}</ul>` : ''}</div>
@@ -657,6 +680,8 @@ function renderReview() {
     ${p.policy.flags.length ? `<div><h3>Needs attention</h3><ul>${p.policy.flags.map((f) => `<li class="flag">${f.level}: ${esc(f.msg)}</li>`).join('')}</ul></div>` : ''}
     <details><summary class="hint">Context that was sent</summary><pre class="hint" style="white-space:pre-wrap">${esc(p.context.join('\n\n') || 'scene only')}</pre></details>
     <p class="hint">${p.via === 'mcp' ? 'Proposed by your ADE agent via MCP' : `Agent cost ${p.cost ? '$' + p.cost.toFixed(3) : 'n/a'}`}. Judge the image, not the explanation.</p>`;
+  box.querySelectorAll('input[name=diffBase]').forEach((el) => el.addEventListener('change', () => setBase(v.id, /** @type {'head' | 'parent'} */ (/** @type {HTMLInputElement} */ (el).value))));
+  const toHead = box.querySelector('#showHeadDiff'); if (toHead) /** @type {HTMLButtonElement} */ (toHead).onclick = () => setBase(v.id, 'head');
   // rows inside a group or past the cap are built only when the human opens them
   box.querySelectorAll('details[data-group]').forEach((el) => el.addEventListener('toggle', () => {
     const tb = /** @type {HTMLElement} */ (el.querySelector('tbody'));

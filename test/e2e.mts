@@ -366,6 +366,15 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     recolor = r.version; assert.ok(recolor, JSON.stringify(r));
     await page.waitForSelector('#notice:not([hidden])', { timeout: 10000 }); await page.click('#notice button');
     await page.waitForSelector(`#canvas[data-ready="${recolor}:draft"]`, { timeout: 60000 });
+    // #52: built on an unaccepted proposal, so by default it shows what accepting it changes: HEAD → this version
+    assert.equal(await page.locator('#review input[name=diffBase][value=head]').isChecked(), true);
+    assert.match(await page.textContent('#review') as string, new RegExp(`Includes the changes of ${flock}`));
+    assert.match(await page.locator('#review details[data-group] summary').first().textContent() as string, new RegExp(`^${BIRDS} mesh nodes added`));
+    assert.equal(await page.locator('#review tr.unclaimed').count(), 0, "the flock's own claim covers its birds");
+    assert.match(await page.textContent('#compareBase') as string, /^HEAD/);
+    await page.check('#review input[name=diffBase][value=parent]');
+    assert.match(await page.textContent('#review') as string, new RegExp(`Built on ${flock}, which is proposed`));
+    assert.equal(await page.textContent('#compareBase'), 'parent');
     assert.equal(await page.locator('#review .difftable > tbody > tr:not(.group)').count(), 200);
     await page.click('#moreDiff');
     assert.equal(await page.locator('#review .difftable > tbody > tr:not(.group)').count(), BIRDS);

@@ -153,3 +153,5 @@ dialog h2 { font-size: 15px; text-transform: none; letter-spacing: 0; color: var
 .adoptimgs figure { margin: 0; display: grid; gap: 6px; align-content: start; }
 .adoptimgs figcaption { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .adoptimgs img { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 6px; background: #000; }
+.basepick { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; }
+.basepick > span { color: var(--muted); font-size: 12px; }
