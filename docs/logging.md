@@ -61,7 +61,7 @@ Director の診断ログを、1 行 1 イベントの JSON Lines にする設計
 | `director.stop` | info | `signal` | `main.mts` の `cleanup`（SIGINT / SIGTERM / SIGHUP） | #78 |
 | `director.fatal` | fatal | `origin` と `errFields` | `server.mts` の `main()` の catch、`uncaughtExceptionMonitor`、vork が見つからないとき | #78 |
 | `config.invalid` | warning | `file, errorType`（`config.json`）、`source, errorType`（環境変数） | `readConfig`、`RENDER_DIRECTOR_BROWSER` の解析、`RENDER_DIRECTOR_LOG_LEVEL` の検査 | #77, #78, #79 |
-| `http.request` | GET で 400 未満と 401 / 403 / 404 は debug、5xx は error、それ以外は info | `reqId, method, route, status, ms`。切断時は `aborted: true`。500 では `errFields` | `res` の `finish` と `close` のうち先に来たほうで 1 回だけ | #79 |
+| `http.request` | GET で 400 未満と 403 / 404 は debug、5xx は error、それ以外は info | `reqId, method, route, status, ms`。切断時は `aborted: true`。500 では `errFields` | `res` の `finish` と `close` のうち先に来たほうで 1 回だけ | #79 |
 | `browser.open_failed` | warning | `opener`（`opener[0]` だけ）, `code` | `openPairing` の spawn の `error` | #79 |
 | `audit` | info | `auditEvent` と許可リストの項目（第 6 節） | `audit()` の `state.json` への追記の後 | #80 |
 | `job.start` | info | `jobId, kind, versionId` | `src/director.mts` の `inJob`（`withJob` で包んだジョブ本体の入口）。背景ジョブは `runJob` が、`agentPropose` / `agentRender` は `newJob` の直後に通す。`newJob` では書かない（終わりの無い start を残さないため） | #81 |
@@ -70,7 +70,7 @@ Director の診断ログを、1 行 1 イベントの JSON Lines にする設計
 補足:
 
 - `route` は正規化した値です。`/runs/…` は `/runs/*`、`/api/jobs/<id>` は `/api/jobs/:id`、`/api/jobs/<id>/cancel` は `/api/jobs/:id/cancel`、既知の `/api/*` はそのまま、それ以外の `/api/*` は `/api/other`、静的ファイルは `/static`、`new URL` が解析できないリクエストターゲット（`//x:99999` など）は `/invalid`（応答は 400）です。生のパスとクエリは書きません。
-- GET の 401 / 403 / 404 を debug にするのは、Director の再起動後に開いたままのタブが古いセッションで `/api/state`（2.5 秒ごと）と `/api/jobs/:id`（2 秒ごと）を問い合わせ続け、info なら 1 タブで 1 日に数万行になり、ローテーションで本来のイベントを押し出すためです。
+- GET の 403 / 404 を debug にするのは、Director の再起動後に開いたままのタブが古いセッションで `/api/state`（2.5 秒ごと）と `/api/jobs/:id`（2 秒ごと）を問い合わせ続け、info なら 1 タブで 1 日に数万行になり、ローテーションで本来のイベントを押し出すためです。401（エージェント用トークンの誤り）は info のまま残します。
 - `job.end` の相関キーは job オブジェクトから明示的に書きます。`cancelJob` はキャンセル要求の context で動くので、ALS からは正しいキーが取れません。
 - `job.end.ms` は `clock` から計算します（#66）。
 - audit には `job_failed { jobId, kind, version, errorType?, exitCode?, timedOut? }` を足します。対象は `jobs` に載るジョブで、Refusal 以外の失敗に限ります。Refusal は `agent_proposal_rejected` や `agent_error` と重複し、UI の audit 一覧（直近 60 件）を押し流すためです。
@@ -101,16 +101,22 @@ LogTape は `configure()` しないと何も出力しません。設定したう
 | 2 | `getStreamSink` は非同期 dispose を持つ | `configureSync` に渡すと `ConfigError` になる | stderr sink は自前の同期関数 `(r) => process.stderr.write(fmt(r))` にする。dispose は持たせない | `sink.js:124`、`config.js:361-362` |
 | 3 | `getConsoleSink` は info を `console.info`（stdout）に出す | MCP の stdout と `server.log` を汚す | console sink は使わない | `sink.js:285,297` |
 | 4 | meta logger `['logtape','meta']` を設定しないと console sink が自動で付き、設定のたびに info の案内文を出す | stdout に `LogTape loggers are configured` が出る | meta logger を `lowestLevel: 'warning'` で stderr sink に必ず設定する | `config.js:378-380` |
-| 5 | file sink は 8KB たまるまで書かない | 終了直前のイベント（`director.stop`、`director.fatal`）が残らない | `@logtape/file` を使わず、自前の sink が 1 レコードごとに `appendFileSync` する（`fsync` はしない） | `filesink.base.js:357,432-434` |
+| 5 | file sink は 8KB たまるまで書かない | 終了直前のイベント（`director.stop`、`director.fatal`）が残らない | `@logtape/file` を使わず、自前の sink が 1 レコードごとに開いて書いて閉じる（`fsync` はしない） | `filesink.base.js:357,432-434` |
 | 6 | context は設定しないと使えない（`withContext` が meta に警告を出して素通りする） | 相関キーが付かない | `contextLocalStorage: new AsyncLocalStorage()` | `context.js:22-24` |
 | 7 | file sink はディレクトリを作らない | 初回起動で `ENOENT` | `logs/` を先に `mkdirSync({ recursive: true })` する（自前の sink も作らない） | `filesink.factory.node.js:12-14` |
 | 8 | JSON Lines の `properties: 'flatten'` はプロパティを最上位に展開し、同名のキーを上書きする | `message` などのプロパティで本来の `message` が消える | ラッパーが `message / level / logger / @timestamp` を `x_<key>` に改名する | `formatter.js:553-560` |
 | 9 | 不正なレベル文字列のまま設定すると、以降のログ呼び出しが `TypeError` を投げる | 環境変数の打ち間違いで Director が落ちる | `isLogLevel` で検査し、不正なら `info` に戻して `config.invalid` を書く | `level.js:66`（`compareLogLevel`） |
 | 10 | メッセージはテンプレートで、`{key}` がプロパティで置き換わる | 文に `{` があると意図しない値が入る | `msg` は固定文にし `{` を含めない。含んだ場合はラッパーが `{{` / `}}` にエスケープする | `logger.js:1189-1224` |
 
-ファイル形式は `getJsonLinesFormatter({ properties: 'flatten' })` です。ファイルへは `src/log.mts` の `fileSink` が書きます。1 レコードごとに `statSync` でいまの大きさを見て、次の行で `maxSize` を超えるなら `director.jsonl` → `.1` → `.2` → `.3` の順に名前を送ってから `appendFileSync` します。名前は `@logtape/file` と同じで、`logs/` のファイル数は最大 `maxFiles + 1` です。ファイルの記述子は持ちません。名前の変更は 1 つずつ `try` で包み、ファイルが消えていても（`ENOENT`）次の書き込みで新しい `director.jsonl` を作ります。書き込みは `O_NOFOLLOW` 付きで開きます。`director.jsonl` がシンボリックリンクに置き換えられていると `ELOOP` で失敗し、リンク先には書きません（`.vork/` はエージェントが書けるため。`/runs/` の配信と同じ検査）。書き込みの失敗は呼び出し元へ投げず、最初の 1 回だけ `log.write_failed` を stderr に書きます。
+ファイル形式は `getJsonLinesFormatter({ properties: 'flatten' })` です。ファイルへは `src/log.mts` の `fileSink` が書きます。1 レコードごとに `statSync` でいまの大きさを見て、次の行で `maxSize` を超えるなら `director.jsonl` → `.1` → `.2` → `.3` の順に名前を送ってから、`O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW` で開いて 1 行書き、閉じます。名前は `@logtape/file` と同じで、`logs/` のファイル数は最大 `maxFiles + 1` です。ファイルの記述子は持ちません。名前の変更は 1 つずつ `try` で包み、ファイルが消えていても（`ENOENT`）次の書き込みで新しい `director.jsonl` を作ります。`.vork/` はエージェントが書けるので、置き換えられたファイルを通して別のファイルへ書かないようにします（`/runs/` の配信と同じく、シンボリックリンクとリンク数を見ます）。
 
-1 レコードごとに `statSync` と `appendFileSync`（open / write / close）が走ります。`fsync` はしないので、OS ごと落ちたときは最後の数件を失いえます。Director のイベントは HTTP リクエストとジョブの単位で、毎秒数十件を超えない想定なので許容します。`GET` の 400 未満を debug に落としているのは、画像の取得で件数が増えるのを抑えるためでもあります。
+- 書く前に `logs/` を `lstat` し、ディレクトリでなければ（シンボリックリンクに置き換えられていれば）書きません。
+- `director.jsonl` を `lstat` し、通常のファイルでない、またはリンク数が 1 でなければ（シンボリックリンクやハードリンクに置き換えられていれば）、その名前だけを `unlink` して新しく作ります。リンク先や、データを共有している別のファイルは変わりません。
+- 開いた後に `fstat` でもう一度、通常のファイルでリンク数が 1 であることを確かめます（`lstat` と `open` の間の差し替え対策）。
+
+失敗は呼び出し元へ投げません。`log.write_failed`、`log.rotate_failed`（`ENOENT` 以外の名前送りの失敗）、`log.file_replaced` を、種類ごとに 1 回だけ stderr に書きます。`maxFiles` は 1 未満なら 1、`maxSize` は 1 未満なら 1 として扱います。
+
+1 レコードごとに `lstat`（2 回）と open / `fstat` / write / close が走ります。`fsync` はしないので、OS ごと落ちたときは最後の数件を失いえます。Director のイベントは HTTP リクエストとジョブの単位で、毎秒数十件を超えない想定なので許容します。`GET` の 400 未満を debug に落としているのは、画像の取得で件数が増えるのを抑えるためでもあります。
 
 ## 6. 漏洩防止の規則
 
@@ -137,7 +143,7 @@ LogTape は `configure()` しないと何も出力しません。設定したう
   - audit を診断ログへ統合する: `reportFromAudit` と UI の audit 一覧が `state.json` を読んでいるので、今回は動かさない（#64）
 - **Why chosen**: LogTape は依存が無く、`AsyncLocalStorage` による context、レベル、JSON Lines の書式を持つ。既定動作の問題はすべて設定で打ち消せることをソースで確かめた。`src/log.mts` に閉じ込めておけば、後から乗り換えるコストは 1 ファイル分で済む。
 - **Consequences**:
-  - 1 イベントごとに `statSync` と `appendFileSync` が走る。`fsync` はしない
+  - 1 イベントごとに `lstat` 2 回、`open` / `fstat` / `write` / `close` が走る。`fsync` はしない
   - `@logtape/file` に依存しない。ローテーション（約 20 行）は自前で保守する
   - `level` は `WARN` と表記される（`WARNING` ではない）
   - 新しいイベントを足すときは、この文書の語彙と漏洩防止の規則に従う。生の Error、ユーザー入力、秘匿値を props に入れない
@@ -155,7 +161,9 @@ LogTape は `configure()` しないと何も出力しません。設定したう
 | T6 | `setupLogging` した子プロセスの stdout が 0 バイトで、stderr には warning 以上だけが出る | `test/log.mts` | #77 |
 | T7 | `maxSize` を 10000 に縮めて 1000 件書くと、`logs/` のファイル数が `maxFiles + 1` 以下で、全行が JSON | `test/log.mts` | #77 |
 | T7b | 動作中に `director.jsonl` を消しても例外にならず、新しい `director.jsonl` に書き続け、ほかの fd に書かず、`shutdownLogging` も投げない | `test/log.mts` | #77 |
-| T7c | `director.jsonl` をシンボリックリンクに置き換えても、リンク先に書かない | `test/log.mts` | #77 |
+| T7c | `director.jsonl` をシンボリックリンクに置き換えても、リンク先に書かず、新しいファイルに書き続ける | `test/log.mts` | #77 |
+| T7d | `director.jsonl` をハードリンクに、`logs/` をシンボリックリンクに置き換えても、その先に書かない | `test/log.mts` | #77 |
+| T7e | `maxFiles` が 1 未満でもファイルは 2 つまで | `test/log.mts` | #77 |
 | T8 | `info('x', { message: 'y' })` で `message === 'x'`、`x_message === 'y'` | `test/log.mts` | #77 |
 | T8b | `level === 'WARN'`、不正なレベルで落ちない、存在しない dir に `logs/` を作る、shutdown 後の呼び出しで例外にならない | `test/log.mts` | #77 |
 | T9a〜T12 | 統合試験での `director.jsonl` の形、`server.log` の中身、MCP の stdout、SIGTERM 後の最終行 | `test/integration.mts` | #78 |

@@ -14,37 +14,57 @@ const RESERVED = new Set(['message', 'level', 'logger', '@timestamp']);
 const fmt = getJsonLinesFormatter({ properties: 'flatten' });
 /** Fields kept in the file only: stderr goes to server.log in ADE mode, which has no size limit. */
 const FILE_ONLY = ['vorkLogTail', 'stack'];
+/** A V8 stack frame: "    at fn (file:line:col)", "    at file:line:col" or "    at fn (native)"-like forms ending in a location. */
+const FRAME = /^\s+at (?:.+ \((?:.+:\d+:\d+|native|<anonymous>)\)|.+:\d+:\d+|<anonymous>)$/;
 let active = false;
 
 /**
  * Appends each record to file and rotates it to file.1 … file.<maxFiles> (the names @logtape/file used) once the next
  * record would take it past maxSize. It holds no file descriptor: @logtape/file 2.4.2 keeps writing to a closed fd when
- * the file is deleted while it runs (docs/logging.md section 7). Never throws; the first failure goes to stderr once.
+ * the file is deleted while it runs (docs/logging.md section 7). Never throws; each kind of failure goes to stderr once.
  */
 function fileSink(file: string, maxSize: number, maxFiles: number): Sink {
-  let reported = false;
-  const size = () => { try { return fs.statSync(file).size; } catch { return 0; } };
+  const dir = path.dirname(file);
+  const reported = new Set<string>();
+  // Each kind of failure goes to stderr once (stderr is server.log in ADE mode, which has no size limit).
+  const report = (event: string, message: string, e: unknown) => {
+    if (reported.has(event)) return;
+    reported.add(event);
+    try {
+      process.stderr.write(JSON.stringify({
+        '@timestamp': new Date().toISOString(), level: 'ERROR', logger: `${SERVICE}.log`, message,
+        event, service: SERVICE, component: 'log', errorType: errFields(e).errorType, code: (e as NodeJS.ErrnoException)?.code ?? null,
+      }) + '\n');
+    } catch {}
+  };
+  const notPlainFile = Object.assign(new Error('not a plain file with one link'), { code: 'ELINK' });
   return (r) => {
     try {
-      const line = Buffer.from(fmt(r));
-      const now = size();
-      if (now > 0 && now + line.length > maxSize) {
-        for (let i = maxFiles - 1; i > 0; i--) { try { fs.renameSync(`${file}.${i}`, `${file}.${i + 1}`); } catch {} }
-        try { fs.renameSync(file, `${file}.1`); } catch {}
+      // .vork/ is writable by the agent. A symlink or a hard link put in place of logs/ or the log file must not
+      // redirect the writes to another file (the same nlink and O_NOFOLLOW checks /runs/ makes, src/http.mts).
+      if (!fs.lstatSync(dir).isDirectory()) throw Object.assign(new Error('logs is not a directory'), { code: 'ENOTDIR' });
+      let st: fs.Stats | null = null;
+      try { st = fs.lstatSync(file); } catch {}
+      if (st && (!st.isFile() || st.nlink !== 1)) {
+        // Unlinking our own name of it leaves the file it points at, or shares its data with, as it was.
+        report('log.file_replaced', 'The log file was not a plain file with one link; it was unlinked and started again', notPlainFile);
+        fs.unlinkSync(file); st = null;
       }
-      // O_NOFOLLOW: .vork/ is writable by the agent, so a symlink put in place of the log file must not redirect the
-      // writes to the file it points at (the same check /runs/ makes, src/http.mts).
+      const line = Buffer.from(fmt(r));
+      if (st && st.size > 0 && st.size + line.length > maxSize) {
+        for (let i = maxFiles - 1; i > 0; i--) { try { fs.renameSync(`${file}.${i}`, `${file}.${i + 1}`); } catch {} }
+        try { fs.renameSync(file, `${file}.1`); }
+        catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') report('log.rotate_failed', 'Could not rotate the log file', e); }
+      }
       const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
-      try { fs.writeSync(fd, line); } finally { fs.closeSync(fd); }
-    } catch (e) {
-      if (reported) return;
-      reported = true;
       try {
-        process.stderr.write(JSON.stringify({
-          '@timestamp': new Date().toISOString(), level: 'ERROR', logger: `${SERVICE}.log`, message: 'Could not write the log file',
-          event: 'log.write_failed', service: SERVICE, component: 'log', errorType: errFields(e).errorType, code: (e as NodeJS.ErrnoException)?.code ?? null,
-        }) + '\n');
-      } catch {}
+        // Checked again on the open file: the name could have been swapped between lstat and open.
+        const o = fs.fstatSync(fd);
+        if (!o.isFile() || o.nlink !== 1) throw notPlainFile;
+        fs.writeSync(fd, line);
+      } finally { fs.closeSync(fd); }
+    } catch (e) {
+      report('log.write_failed', 'Could not write the log file', e);
     }
   };
 }
@@ -66,6 +86,8 @@ export function setupLogging({ dir, level, stderrLevel = 'warning', maxSize = 5_
   const wanted = level ?? (process.env.RENDER_DIRECTOR_LOG_LEVEL || 'info');
   // An invalid level would make every later log call throw a TypeError (compareLogLevel, level.js:66).
   const lowest: LogLevel = isLogLevel(wanted) ? wanted : 'info';
+  // At least one rotated file and a positive size, so that "at most maxFiles + 1 files" holds.
+  maxFiles = Math.max(1, Math.floor(maxFiles)); maxSize = Math.max(1, maxSize);
   const logs = path.join(dir, 'logs');
   fs.mkdirSync(logs, { recursive: true }); // the file sink does not create folders
   const write = (r: Parameters<Sink>[0]) => { process.stderr.write(fmt(r)); };
@@ -156,7 +178,8 @@ export function errFields(e: unknown, { message = true }: { message?: boolean } 
       // The stack starts with `${name}: ${message}`, and the message can hold lines that look like frames ("    at x").
       const head = e.message ? `${e.name}: ${e.message}` : String(e.name);
       if (stack.startsWith(head)) stack = stack.slice(head.length);
-      stack = stack.split('\n').filter((l) => /^\s+at /.test(l)).join('\n');
+      // Only lines shaped like V8 frames are kept, also when the head did not match (a name or message changed later).
+      stack = stack.split('\n').filter((l) => FRAME.test(l)).join('\n');
     }
     if (stack) out.stack = stack.slice(0, 4000);
   }

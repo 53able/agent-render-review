@@ -81,6 +81,13 @@ await check('a GET refused with 403 (a tab with a stale session polling) is logg
   const post = await fetch(`${BASE}/api/decide`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
   assert.equal(post.status, 403);
   assert.equal((await lastRequest()).level, 'INFO');
+  // A GET 404 is debug too; a GET with a wrong agent token (401) stays at info.
+  assert.equal((await fetch(`${BASE}/no-such-file.txt`)).status, 404);
+  const missing = await lastRequest();
+  assert.deepEqual([missing.route, missing.status, missing.level], ['/static', 404, 'DEBUG']);
+  assert.equal((await fetch(`${BASE}/api/agent/status`, { headers: { authorization: 'Bearer wrong' } })).status, 401);
+  const unauth = await lastRequest();
+  assert.deepEqual([unauth.route, unauth.status, unauth.level], ['/api/agent/status', 401, 'INFO']);
 });
 
 await check('a 500 from an unexpected exception logs http.request at error with errorType and no token', async () => {

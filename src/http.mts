@@ -230,8 +230,9 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
       const status = !aborted || res.headersSent ? res.statusCode : null;
       const props = { reqId, method, route, status, ms: Date.now() - t0, ...(aborted ? { aborted: true } : {}), ...(rctx.error !== undefined ? errFields(rctx.error) : {}) };
       if (status !== null && status >= 500) L.error('http.request', 'HTTP request failed', props);
-      // A GET answered 401/403/404 is also debug: a tab left open after a restart polls with a stale session forever.
-      else if (method === 'GET' && status !== null && (status < 400 || status === 401 || status === 403 || status === 404)) L.debug('http.request', 'HTTP request', props);
+      // A GET answered 403/404 is also debug: a tab left open after a restart polls with a stale session forever.
+      // 401 (a wrong agent token) stays at info.
+      else if (method === 'GET' && status !== null && (status < 400 || status === 403 || status === 404)) L.debug('http.request', 'HTTP request', props);
       else L.info('http.request', 'HTTP request', props);
     };
     res.on('finish', () => record(false));

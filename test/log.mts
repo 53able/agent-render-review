@@ -80,16 +80,45 @@ await check('T7b deleting director.jsonl while logging neither throws nor writes
   for (const f of files) assert.ok(fs.statSync(path.join(logs, f)).size <= 2000, `${f} is over maxSize`);
 });
 
-await check('T7c a symlink put in place of director.jsonl is not followed', async () => {
+await check('T7c a symlink put in place of director.jsonl is not followed; logging starts a new file', async () => {
   const dir = newDir(); const logs = path.join(dir, 'logs');
   setupLogging({ dir, level: 'info', stderrLevel: 'fatal' });
   L.info('t7c.first', 'first');
   const target = path.join(dir, 'outside.txt'); fs.writeFileSync(target, 'untouched\n');
   fs.rmSync(path.join(logs, 'director.jsonl'));
   fs.symlinkSync(target, path.join(logs, 'director.jsonl'));
-  assert.doesNotThrow(() => L.info('t7c.after', 'after', { pad: 'UNIQUE-T7C' }));
+  assert.doesNotThrow(() => L.info('t7c.after', 'after'));
   assert.doesNotThrow(() => shutdownLogging());
   assert.equal(fs.readFileSync(target, 'utf8'), 'untouched\n');
+  const st = fs.lstatSync(path.join(logs, 'director.jsonl'));
+  assert.ok(st.isFile() && st.nlink === 1);
+  assert.deepEqual(lines(dir).map((e) => e.event), ['t7c.after']);
+});
+
+await check('T7d a hard link put in place of director.jsonl is not written through', async () => {
+  const dir = newDir(); const logs = path.join(dir, 'logs');
+  setupLogging({ dir, level: 'info', stderrLevel: 'fatal' });
+  L.info('t7d.first', 'first');
+  const target = path.join(dir, 'outside.txt'); fs.writeFileSync(target, 'untouched\n');
+  fs.rmSync(path.join(logs, 'director.jsonl'));
+  fs.linkSync(target, path.join(logs, 'director.jsonl'));
+  assert.doesNotThrow(() => L.info('t7d.after', 'after'));
+  assert.equal(fs.readFileSync(target, 'utf8'), 'untouched\n');
+  assert.deepEqual(lines(dir).map((e) => e.event), ['t7d.after']);
+  // logs/ itself replaced by a symlink: nothing is written into the folder it points at.
+  const elsewhere = path.join(dir, 'elsewhere'); fs.mkdirSync(elsewhere);
+  fs.rmSync(logs, { recursive: true }); fs.symlinkSync(elsewhere, logs);
+  assert.doesNotThrow(() => L.info('t7d.dir', 'dir'));
+  assert.doesNotThrow(() => shutdownLogging());
+  assert.deepEqual(fs.readdirSync(elsewhere), []);
+});
+
+await check('T7e maxFiles below 1 is treated as 1, so at most two files exist', async () => {
+  const dir = newDir(); const logs = path.join(dir, 'logs');
+  setupLogging({ dir, level: 'info', stderrLevel: 'fatal', maxSize: 500, maxFiles: 0 });
+  for (let i = 0; i < 50; i++) L.info('t7e', 'fill', { i, pad: 'x'.repeat(100) });
+  shutdownLogging();
+  assert.deepEqual(fs.readdirSync(logs).sort(), ['director.jsonl', 'director.jsonl.1']);
 });
 
 await check('T8 a property named message is renamed to x_message and does not replace the message', async () => {
