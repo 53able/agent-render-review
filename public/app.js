@@ -221,7 +221,7 @@ function depth(v) { let /** @type {number} */ d = 0, /** @type {Version | undefi
 function renderVersions() {
   const list = $('#versionList'); list.innerHTML = '';
   for (const v of [...S.data.versions].reverse()) {
-    const li = document.createElement('li'); li.className = `st-${v.status} indent-${depth(v)}`;
+    const li = document.createElement('li'); li.className = `st-${discarding(v.id) ? 'discarded' : v.status} indent-${depth(v)}`;
     const title = v.origin === 'starter' ? 'Starter scene' : v.instruction;
     li.innerHTML = `<button aria-current="${v.id === S.viewId}" data-id="${v.id}">
       <span class="vid">${v.id}${v.parent ? ` ← ${v.parent}` : ''} ${v.id === S.data.head ? '<span class="headmark">● HEAD</span>' : ''}</span>
@@ -638,10 +638,16 @@ function renderInspector() {
     v.parent ? `from ${esc(v.parent)}` : '', `by ${esc(v.origin)}`,
   ].filter(Boolean).join(' · ');
   const box = $('#decide');
-  box.innerHTML = v.status === 'proposed' ? `<button class="primary" id="acceptBtn">Accept as new HEAD</button>
+  if (discarding(v.id)) {
+    box.innerHTML = `<span class="flag">Will be discarded in a few seconds</span><button class="ghost" id="undoHere">Undo discard</button>`;
+    /** @type {HTMLButtonElement} */ ($('#undoHere')).onclick = undoDiscard;
+  } else if (v.status === 'accepted' && v.id !== S.data.head) {
+    box.innerHTML = `<button class="ghost" id="headBtn">Make HEAD</button>`;
+    /** @type {HTMLButtonElement} */ ($('#headBtn')).onclick = () => checkout(v.id);
+  } else box.innerHTML = v.status === 'proposed' ? `<button class="primary" id="acceptBtn">Accept as new HEAD</button>
     <button class="ghost" id="refineBtn">Refine from this</button>
     <button class="ghost danger" id="discardBtn">Discard</button>` : '';
-  if (v.status === 'proposed') {
+  if (v.status === 'proposed' && !discarding(v.id)) {
     $('#acceptBtn').onclick = () => decide('accept');
     $('#discardBtn').onclick = () => decide('discard');
     $('#refineBtn').onclick = () => { /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = ''; /** @type {HTMLTextAreaElement} */ ($('#instruction')).placeholder = `Refine ${v.id}: what should differ?`; $('#instruction').focus(); };
@@ -654,16 +660,59 @@ function renderInspector() {
   $('#vrequests').querySelectorAll('button[data-req]').forEach((b) => (/** @type {HTMLButtonElement} */ (b).onclick = () => reviewAdoption(/** @type {HTMLButtonElement} */ (b).dataset.req)));
   renderBusy();
 }
-/** @param {string} decision */
-async function decide(decision) {
-  const id = S.viewId;
+/** @param {string} decision @param {string} [id] */
+async function decide(decision, id = S.viewId) {
+  if (decision === 'discard') return discardLater(id);
   try { await api('/api/decide', { versionId: id, decision }); }
   catch (e) { return fail('review', `Cannot ${decision} ${id}: ${why(e)}`); }
   clearFails('review');
-  if (decision === 'discard') S.viewId = /** @type {string} */ (/** @type {Version} */ (V(id)).parent);
   /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = '';
-  await load(); say(decision === 'accept' ? `${id} is now HEAD` : `${id} discarded`);
+  await load(); say(`${id} is now HEAD`);
 }
+
+/** Makes an accepted version HEAD again: this is how an Accept is taken back (#55). @param {string} id */
+async function checkout(id) {
+  try { await api('/api/checkout', { versionId: id }); }
+  catch (e) { return fail('review', `Cannot make ${id} HEAD: ${why(e)}`); }
+  clearFails('review'); await load(); say(`${id} is now HEAD`);
+}
+
+// Discard can be undone for a few seconds (#55): the decision reaches Director, and through it the agent (with the
+// rejection of pending adoption requests), only when the time is up. Closing the tab before then discards nothing.
+const UNDO_MS = 6000;
+/** @type {{ id: string, timer: number, ends: number } | null} */
+let pendingDiscard = null;
+/** @param {string} id */
+function discardLater(id) {
+  if (pendingDiscard) commitDiscard(); // one at a time: the earlier one is decided now
+  pendingDiscard = { id, timer: window.setTimeout(commitDiscard, UNDO_MS), ends: Date.now() + UNDO_MS };
+  renderVersions(); renderInspector(); renderUndo();
+  say(`${id} will be discarded in ${UNDO_MS / 1000} seconds. Press Undo to keep it.`);
+}
+function undoDiscard() {
+  if (!pendingDiscard) return;
+  const { id } = pendingDiscard; clearTimeout(pendingDiscard.timer); pendingDiscard = null;
+  renderVersions(); renderInspector(); renderUndo(); say(`${id} kept`);
+  if (S.viewId === id) $('#acceptBtn')?.focus();
+}
+async function commitDiscard() {
+  if (!pendingDiscard) return;
+  const { id } = pendingDiscard; clearTimeout(pendingDiscard.timer); pendingDiscard = null; renderUndo();
+  try { await api('/api/decide', { versionId: id, decision: 'discard' }); }
+  catch (e) { renderVersions(); renderInspector(); return fail('review', `Cannot discard ${id}: ${why(e)}`); }
+  clearFails('review');
+  if (S.viewId === id) S.viewId = /** @type {string} */ (/** @type {Version} */ (V(id)).parent);
+  await load(); say(`${id} discarded`);
+}
+function renderUndo() {
+  const bar = $('#undoBar');
+  if (!pendingDiscard) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.innerHTML = `<span><b>${esc(pendingDiscard.id)}</b> will be discarded</span><button type="button" class="ghost" id="undoBtn">Undo</button>`;
+  /** @type {HTMLButtonElement} */ ($('#undoBtn')).onclick = undoDiscard;
+}
+/** @param {string} id */
+const discarding = (id) => pendingDiscard?.id === id;
 
 // ---------- final render ----------
 $('#finalBtn').addEventListener('click', async () => {

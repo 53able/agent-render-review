@@ -142,3 +142,4 @@ dialog h2 { font-size: 15px; text-transform: none; letter-spacing: 0; color: var
 .err button { flex: none; padding: 2px 8px; }
 .conn { background: #2a1416; border-bottom: 1px solid var(--bad); padding: 6px 16px; }
 #err-view { margin-bottom: 8px; }
+.undo { position: fixed; left: 16px; bottom: 16px; z-index: 10; background: var(--panel); border: 1px solid var(--warn); border-radius: 6px; padding: 6px 10px; display: flex; gap: 10px; align-items: center; box-shadow: 0 6px 24px rgba(0,0,0,.5); }

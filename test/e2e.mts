@@ -88,10 +88,21 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
       await page.fill('#instruction', 'rimライトを強めて輪郭を際立たせる'); await page.click('#askBtn'); await sleep(800);
       await idle(page, 240000); await sleep(800);
       assert.match(await page.textContent('#viewing') as string, /proposed/);
-      await page.click('#discardBtn'); await sleep(800);
+      await page.click('#discardBtn'); await sleep(7500); // committed after the undo time (#55)
       assert.doesNotMatch(await page.textContent('#viewing') as string, /proposed/);
     });
   }
+  await check('#55 standalone: an accepted version that is not HEAD can be made HEAD again', async () => {
+    const headOf = () => page.evaluate(() => document.querySelector('.headmark')!.closest('button')!.getAttribute('data-id'));
+    const head = await headOf(); assert.notEqual(head, 'v001');
+    await page.click('button[data-id="v001"]'); await page.click('#headBtn');
+    await page.waitForFunction(() => document.querySelector('.headmark')?.closest('button')?.getAttribute('data-id') === 'v001', null, { timeout: 5000 });
+    assert.equal(await page.locator('#headBtn').count(), 0, 'HEAD needs no Make HEAD');
+    await page.click(`button[data-id="${head}"]`); await page.click('#headBtn');
+    await page.waitForFunction((h) => document.querySelector('.headmark')?.closest('button')?.getAttribute('data-id') === h, head, { timeout: 5000 });
+    await page.click('#auditbox summary, .auditbox summary');
+    assert.match(await page.textContent('#audit') as string, /checkout v001/);
+  });
   await check('#53 standalone: when Director stops, the page says so instead of showing stale data silently', async () => {
     procs[0].kill('SIGTERM');
     await page.waitForSelector('#conn:not([hidden])', { timeout: 10000 });
@@ -326,6 +337,23 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await agent('POST', '/api/agent/adoption-request', { version: recolor, slug: 'flock-white', reason: 'refresh' });
     await page.waitForFunction(() => document.querySelector('#adoptList')!.textContent!.includes('flock-white'), null, { timeout: 10000 });
     assert.equal(await page.locator('#review .difftable > tbody > tr:not(.group)').count(), BIRDS);
+  });
+
+  await check('#55 Discard can be undone before it reaches the agent; when the time is up it is decided', async () => {
+    await agent('GET', '/api/agent/feedback?wait=0'); // drain
+    await page.click(`button[data-id="${recolor}"]`); await page.waitForSelector('#discardBtn');
+    await page.click('#discardBtn');
+    await page.waitForSelector('#undoBar:not([hidden])');
+    assert.equal(await page.locator(`#versionList li.st-discarded button[data-id="${recolor}"]`).count(), 1, 'shown as discarded at once');
+    await page.click('#undoBtn');
+    await sleep(7000);
+    assert.match(await page.textContent('#h-insp') as string, /Proposal/); assert.equal(await page.locator('#undoBar').isHidden(), true);
+    assert.deepEqual((await agent('GET', '/api/agent/feedback?wait=0')).events, [], 'the agent heard nothing');
+    await page.click('#discardBtn'); await sleep(7500);
+    const evs = (await agent('GET', '/api/agent/feedback?wait=0')).events;
+    assert.deepEqual(evs.map((e: { type: string }) => e.type), ['decision', 'adoption_rejected']);
+    assert.equal(evs[0].decision, 'discard'); assert.equal(evs[0].version, recolor);
+    assert.doesNotMatch(await page.textContent('#h-insp') as string, new RegExp(`^${recolor}`), 'the view moves to the parent');
   });
 
   await check('ADE: no page errors', async () => assert.deepEqual(page.errors, []));
