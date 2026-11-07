@@ -295,6 +295,22 @@ await check('#6 static serving cannot reach server.json or state.json outside pu
   assert.equal((await get('/app.js')).status, 200, 'normal static files still served');
 });
 
+await check('#11 /runs/ does not follow a symlink out of .vork; a runs folder inside public/ is refused', async () => {
+  const link = path.join(PROJECT, '.vork', 'v001', 'page-previs.png');
+  assert.ok(!fs.existsSync(link), 'test needs an unused render name');
+  fs.symlinkSync('../server.json', link);
+  try {
+    const r = await fetch(`${BASE}/runs/v001/page-previs.png`, { headers: { cookie: uiCookie } });
+    const body = await r.text();
+    assert.equal(r.status, 404); assert.doesNotMatch(body, /agentToken/);
+  } finally { fs.rmSync(link); }
+  const { spawnSync } = await import('node:child_process');
+  const inside = path.join(ROOT, 'public', `runs-${process.pid}`);
+  const p = spawnSync(process.execPath, [path.join(ROOT, 'server.mts'), '--port', '0'], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_RUNS: inside }, encoding: 'utf8', timeout: 20000 });
+  assert.notEqual(p.status, 0); assert.match(p.stderr, /inside/);
+  assert.ok(!fs.existsSync(inside), 'nothing is created under public/');
+});
+
 await check('#10 a static .json file is served as its contents, not as a serialized Buffer', async () => {
   const r = await fetch(`${BASE}/tsconfig.json`);
   assert.equal(r.status, 200); assert.match(r.headers.get('content-type')!, /application\/json/);

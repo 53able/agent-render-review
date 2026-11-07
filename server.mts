@@ -320,6 +320,11 @@ async function main() {
   const MODE = PROJECT ? 'ade' : 'standalone';
   const RUNS = PROJECT ? path.join(PROJECT, '.vork') : path.resolve(process.env.VORK_DIRECTOR_RUNS || path.join(ROOT, 'runs'));
   const MODEL = process.env.DIRECTOR_MODEL || 'sonnet';
+  // Files under PUBLIC are served without a session, so RUNS (server.json, state.json) must not live there.
+  // Checked before mkdir, on the real path of the nearest existing ancestor.
+  const realish = (p: string): string => { let probe = p; while (!fs.existsSync(probe)) probe = path.dirname(probe); return path.join(fs.realpathSync(probe), path.relative(probe, p)); };
+  const runsReal = realish(RUNS), publicReal = fs.realpathSync(PUBLIC);
+  if (runsReal === publicReal || runsReal.startsWith(publicReal + path.sep)) { console.error(`refusing to start: the runs folder ${RUNS} is inside ${PUBLIC}, which is served without a session`); process.exit(2); }
   fs.mkdirSync(RUNS, { recursive: true });
   const LOCK = path.join(RUNS, 'lock');
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { return e.code === 'EPERM'; } };
@@ -970,8 +975,12 @@ ${VORK_HELP}`;
         root = PUBLIC;
       }
       if (rel.includes('\0') || rel.split(/[\\/]/).includes('..')) return send(res, 404, 'not found', 'text/plain');
-      const real = path.resolve(root, '.' + path.sep + rel);
-      if (!real.startsWith(root + path.sep) || !fs.existsSync(real) || !fs.statSync(real).isFile())
+      // No symlinks below the root: the real path must be the literal one. A link that stays inside RUNS
+      // (v001/final.png -> ../server.json) would otherwise still pass a "real path is inside the root" check.
+      const rootReal = fs.realpathSync(root); const want = path.resolve(rootReal, '.' + path.sep + rel);
+      let real: string;
+      try { real = fs.realpathSync(want); } catch { return send(res, 404, 'not found', 'text/plain'); }
+      if (real !== want || !real.startsWith(rootReal + path.sep) || !fs.statSync(real).isFile())
         return send(res, 404, 'not found', 'text/plain');
       return send(res, 200, fs.readFileSync(real), MIME[path.extname(real)] || 'application/octet-stream');
     } catch (e: any) {
