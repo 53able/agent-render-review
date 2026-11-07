@@ -222,6 +222,8 @@ setInterval(async () => {
 }, 2500);
 
 // ---------- versions ----------
+/** A version's state as a symbol and a word, so it does not rest on colour alone (#60). */
+const STATE_CHIP = /** @type {Record<string, string>} */ ({ proposed: '◇ proposal', accepted: '✓ accepted', discarded: '✕ discarded' });
 /** Shows a version: the list, the inspector and the viewport follow. @param {string} id */
 function openVersion(id) { S.viewId = id; renderVersions(); renderObjects(); renderReview(); renderInspector(); return drawViewport(); }
 /** @param {Version} v */
@@ -231,9 +233,11 @@ function renderVersions() {
   for (const v of [...S.data.versions].reverse()) {
     const li = document.createElement('li'); li.className = `st-${discarding(v.id) ? 'discarded' : v.status} indent-${depth(v)}`;
     const title = v.origin === 'starter' ? 'Starter scene' : v.instruction;
+    const st = discarding(v.id) ? 'discarded' : v.status;
     li.innerHTML = `<button aria-current="${v.id === S.viewId}" data-id="${v.id}">
       <span class="vid">${v.id}${v.parent ? ` ← ${v.parent}` : ''} ${v.id === S.data.head ? '<span class="headmark">● HEAD</span>' : ''}</span>
       <span class="badge ${v.origin}">${v.origin}</span>
+      <span class="stchip">${STATE_CHIP[st] || esc(st)}</span>
       <span class="vtitle">${esc(title)}</span></button>`;
     /** @type {HTMLButtonElement} */ (li.querySelector('button')).onclick = () => { openVersion(v.id); say(`Viewing ${v.id}, ${v.status}`); };
     list.append(li);
@@ -297,7 +301,7 @@ async function drawViewport() {
   S.img = img; S.imgB = imgB; $('#wipe').hidden = !S.imgB;
   S.ids = buf && { w: r.width, h: r.height, arr: new Uint16Array(buf), objects: Object.fromEntries(r.objects.map((o) => [o.pass_index, o.name])) };
   for (const c of [cv, ov]) { c.width = r.width; c.height = r.height; }
-  $('#viewport').style.aspectRatio = `${r.width} / ${r.height}`;
+  $('#viewport').style.aspectRatio = `${r.width} / ${r.height}`; $('#viewport').style.setProperty('--ar', String(r.width / r.height));
   paint();
   cv.dataset.ready = `${v.id}:${S.profile}`;
 }
@@ -328,7 +332,7 @@ async function drawPage() {
   const img = await loadImg(pv.image);
   if (seq !== drawSeq) return;
   for (const c of [cv, ov]) { c.width = img.width; c.height = img.height; }
-  $('#viewport').style.aspectRatio = `${img.width} / ${img.height}`;
+  $('#viewport').style.aspectRatio = `${img.width} / ${img.height}`; $('#viewport').style.setProperty('--ar', String(img.width / img.height));
   ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0);
   $('#measure').innerHTML = `<div><dt>page</dt><dd>${esc(S.data.config.pageUrl)}</dd></div><div><dt>substituted requests</dt><dd class="${pv.matched ? '' : 'warn'}">${pv.matched}</dd></div>` + (pv.warning ? `<div><dd class="warn">${esc(pv.warning)}</dd></div>` : '');
   if (pv.warning) say(pv.warning);
@@ -827,6 +831,13 @@ $('#finalApprove').addEventListener('click', async () => {
 function renderAudit() {
   $('#audit').innerHTML = [...S.data.audit].reverse().map((a) => `<li>${a.t.slice(11, 19)} ${esc(a.event)} ${esc(a.version || '')} ${a.instruction ? '· ' + esc(a.instruction).slice(0, 40) : ''}</li>`).join('');
 }
+
+// ---------- narrow screens: tabs for the panels below the render (#60) ----------
+document.querySelectorAll('.panetabs button').forEach((b) => b.addEventListener('click', () => {
+  const pane = /** @type {string} */ (/** @type {HTMLElement} */ (b).dataset.pane);
+  /** @type {HTMLElement} */ (document.querySelector('main')).dataset.pane = pane;
+  document.querySelectorAll('.panetabs button').forEach((x) => x.setAttribute('aria-selected', String(x === b)));
+}));
 
 // ---------- boot ----------
 // Pair this tab with Director using the one-time link Director opened, then drop the token from the URL.

@@ -202,6 +202,21 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.setViewportSize({ width: 1500, height: 1000 });
   });
 
+  await check('#60 at 1024 px the render stays on top and Accept is within one screen of scrolling', async () => {
+    await page.setViewportSize({ width: 1024, height: 768 }); await sleep(300);
+    const top = (sel: string) => page.evaluate((q) => document.querySelector(q)!.getBoundingClientRect().top + window.scrollY, sel);
+    assert.ok(await top('#canvas') < 768, 'the render starts on the first screen');
+    assert.ok(await top('#acceptBtn') < 768 * 2, `Accept is within one scroll (at ${await top('#acceptBtn')} px)`);
+    await page.evaluate(() => window.scrollTo(0, 600)); await sleep(100);
+    const b = (await page.locator('#canvas').boundingBox())!; assert.ok(b.y >= 0 && b.y < 200, 'the render stays in view while scrolling');
+    await page.click('#tab-versions');
+    assert.equal(await page.locator('#versionList').isVisible(), true); assert.equal(await page.locator('#acceptBtn').isVisible(), false);
+    await page.click('#tab-insp'); assert.equal(await page.locator('#acceptBtn').isVisible(), true);
+    await page.screenshot({ path: path.join(process.env.E2E_SHOTS_DIR || tmp, 'narrow.png') }); // not a README image
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.setViewportSize({ width: 1500, height: 1000 });
+  });
+
   await check('ADE: feedback with a clicked selection reaches the agent and shows as read', async () => {
     await clickObject(page, 350 / 960, 220 / 540);
     await page.fill('#instruction', '花瓶を少し右へ。見出しと重ならないように'); await page.click('#askBtn');

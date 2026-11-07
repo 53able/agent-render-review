@@ -14,9 +14,9 @@
 </header>
 <div id="conn" class="conn" role="alert" hidden></div>
 
-<main class="layout">
+<main class="layout" data-pane="inspector">
   <!-- Versions: what needs a decision, every version, and the history -->
-  <aside class="panel versions" aria-labelledby="h-versions">
+  <aside class="panel versions" id="versions" aria-labelledby="h-versions">
     <section id="adoptBox" class="adopt" hidden aria-labelledby="h-adopt">
       <h2 id="h-adopt">Adoption requests</h2>
       <ul id="adoptList" class="alist"></ul>
@@ -57,9 +57,15 @@
     <p class="hint">Numbers above come from vork's render metadata, not from the agent.</p>
   </section>
 
+  <!-- Narrow screens only: the two panels below the render are tabs (#60) -->
+  <div class="panetabs" role="tablist" aria-label="Panel below the render">
+    <button type="button" role="tab" id="tab-insp" aria-controls="inspector" aria-selected="true" data-pane="inspector">This version</button>
+    <button type="button" role="tab" id="tab-versions" aria-controls="versions" aria-selected="false" data-pane="versions">All versions</button>
+  </div>
+
   <!-- Inspector of the version on screen: its state and what can be done with it first, then what changed,
        then selection (nouns) and what to send about it (verbs) (#56) -->
-  <aside class="panel inspector" aria-labelledby="h-insp">
+  <aside class="panel inspector" id="inspector" aria-labelledby="h-insp">
     <section class="vhead" aria-labelledby="h-insp">
       <h2 id="h-insp" class="insp-title"></h2>
       <p id="vstate" class="vstate"></p>
