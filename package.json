@@ -10,7 +10,7 @@
     "mcp": "node mcp.mts",
     "typecheck": "tsc -p . && tsc -p tsconfig.public.json",
     "test": "npm run test:unit && node test/integration.mts",
-    "test:unit": "node server.mts --selftest",
+    "test:unit": "node server.mts --selftest && node test/director.mts",
     "test:e2e": "node test/e2e.mts",
     "report": "node server.mts --report"
   },

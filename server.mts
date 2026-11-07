@@ -2,10 +2,9 @@
 // Standalone mode: `node server.mts` (built-in proposer via `claude -p`).
 // ADE mode:        `node server.mts --project <dir>` (your ADE agent proposes through mcp.mts; you review and adopt here).
 import http from 'node:http';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { LIMITS, PROFILES, SLUG, isProfile, DEFAULT_CONFIG, MAX_REASON, MAX_ASSUMPTIONS, MAX_ASSUMPTION, MAX_PENDING_ADOPTIONS, MAX_INTERPRETATION, MAX_CLAIMED, MAX_CLAIMED_NODE, MAX_CLAIMED_TEXT,
@@ -14,25 +13,11 @@ import type { Profile, SceneNode, Scene, PolicyResult, AuditEvent, Config, Expos
   Version, AgentEventBody, DirectorState } from './src/policy.mts';
 // Kept importable from here: test/integration.mts and older callers import them from server.mts.
 export { policyCheck, diffScenes, resolveInside, reportFromAudit } from './src/policy.mts';
+import { createVorkRenderer, vorkInstalled, run } from './src/vork.mts';
+import { createDirector } from './src/director.mts';
+import type { Job } from './src/director.mts';
 
 // ---------- types (erased at runtime) ----------
-// `<out>.meta.json` written by vork render
-interface VorkMeta { object_ids: unknown; exposure: Exposure; denoiser: unknown; settings: { integrator: unknown; samples: number } }
-type RenderResult =
-  | { ok: true; info: RenderInfo; cancelled?: undefined; code?: undefined; timedOut?: undefined; log?: undefined }
-  | { ok: false; cancelled: true; info?: undefined; code?: undefined; timedOut?: undefined; log?: undefined }
-  | { ok: false; cancelled?: undefined; info?: undefined; code?: number | null; timedOut?: boolean; log: string; seconds?: number };
-type ValidateResult =
-  | { ok: true; kind?: undefined; policy: PolicyResult; log?: undefined }
-  | { ok: false; kind: 'blocked'; policy: PolicyResult; log?: undefined }
-  | { ok: false; kind: 'invalid'; policy: PolicyResult; log: string }
-  | { ok: false; kind: 'cancelled'; policy?: undefined; log?: undefined };
-interface JobStep { label: string; status: 'running' | 'done' | 'failed'; detail: string | null | undefined; t: number }
-interface Job {
-  id: string; kind: string; versionId: string; status: 'running' | 'done' | 'failed' | 'cancelled'; steps: JobStep[];
-  started: number; result: unknown; error: string | null; ac: AbortController;
-}
-interface RunResult { code: number | null; signal?: NodeJS.Signals | null; stdout: string; stderr: string; timedOut: boolean }
 type TicketData =
   | { kind: 'final'; versionId: string; hash: string }
   | { kind: 'adopt'; versionId: string; hash: string; requestId: string; slug: string; sceneText: string; assetRel: string; overwrites: boolean };
@@ -54,34 +39,6 @@ class PayloadTooLarge extends Error {
   drain = true;
 }
 const MAX_BODY = 4e6;
-
-// 16-bit grayscale PNG decode (object_index channel)
-function decodeGray16(buf: Buffer): { w: number; h: number; data: Buffer } {
-  let off = 8, w = 0, h = 0, depth = 0, ctype = 0; const idat: Buffer[] = [];
-  while (off < buf.length) {
-    const len = buf.readUInt32BE(off); const type = buf.toString('ascii', off + 4, off + 8);
-    const data = buf.subarray(off + 8, off + 8 + len);
-    if (type === 'IHDR') { w = data.readUInt32BE(0); h = data.readUInt32BE(4); depth = data[8]; ctype = data[9]; }
-    if (type === 'IDAT') idat.push(data);
-    off += 12 + len;
-  }
-  if (depth !== 16 || ctype !== 0) throw new Error(`unexpected object_index PNG format depth=${depth} type=${ctype}`);
-  const raw = zlib.inflateSync(Buffer.concat(idat)); const bpp = 2, stride = w * bpp;
-  const out = Buffer.alloc(w * h * 2); let prev = Buffer.alloc(stride);
-  for (let y = 0; y < h; y++) {
-    const ft = raw[y * (stride + 1)]; const line = Buffer.from(raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1)));
-    for (let i = 0; i < stride; i++) {
-      const a = i >= bpp ? line[i - bpp] : 0, b = prev[i], c = i >= bpp ? prev[i - bpp] : 0;
-      let v = line[i];
-      if (ft === 1) v += a; else if (ft === 2) v += b; else if (ft === 3) v += (a + b) >> 1;
-      else if (ft === 4) { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
-      line[i] = v & 255;
-    }
-    for (let x = 0; x < w; x++) out.writeUInt16LE(line.readUInt16BE(x * 2), (y * w + x) * 2);
-    prev = line;
-  }
-  return { w, h, data: out };
-}
 
 // ---------- CLI: selftest and report (no server, no state) ----------
 if (argv[0] === '--selftest') {
@@ -183,187 +140,21 @@ async function main() {
   }
   process.on('exit', () => { try { if (Number(fs.readFileSync(LOCK, 'utf8')) === process.pid) fs.rmSync(LOCK); } catch {} });
 
-  let VORK_HELP = '';
-  try { VORK_HELP = execFileSync('vork', ['help'], { encoding: 'utf8' }); }
-  catch { console.error('vork not found on PATH. Install it first: https://github.com/voyager-so/vork'); process.exit(1); }
-  const VORK_VERSION = execFileSync('vork', ['--version'], { encoding: 'utf8' }).trim();
+  const vork = vorkInstalled();
+  if (!vork) { console.error('vork not found on PATH. Install it first: https://github.com/voyager-so/vork'); process.exit(1); }
+  const { help: VORK_HELP, version: VORK_VERSION } = vork;
 
-  // project config
-  const CONFIG_FILE = path.join(RUNS, 'config.json');
-  // Re-read on every use so edits to .vork/config.json apply without a restart.
-  const readConfig = (): Config => {
-    if (!PROJECT || !fs.existsSync(CONFIG_FILE)) return { ...DEFAULT_CONFIG };
-    try { return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) }; }
-    catch (e: any) { console.error(`ignoring invalid ${CONFIG_FILE}: ${e.message}`); return { ...DEFAULT_CONFIG }; }
-  };
   if (PROJECT) {
-    if (!fs.existsSync(CONFIG_FILE)) fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2));
+    if (!fs.existsSync(path.join(RUNS, 'config.json'))) fs.writeFileSync(path.join(RUNS, 'config.json'), JSON.stringify(DEFAULT_CONFIG, null, 2));
     if (!fs.existsSync(path.join(RUNS, '.gitignore'))) fs.writeFileSync(path.join(RUNS, '.gitignore'), '*\n!.gitignore\n!config.json\n!adopted/\n!adopted/**\n');
   }
 
-  // ---------- state ----------
-  const STATE_FILE = path.join(RUNS, 'state.json');
-  const state: DirectorState = fs.existsSync(STATE_FILE) ? JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) : {} as DirectorState;
-  state.versions ||= []; state.head ??= null; state.audit ||= []; state.events ||= []; state.agentCursor ||= 0; state.adoptionRequests ||= [];
-  const save = () => { fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state, null, 2)); fs.renameSync(STATE_FILE + '.tmp', STATE_FILE); };
-  const audit = (event: string, data: Record<string, unknown> = {}) => { state.audit.push({ t: new Date().toISOString(), event, ...data }); save(); };
-  const getV = (id: string | null | undefined): Version | undefined => state.versions.find((v) => v.id === id);
-  // A discarded version cannot be rendered at final quality, be the base of a proposal, or be adopted.
-  // Check it when a request arrives, when a ticket is used, and again after every await before state changes.
-  const liveV = (id: string | null | undefined): Version | undefined => { const v = getV(id); return v && v.status !== 'discarded' ? v : undefined; };
-  const vdir = (id: string) => path.join(RUNS, id);
-  const sceneOf = (id: string): Scene => JSON.parse(fs.readFileSync(path.join(vdir(id), 'scene.json'), 'utf8'));
-  const hashScene = (id: string) => sha256(fs.readFileSync(path.join(vdir(id), 'scene.json'))).slice(0, 16);
-
-  // Events the agent can read with wait_for_feedback. Waiters are resolved when a new event arrives.
-  const waiters = new Set<() => void>();
-  const pushEvent = (ev: AgentEventBody) => {
-    state.events.push({ seq: state.events.length + 1, t: new Date().toISOString(), ...ev }); save();
-    for (const w of waiters) w();
-  };
-
-  function addVersion({ parent, scene, origin, instruction = null, proposal = null, status }: {
-    parent: string | null; scene: unknown; origin: Version['origin']; instruction?: string | null; proposal?: Proposal | null; status: VersionStatus;
-  }): Version {
-    const id = `v${String(state.versions.length + 1).padStart(3, '0')}`;
-    fs.mkdirSync(vdir(id), { recursive: true });
-    fs.writeFileSync(path.join(vdir(id), 'scene.json'), JSON.stringify(scene, null, 2));
-    const v: Version = { id, parent, origin, instruction, proposal, status, created: new Date().toISOString(), renders: {} };
-    state.versions.push(v);
-    if (status === 'accepted') state.head = id;
-    save();
-    return v;
-  }
-
-  if (!state.versions.length) {
-    const scene = JSON.parse(fs.readFileSync(path.join(ROOT, 'scenes', 'starter.json'), 'utf8'));
-    addVersion({ parent: null, scene, origin: 'starter', status: 'accepted' });
-    audit('init', { head: state.head, mode: MODE });
-  }
-
-  // ---------- jobs (cancellable, observable steps) ----------
-  // Jobs the UI polls by id. A finished job is kept JOB_TTL after its last step so the UI can read the result,
-  // then dropped (#32); /api/jobs/:id then answers 404. Agent API jobs are not listed: nobody can poll them.
-  const jobs = new Map<string, Job>();
-  const JOB_TTL = 10 * 60_000;
-  const newJob = (kind: string, versionId: string, { listed = true } = {}) => {
-    const now = Date.now();
-    for (const [id, j] of jobs) if (j.status !== 'running' && j.started + (j.steps.at(-1)?.t ?? 0) < now - JOB_TTL) jobs.delete(id);
-    const job: Job = { id: crypto.randomUUID(), kind, versionId, status: 'running', steps: [], started: now, result: null, error: null, ac: new AbortController() };
-    if (listed) jobs.set(job.id, job);
-    return job;
-  };
-  const step = (job: Job, label: string, status: JobStep['status'] = 'running', detail: string | null | undefined = null) => {
-    const prev = job.steps.at(-1); if (prev && prev.status === 'running') prev.status = 'done';
-    job.steps.push({ label, status, detail, t: Date.now() - job.started });
-  };
-  const failJob = (job: Job, e: Partial<Error> | null | undefined) => { if (job.status === 'cancelled') return; job.status = 'failed'; job.error = String(e?.message || e); step(job, 'Failed', 'failed', job.error); };
+  // Scene file references are relative to the project, or to scenes/ in standalone mode.
+  const renderer = createVorkRenderer({ assetBase: PROJECT || path.join(ROOT, 'scenes'), version: VORK_VERSION });
+  const starter = JSON.parse(fs.readFileSync(path.join(ROOT, 'scenes', 'starter.json'), 'utf8')) as Scene;
+  const director = createDirector({ runs: RUNS, project: PROJECT, renderer, starter });
+  const { state, readConfig, save, audit, getV, liveV, vdir, sceneOf, hashScene, waiters, pushEvent, addVersion, jobs, newJob, step, failJob, renderLocks, renderVersion, validateScene, createProposal } = director;
   const publicJob = (j: Job) => ({ id: j.id, kind: j.kind, versionId: j.versionId, status: j.status, steps: j.steps, elapsed: Date.now() - j.started, result: j.result, error: j.error });
-
-  // An aborted signal kills the process with SIGTERM (spawn's own handling). The promise settles when the process has
-  // exited, not at the abort, so a render lock is held until vork stops writing its output.
-  function run(cmd: string, args: string[], { timeout, input, cwd, signal }: { timeout?: number; input?: string; cwd?: string; signal: AbortSignal }): Promise<RunResult> {
-    if (signal.aborted) return Promise.resolve({ code: -1, signal: null, stdout: '', stderr: 'cancelled', timedOut: false });
-    return new Promise((resolve) => {
-      const child = spawn(cmd, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], signal });
-      let stdout = '', stderr = '', timedOut = false;
-      const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, timeout);
-      child.stdout.on('data', (d) => (stdout += d)); child.stderr.on('data', (d) => (stderr += d));
-      if (input) child.stdin.end(input); else child.stdin.end();
-      child.on('close', (code, sig) => { clearTimeout(timer); resolve({ code, signal: sig, stdout, stderr, timedOut }); });
-      child.on('error', (e) => { if (e.name === 'AbortError') return; clearTimeout(timer); resolve({ code: -1, stdout, stderr: String(e), timedOut }); });
-    });
-  }
-
-  // Scene file references are project-relative (policy-checked). vork resolves them relative to the scene
-  // file, so the rendered copy rewrites them to point from the version directory into the project.
-  const ASSET_BASE = PROJECT || path.join(ROOT, 'scenes');
-  function sceneForRender(scene: Scene, dir: string) {
-    const walk = (x: unknown): unknown => {
-      if (Array.isArray(x)) return x.map(walk);
-      if (x && typeof x === 'object') return Object.fromEntries(Object.entries(x).map(([k, val]) => [k, k === 'file' && typeof val === 'string' ? path.relative(dir, path.join(ASSET_BASE, val)) : walk(val)]));
-      return x;
-    };
-    return walk(scene);
-  }
-
-  // Renders of the same version are serialized: vork writes fixed output names per profile.
-  // renderLocks holds the last queued render of a version and is dropped when that render ends (#32).
-  const renderLocks = new Map<string, Promise<RenderResult>>();
-  // A stored render of a version and profile that is queued or running. A version's scene.json never changes, so a
-  // second request for the same render waits for that one instead of queueing another (#28). Renders of a pinned
-  // scene text (adoption) are never shared.
-  const sharedRenders = new Map<string, Promise<RenderResult>>();
-  function renderVersion(job: Job, v: Version, profile: Profile, opts: { scene?: Scene; pinnedText?: string } = {}): Promise<RenderResult> {
-    const key = `${v.id}:${profile}`; const shareable = !opts.scene && opts.pinnedText === undefined;
-    const running = shareable ? sharedRenders.get(key) : undefined;
-    // If the shared render was cancelled with its own job, a caller that was not cancelled renders it itself.
-    if (running) return running.then((r) => (r.cancelled && job.status !== 'cancelled' ? renderVersion(job, v, profile) : r));
-    const prev = renderLocks.get(v.id) || Promise.resolve();
-    const next = prev.catch(() => {}).then(() => renderVersionNow(job, v, profile, opts));
-    renderLocks.set(v.id, next);
-    if (shareable) sharedRenders.set(key, next);
-    next.catch(() => {}).finally(() => {
-      if (renderLocks.get(v.id) === next) renderLocks.delete(v.id);
-      if (sharedRenders.get(key) === next) sharedRenders.delete(key);
-    });
-    return next;
-  }
-  // scene: throwaway validation render (not stored). pinnedText: render exactly this scene text and store it.
-  async function renderVersionNow(job: Job, v: Pick<Version, 'id' | 'renders'>, profile: Profile, { scene, pinnedText }: { scene?: Scene; pinnedText?: string } = {}): Promise<RenderResult> {
-    const dir = vdir(v.id); const sceneFile = path.join(dir, scene ? 'scene.check.json' : 'scene.render.json');
-    const sceneText = scene ? null : pinnedText ?? fs.readFileSync(path.join(dir, 'scene.json'), 'utf8');
-    fs.writeFileSync(sceneFile, JSON.stringify(sceneForRender(scene || JSON.parse(sceneText!), dir)));
-    const out = path.join(dir, `${profile}.png`);
-    const args = ['render', sceneFile, '--out', out, '--profile', PROFILES[profile], '--channels', 'color,object_index'];
-    const t0 = Date.now();
-    const r = await run('vork', args, { timeout: LIMITS[profile], cwd: dir, signal: job.ac.signal });
-    const seconds = (Date.now() - t0) / 1000;
-    if (job.status === 'cancelled') return { ok: false, cancelled: true };
-    if (r.code !== 0) return { ok: false, code: r.code, timedOut: r.timedOut, log: (r.stderr + r.stdout).slice(-4000), seconds };
-    const meta = JSON.parse(fs.readFileSync(`${out}.meta.json`, 'utf8')) as VorkMeta;
-    const ids = decodeGray16(fs.readFileSync(path.join(dir, `${profile}.object_index.png`)));
-    fs.writeFileSync(path.join(dir, `${profile}.ids.bin`), ids.data);
-    const warnings = (r.stderr + r.stdout).split('\n').filter((l) => /warn/i.test(l)).slice(0, 20);
-    const stamp = Date.now();
-    const info: RenderInfo = {
-      profile, seconds, width: ids.w, height: ids.h, image: `/runs/${v.id}/${profile}.png?${stamp}`, ids: `/runs/${v.id}/${profile}.ids.bin?${stamp}`,
-      file: out, sha256: sha256(fs.readFileSync(out)), idsSha256: sha256(ids.data),
-      sceneHash: sceneText ? sha256(sceneText).slice(0, 16) : null,
-      objects: meta.object_ids, exposure: meta.exposure,
-      settings: { integrator: meta.settings.integrator, samples: meta.settings.samples, denoiser: meta.denoiser }, warnings,
-    };
-    // A final render of a version discarded while it ran is not kept (#15).
-    if (profile === 'final' && !liveV(v.id)) return { ok: false, log: `${v.id} was discarded during the render; the final render was not kept` };
-    if (!scene) { v.renders[profile] = info; save(); }
-    return { ok: true, info };
-  }
-
-  // Validate a proposed scene: policy, then a previs render in a throwaway directory.
-  async function validateScene(job: Job, scene: Scene | undefined): Promise<ValidateResult> {
-    const pol = policyCheck(scene);
-    if (pol.blockers.length) return { ok: false, kind: 'blocked', policy: pol };
-    const tmp = { id: `tmp-${job.id.slice(0, 8)}`, renders: {} };
-    fs.mkdirSync(vdir(tmp.id), { recursive: true });
-    let check: RenderResult;
-    try { check = await renderVersionNow(job, tmp, 'previs', { scene }); }
-    catch (e: any) { check = { ok: false, log: String(e.message || e) }; }
-    finally { fs.rmSync(vdir(tmp.id), { recursive: true, force: true }); }
-    if (check.cancelled) return { ok: false, kind: 'cancelled' };
-    if (!check.ok) return { ok: false, kind: 'invalid', log: check.log, policy: pol };
-    return { ok: true, policy: pol };
-  }
-
-  async function createProposal(job: Job, { baseId, scene, instruction, proposal }: { baseId: string | null; scene: Scene; instruction: string; proposal: Proposal }): Promise<{ v: Version; draft: RenderResult }> {
-    const v = addVersion({ parent: baseId, scene, origin: 'agent', instruction, proposal, status: 'proposed' });
-    step(job, 'Rendering draft preview of the proposal');
-    const draft = await renderVersion(job, v, 'draft');
-    if (draft.cancelled) return { v, draft };
-    if (!draft.ok) step(job, 'Draft render failed (previs is still available)', 'failed', draft.log);
-    else await renderVersion(job, v, 'previs');
-    audit('proposed', { version: v.id, parent: baseId, instruction, cost: proposal.cost ?? null, flags: proposal.policy.flags.length, via: proposal.via });
-    return { v, draft };
-  }
 
   // ---------- built-in proposer (standalone mode only) ----------
   const PROPOSAL_SCHEMA = {
