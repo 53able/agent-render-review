@@ -102,6 +102,9 @@ const arg = (name: string): string | undefined => { const i = argv.indexOf(name)
 
 /** A client error whose message is safe to return as a 400 response. */
 class BadRequest extends Error {}
+/** A request body over MAX_BODY bytes; answered with 413. */
+class PayloadTooLarge extends Error {}
+const MAX_BODY = 4e6;
 const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
 const isClaimedChange = (x: unknown): x is ClaimedChange => isPlainObject(x) && typeof x.node === 'string' && typeof x.what === 'string' && typeof x.why === 'string';
 
@@ -136,7 +139,14 @@ export function policyCheck(scene: Scene | null | undefined): PolicyResult {
   };
   walk(scene, 'scene');
   if (scene.programs && Object.keys(scene.programs).length) blockers.push('custom programs are not allowed in this prototype');
-  const names = scene.nodes.map((n) => n.name).filter(Boolean);
+  // The diff a human reviews pairs nodes by name, so every node needs its own name. '#' is reserved for diff keys.
+  const names: string[] = [];
+  scene.nodes.forEach((n, i) => {
+    const name = isPlainObject(n) ? n.name : undefined;
+    if (typeof name !== 'string' || !name) blockers.push(`scene.nodes[${i}]: every node needs a non-empty string "name"`);
+    else if (name.startsWith('#')) blockers.push(`scene.nodes[${i}].name ${JSON.stringify(name)}: names starting with "#" are reserved`);
+    else names.push(name);
+  });
   const dup = names.filter((n, i) => names.indexOf(n) !== i);
   if (dup.length) blockers.push(`duplicate node names: ${[...new Set(dup)].join(', ')}`);
   return { blockers, flags };
@@ -145,26 +155,36 @@ export function policyCheck(scene: Scene | null | undefined): PolicyResult {
 // Diff computed from data, not from the model's description.
 export function diffScenes(a: Scene, b: Scene): DiffEntry[] {
   const out: DiffEntry[] = [];
-  const byName = (s: Scene) => Object.fromEntries((s.nodes || []).map((n, i) => [n.name || `#${i}`, n]));
+  // A Map keyed by name: no inherited keys, and a key that is already taken never hides a node.
+  const byName = (s: Scene) => {
+    const m = new Map<string, unknown>();
+    (Array.isArray(s.nodes) ? s.nodes : []).forEach((n, i) => {
+      const name = isPlainObject(n) ? n.name : undefined;
+      let key = typeof name === 'string' && name ? name : `#${i}`;
+      while (m.has(key)) key += `#${i}`;
+      m.set(key, n);
+    });
+    return m;
+  };
   const A = byName(a), B = byName(b);
+  const own = (o: Record<string, unknown>, k: string) => (Object.hasOwn(o, k) ? o[k] : undefined);
   const rec = (x: unknown, y: unknown, p: string, node: string): void => {
     if (JSON.stringify(x) === JSON.stringify(y)) return;
-    const isObj = (v: any): v is Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v);
     const numArr = (v: unknown) => Array.isArray(v) && v.every((n) => typeof n === 'number');
-    if (isObj(x) && isObj(y)) {
-      for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) rec(x[k], y[k], p ? `${p}.${k}` : k, node);
+    if (isPlainObject(x) && isPlainObject(y)) {
+      for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) rec(own(x, k), own(y, k), p ? `${p}.${k}` : k, node);
     } else if (Array.isArray(x) && Array.isArray(y) && !numArr(x) && x.length === y.length) {
       x.forEach((_, i) => rec(x[i], y[i], `${p}[${i}]`, node));
     } else out.push({ node, path: p, before: x, after: y });
   };
-  for (const n of new Set([...Object.keys(A), ...Object.keys(B)])) {
-    if (!A[n]) out.push({ node: n, path: '(node)', before: undefined, after: 'added' });
-    else if (!B[n]) out.push({ node: n, path: '(node)', before: 'present', after: 'removed' });
-    else rec(A[n], B[n], '', n);
+  for (const n of new Set([...A.keys(), ...B.keys()])) {
+    if (!A.has(n)) out.push({ node: n, path: '(node)', before: undefined, after: 'added' });
+    else if (!B.has(n)) out.push({ node: n, path: '(node)', before: 'present', after: 'removed' });
+    else rec(A.get(n), B.get(n), '', n);
   }
   for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
     if (k === 'nodes') continue;
-    rec(a[k], b[k], k, '(scene)');
+    rec(own(a, k), own(b, k), k, '(scene)');
   }
   return out;
 }
@@ -239,6 +259,10 @@ if (argv[0] === '--selftest') {
     ['compositor resolution blocked', { ...base, render: { ...base.render, compositor: [{ material: 'm', resolution: [8000, 8000] }] } }, (r) => r.blockers.some((b) => b.includes('compositor'))],
     ['gltf blocked', { ...base, nodes: [...base.nodes, { type: 'asset', name: 'x', file: 'm.gltf' }] }, (r) => r.blockers.length === 1],
     ['image file object in inputs blocked', { ...base, nodes: [...base.nodes, { type: 'mesh', name: 'q', geometry: { std: 'box' }, materials: [{ inputs: { base_color: { image: { file: '/etc/passwd' } } } }] }] }, (r) => r.blockers.length === 1],
+    ['unnamed node blocked', { ...base, nodes: [...base.nodes, { type: 'mesh', geometry: { std: 'box' } }] }, (r) => r.blockers.some((b) => b.includes('name'))],
+    ['non-string name blocked', { ...base, nodes: [...base.nodes, { type: 'mesh', name: 1, geometry: { std: 'box' } } as unknown as SceneNode] }, (r) => r.blockers.some((b) => b.includes('name'))],
+    ['reserved # name blocked', { ...base, nodes: [...base.nodes, { type: 'light', name: '#10', energy: 5 }] }, (r) => r.blockers.some((b) => b.includes('reserved'))],
+    ['null node blocked without throwing', { ...base, nodes: [...base.nodes, null as unknown as SceneNode] }, (r) => r.blockers.some((b) => b.includes('name'))],
     ['duplicate names blocked', { ...base, nodes: [...base.nodes, { type: 'mesh', name: 'vase', geometry: { std: 'box' } }] }, (r) => r.blockers.some((b) => b.includes('duplicate'))],
     ['wrong version blocked', { ...base, version: 1 }, (r) => r.blockers.length === 1],
   ];
@@ -248,6 +272,15 @@ if (argv[0] === '--selftest') {
   const d = diffScenes(base, mod);
   const dpass = d.length === 2 && d.some((x) => x.node === 'vase' && x.path === 'materials[0].inputs.base_color') && d.some((x) => x.node === '(scene)' && x.path === 'render.background');
   fail += !dpass as unknown as number; console.log(`${dpass ? 'PASS' : 'FAIL'} diff finds exactly the two edits`, dpass ? '' : JSON.stringify(d));
+  // #8: a '#<index>' name must not hide an unnamed node; inherited keys are added, not changed
+  const added = (extra: SceneNode[]) => diffScenes(base, { ...base, nodes: [...base.nodes, ...extra] });
+  const collide = added([{ type: 'light', name: `#${base.nodes.length + 1}`, energy: 5000 }, { type: 'mesh', geometry: { std: 'box' } }]);
+  const inherited = ['constructor', 'toString', '__proto__', 'hasOwnProperty'].map((name) => added([{ type: 'light', name, energy: 5 }]));
+  const extraCases: [string, boolean, unknown][] = [
+    ['diff: a "#<index>" name does not hide an unnamed node', collide.length === 2 && collide.every((x) => x.path === '(node)' && x.after === 'added'), collide],
+    ['diff: inherited key names show as added nodes', inherited.every((x) => x.length === 1 && x[0].path === '(node)' && x[0].after === 'added'), inherited],
+  ];
+  for (const [name, pass, got] of extraCases) { fail += !pass as unknown as number; console.log(`${pass ? 'PASS' : 'FAIL'} ${name}`, pass ? '' : JSON.stringify(got)); }
   // write-back containment
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(process.env.TMPDIR || '/tmp'), 'vd-self-'));
   fs.mkdirSync(path.join(tmp, 'proj', 'public'), { recursive: true }); fs.mkdirSync(path.join(tmp, 'outside'));
@@ -287,6 +320,12 @@ async function main() {
   const MODE = PROJECT ? 'ade' : 'standalone';
   const RUNS = PROJECT ? path.join(PROJECT, '.vork') : path.resolve(process.env.VORK_DIRECTOR_RUNS || path.join(ROOT, 'runs'));
   const MODEL = process.env.DIRECTOR_MODEL || 'sonnet';
+  // Files under PUBLIC are served without a session, so RUNS (server.json, state.json) must not live there.
+  // Checked before mkdir, on the real path of the nearest existing ancestor.
+  // realpathSync.native returns the on-disk letter case, so PUBLIC/x is caught on case-insensitive file systems.
+  const realish = (p: string): string => { let probe = p; while (!fs.existsSync(probe)) probe = path.dirname(probe); return path.join(fs.realpathSync.native(probe), path.relative(probe, p)); };
+  const runsReal = realish(RUNS), publicReal = fs.realpathSync.native(PUBLIC);
+  if (runsReal === publicReal || runsReal.startsWith(publicReal + path.sep)) { console.error(`refusing to start: the runs folder ${RUNS} is inside ${PUBLIC}, which is served without a session`); process.exit(2); }
   fs.mkdirSync(RUNS, { recursive: true });
   const LOCK = path.join(RUNS, 'lock');
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { return e.code === 'EPERM'; } };
@@ -475,7 +514,7 @@ async function main() {
   const SYSTEM = `You are the scene assistant inside "vork Director". A human director looks at renders and asks for changes.
 You edit vork scene JSON (API v2). You do NOT render; the app renders and the director judges the image.
 Rules:
-- Return the COMPLETE revised scene in "scene". Keep every node "name" stable; give new nodes unique names.
+- Return the COMPLETE revised scene in "scene". Keep every node "name" stable; give every new node a unique, non-empty name that does not start with "#".
 - Change only what the request needs. If objects are SELECTED, scope changes to them unless the request clearly says otherwise.
 - Never reference files, URLs or downloads. Do not add custom programs/shader code unless explicitly asked.
 - Unknown fields are errors in vork; use only fields documented below. Keep resolution unchanged unless asked.
@@ -591,12 +630,28 @@ ${VORK_HELP}`;
 
   const send = (res: http.ServerResponse, code: number, body: unknown, type = 'application/json', headers: Record<string, string> = {}) => {
     res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...headers });
-    res.end(type === 'application/json' ? JSON.stringify(body) : body);
+    // File contents (a Buffer) are sent as they are, also for .json files.
+    res.end(type === 'application/json' && !Buffer.isBuffer(body) ? JSON.stringify(body) : body);
   };
   // The type argument is not checked at run time; each endpoint still validates the fields it reads.
+  // Over MAX_BODY: settle with PayloadTooLarge (413) and keep draining the rest, so the client can read the response.
+  // Draining stops at MAX_DRAIN: past that the connection is dropped instead of reading on until requestTimeout.
+  const MAX_DRAIN = 4 * MAX_BODY;
   const readBody = <T,>(req: http.IncomingMessage): Promise<T> => new Promise((ok, bad) => {
-    let b = ''; req.on('data', (d) => { b += d; if (b.length > 4e6) req.destroy(); });
+    const chunks: Buffer[] = []; let size = 0; let settled = false;
+    const fail = (e: Error) => { if (!settled) { settled = true; chunks.length = 0; bad(e); } };
+    req.on('data', (d: Buffer) => {
+      size += d.length;
+      if (size > MAX_DRAIN) return void req.destroy();
+      if (settled) return;
+      if (size > MAX_BODY) fail(new PayloadTooLarge()); else chunks.push(d);
+    });
+    if (Number(req.headers['content-length']) > MAX_BODY) fail(new PayloadTooLarge());
+    req.on('error', fail);
+    req.on('close', () => fail(new Error('request closed before the body was read')));
     req.on('end', () => {
+      if (settled) return; settled = true;
+      const b = Buffer.concat(chunks).toString('utf8');
       let parsed: unknown;
       try { parsed = b ? JSON.parse(b) : {}; } catch { return bad(new BadRequest('request body is not valid JSON')); }
       if (!isPlainObject(parsed)) return bad(new BadRequest('request body must be a JSON object'));
@@ -642,10 +697,15 @@ ${VORK_HELP}`;
       if (!base || base.status === 'discarded') return send(res, 400, { error: 'base must be an existing, not discarded version' });
       if (typeof b.interpretation !== 'string' || !b.interpretation.trim() || !Array.isArray(b.claimed_changes)) return send(res, 400, { error: 'interpretation and claimed_changes are required' });
       if (!b.claimed_changes.every(isClaimedChange)) return send(res, 400, { error: 'each claimed_changes item must be { node, what, why } with string values' });
+      // Checked before validateScene so a bad field does not cost a vork render.
+      if (b.assumptions != null && !(Array.isArray(b.assumptions) && b.assumptions.every((a) => typeof a === 'string'))) return send(res, 400, { error: 'assumptions must be an array of strings' });
+      if (b.responds_to != null && !Number.isInteger(b.responds_to)) return send(res, 400, { error: 'responds_to must be an integer' });
+      const assumptions: string[] = (b.assumptions as string[] | null | undefined) ?? [];
+      const respondsTo = (b.responds_to as number | null | undefined) ?? null;
       const job = newJob('agent-propose', baseId!);
       const check = await validateScene(job, b.scene);
       if (!check.ok) { audit('agent_proposal_rejected', { kind: check.kind, base: baseId }); return send(res, 422, { error: check.kind === 'blocked' ? 'policy' : 'vork rejected the scene', blockers: check.policy?.blockers || [], log: check.log || null, version: null }); }
-      const proposal: Proposal = { interpretation: b.interpretation, assumptions: Array.isArray(b.assumptions) ? b.assumptions.map(String) : [], claimed_changes: b.claimed_changes.map(({ node, what, why }) => ({ node, what, why })), policy: check.policy, context: b.responds_to ? [`responds to feedback #${b.responds_to}`] : [], via: 'mcp', respondsTo: b.responds_to ?? null };
+      const proposal: Proposal = { interpretation: b.interpretation, assumptions, claimed_changes: b.claimed_changes.map(({ node, what, why }) => ({ node, what, why })), policy: check.policy, context: respondsTo != null ? [`responds to feedback #${respondsTo}`] : [], via: 'mcp', respondsTo };
       const { v, draft } = await createProposal(job, { baseId, scene: b.scene, instruction: b.interpretation, proposal });
       return send(res, 200, { version: v.id, status: v.status, head: state.head, render: draft.ok ? renderSummary(draft.info) : null, renderError: draft.ok ? null : draft.log, diff: diffScenes(sceneOf(baseId!), b.scene), flags: check.policy.flags });
     }
@@ -676,10 +736,11 @@ ${VORK_HELP}`;
       const b = await readBody<{ version: string; slug: unknown; reason?: unknown }>(req); const v = getV(b.version);
       if (!PROJECT) return send(res, 409, { error: 'adoption needs Director started with --project' });
       if (!v || v.status === 'discarded') return send(res, 400, { error: 'version must exist and not be discarded' });
+      if (b.reason != null && typeof b.reason !== 'string') return send(res, 400, { error: 'reason must be a string' });
       let slug: string;
       try { ({ slug } = adoptionTargets(b.slug)); } catch (e: any) { return send(res, 400, { error: e.message }); }
       const reqId = `a${String(state.adoptionRequests.length + 1).padStart(3, '0')}`;
-      state.adoptionRequests.push({ id: reqId, version: v.id, slug, reason: String(b.reason || ''), status: 'pending', t: new Date().toISOString() });
+      state.adoptionRequests.push({ id: reqId, version: v.id, slug, reason: b.reason ?? '', status: 'pending', t: new Date().toISOString() });
       audit('adoption_requested', { request: reqId, version: v.id, slug });
       return send(res, 200, { request: reqId, status: 'pending_human_approval', note: 'A human must approve this in Director. Call wait_for_feedback to learn the outcome.' });
     }
@@ -762,10 +823,14 @@ ${VORK_HELP}`;
 
       if (req.method === 'POST' && url.pathname === '/api/propose') {
         if (MODE === 'ade') return send(res, 409, { error: 'ADE mode: proposals come from your ADE agent via MCP. Send feedback instead.' });
-        const body = await readBody<{ baseId: string; instruction?: string; selection?: string[]; context?: { selection?: boolean; exposure?: boolean; history?: boolean } }>(req);
-        if (!getV(body.baseId) || !body.instruction?.trim()) return send(res, 400, { error: 'need baseId and instruction' });
+        const body = await readBody<{ baseId: string; instruction?: unknown; selection?: unknown; context?: unknown }>(req);
+        if (!getV(body.baseId) || typeof body.instruction !== 'string' || !body.instruction.trim()) return send(res, 400, { error: 'need baseId and instruction' });
+        // Same rule as /api/feedback: keep only string selections. Context flags are read as booleans.
+        const selection = (Array.isArray(body.selection) ? body.selection : []).filter((x): x is string => typeof x === 'string').slice(0, 50);
+        const ctx = isPlainObject(body.context) ? body.context : {};
+        const context = { selection: ctx.selection === true, exposure: ctx.exposure === true, history: ctx.history === true };
         const job = newJob('propose', body.baseId);
-        propose(job, { baseId: body.baseId, instruction: body.instruction.trim(), selection: body.selection || [], context: body.context || {} })
+        propose(job, { baseId: body.baseId, instruction: body.instruction.trim(), selection, context })
           .then((r) => { if (job.status === 'cancelled') return; job.status = r && ['proposal', 'question'].includes(r.kind) ? 'done' : 'failed'; job.result = r; if (job.status === 'failed') job.error = r?.kind || 'failed'; })
           .catch((e) => { if (job.status === 'cancelled') return; job.status = 'failed'; job.error = String(e.message || e); step(job, 'Agent call failed', 'failed', job.error); audit('agent_error', { error: job.error }); });
         return send(res, 202, publicJob(job));
@@ -885,6 +950,7 @@ ${VORK_HELP}`;
         if (!baseV || baseV.status !== 'accepted') return send(res, 400, { error: 'direct edits start from an accepted version' });
         const spec = typeof field === 'string' && Object.hasOwn(allowed, field) ? allowed[field] : undefined;
         if (!spec || !spec[1](value)) return send(res, 400, { error: 'unsupported edit or value out of range' });
+        if (typeof node !== 'string' || !node) return send(res, 400, { error: 'node must be a node name' });
         const scene = sceneOf(baseId); const n = scene.nodes.find((x) => x.name === node);
         if (!n) return send(res, 400, { error: 'no such node' });
         if (spec[0] === 'light') { if (n.type !== 'light') return send(res, 400, { error: 'not a light' }); n[field] = value; }
@@ -917,12 +983,23 @@ ${VORK_HELP}`;
         root = PUBLIC;
       }
       if (rel.includes('\0') || rel.split(/[\\/]/).includes('..')) return send(res, 404, 'not found', 'text/plain');
-      const real = path.resolve(root, '.' + path.sep + rel);
-      if (!real.startsWith(root + path.sep) || !fs.existsSync(real) || !fs.statSync(real).isFile())
+      // No symlinks below the root: the real path must be the literal one. A link that stays inside RUNS
+      // (v001/final.png -> ../server.json) would otherwise still pass a "real path is inside the root" check.
+      // .native also makes a URL whose letter case differs from the file on disk a 404.
+      const rootReal = fs.realpathSync.native(root); const want = path.resolve(rootReal, '.' + path.sep + rel);
+      let real: string;
+      try { real = fs.realpathSync.native(want); } catch { return send(res, 404, 'not found', 'text/plain'); }
+      if (real !== want || !real.startsWith(rootReal + path.sep) || !fs.statSync(real).isFile())
         return send(res, 404, 'not found', 'text/plain');
       return send(res, 200, fs.readFileSync(real), MIME[path.extname(real)] || 'application/octet-stream');
     } catch (e: any) {
       if (e instanceof BadRequest) return send(res, 400, { error: e.message });
+      if (e instanceof PayloadTooLarge) {
+        // Reply once the rest of the body is drained: closing while the client still sends resets the connection.
+        const reply = () => { if (!res.headersSent && !res.destroyed) send(res, 413, { error: `request body is larger than ${MAX_BODY / 1e6} MB` }); };
+        return req.readableEnded ? reply() : void req.once('end', reply);
+      }
+      if (res.destroyed) return; // client went away mid-body
       console.error(e); return send(res, 500, { error: 'internal error' });
     }
   });

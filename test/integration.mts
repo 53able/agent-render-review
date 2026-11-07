@@ -295,6 +295,117 @@ await check('#6 static serving cannot reach server.json or state.json outside pu
   assert.equal((await get('/app.js')).status, 200, 'normal static files still served');
 });
 
+await check('#11 /runs/ does not follow a symlink out of .vork; a runs folder inside public/ is refused', async () => {
+  const link = path.join(PROJECT, '.vork', 'v001', 'page-previs.png');
+  assert.ok(!fs.existsSync(link), 'test needs an unused render name');
+  fs.symlinkSync('../server.json', link);
+  try {
+    const r = await fetch(`${BASE}/runs/v001/page-previs.png`, { headers: { cookie: uiCookie } });
+    const body = await r.text();
+    assert.equal(r.status, 404); assert.doesNotMatch(body, /agentToken/);
+  } finally { fs.rmSync(link); }
+  const { spawnSync } = await import('node:child_process');
+  // The upper-case spelling only names public/ on a case-insensitive file system; there it must be refused too.
+  const caseInsensitive = fs.existsSync(path.join(ROOT, 'PUBLIC'));
+  for (const dir of ['public', ...(caseInsensitive ? ['PUBLIC', 'Public'] : [])]) {
+    const inside = path.join(ROOT, dir, `runs-${process.pid}`);
+    try {
+      const p = spawnSync(process.execPath, [path.join(ROOT, 'server.mts'), '--port', '0'], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_RUNS: inside }, encoding: 'utf8', timeout: 20000 });
+      assert.notEqual(p.status, 0, dir); assert.match(p.stderr, /inside/, dir);
+      assert.ok(!fs.existsSync(inside), `nothing is created under ${dir}/`);
+    } finally { fs.rmSync(inside, { recursive: true, force: true }); }
+  }
+});
+
+await check('#10 a static .json file is served as its contents, not as a serialized Buffer', async () => {
+  const r = await fetch(`${BASE}/tsconfig.json`);
+  assert.equal(r.status, 200); assert.match(r.headers.get('content-type')!, /application\/json/);
+  assert.equal(await r.text(), fs.readFileSync(path.join(ROOT, 'public', 'tsconfig.json'), 'utf8'));
+});
+
+await check('#8 propose refuses unnamed and "#"-named nodes before rendering; edit needs a string node', async () => {
+  const versions = (await state()).versions.length;
+  const extra = [[{ name: `#${base.nodes.length + 1}`, type: 'light', energy: 5000 }, { type: 'mesh', geometry: { std: 'box' } }], [{ type: 'light', energy: 5 }], [{ name: 7, type: 'light', energy: 5 }]];
+  for (const nodes of extra) {
+    const r = await raw('/api/agent/propose', JSON.stringify({ interpretation: 'x', claimed_changes: [], scene: { ...base, nodes: [...base.nodes, ...nodes] } }), { agent: true });
+    assert.equal(r.status, 422, JSON.stringify(nodes)); assert.ok(r.json.blockers.some((b: string) => /name/.test(b)), JSON.stringify(r.json));
+  }
+  assert.equal((await state()).versions.length, versions);
+  // A version written before names were required may hold an unnamed light; an edit without "node" must not pick it.
+  const accepted = (await state()).versions.find((v: Json) => v.status === 'accepted').id;
+  const file = path.join(PROJECT, '.vork', accepted, 'scene.json'); const orig = fs.readFileSync(file, 'utf8');
+  const withUnnamed = JSON.parse(orig); withUnnamed.nodes.push({ type: 'light', energy: 5 });
+  fs.writeFileSync(file, JSON.stringify(withUnnamed));
+  try {
+    const before = (await state()).versions.length;
+    for (const node of [undefined, null, 1, ['vase'], '']) {
+      const r = await human('/api/edit', { baseId: accepted, node, field: 'energy', value: 10 });
+      assert.equal(r.status, 400, JSON.stringify(node));
+    }
+    assert.equal((await state()).versions.length, before);
+  } finally { fs.writeFileSync(file, orig); }
+});
+
+await check('#9 propose and adoption-request reject mistyped optional fields with 400, before rendering', async () => {
+  const versions = (await state()).versions.length;
+  const ok = { interpretation: 'x', claimed_changes: [], scene: base };
+  for (const extra of [{ responds_to: { toString: 1 } }, { responds_to: { a: [1, 2, 3] } }, { responds_to: '3' }, { responds_to: 1.5 }, { assumptions: [{ toString: 1 }] }, { assumptions: 'x' }, { assumptions: ['a', 2] }]) {
+    const r = await raw('/api/agent/propose', JSON.stringify({ ...ok, ...extra }), { agent: true });
+    assert.equal(r.status, 400, JSON.stringify(extra)); assert.match(r.json.error, /responds_to|assumptions/);
+  }
+  assert.equal((await state()).versions.length, versions);
+  const requests = (await state()).adoptionRequests.length;
+  for (const reason of [{ toString: 1 }, 1, ['x']]) {
+    const r = await raw('/api/agent/adoption-request', JSON.stringify({ version: 'v001', slug: 'hero', reason }), { agent: true });
+    assert.equal(r.status, 400, JSON.stringify(reason)); assert.match(r.json.error, /reason/);
+  }
+  assert.equal((await state()).adoptionRequests.length, requests);
+});
+
+await check('#9 standalone /api/propose rejects a non-string instruction with 400', async () => {
+  const { spawn } = await import('node:child_process');
+  const net = await import('node:net');
+  const port = await new Promise<number>((ok) => { const srv = net.createServer().listen(0, '127.0.0.1', () => { const p = (srv.address() as { port: number }).port; srv.close(() => ok(p)); }); });
+  const runs = path.join(tmp, 'standalone-runs');
+  const p = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR, VORK_DIRECTOR_RUNS: runs }, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !fs.existsSync(path.join(runs, 'server.json')); i++) await new Promise((r) => setTimeout(r, 150));
+    const url = `http://127.0.0.1:${port}`;
+    const pr = await fetch(`${url}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: PAIR }) });
+    const cookie = pr.headers.get('set-cookie')!.split(';')[0];
+    for (const instruction of [1, { trim: 1 }, ['x'], null, '  ']) {
+      const r = await fetch(`${url}/api/propose`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ baseId: 'v001', instruction }) });
+      assert.equal(r.status, 400, JSON.stringify(instruction));
+    }
+  } finally { p.kill('SIGTERM'); }
+});
+
+await check('#12 a body over 4 MB gets 413, with or without content-length; the server keeps serving', async () => {
+  const big = JSON.stringify({ interpretation: 'x'.repeat(5e6), claimed_changes: [], scene: base });
+  const r = await raw('/api/agent/propose', big, { agent: true });
+  assert.equal(r.status, 413); assert.match(r.json.error, /larger than/);
+  const http = await import('node:http'); const u = new URL(BASE);
+  const chunked = await new Promise<{ status: number; body: string }>((ok, bad) => {
+    const req = http.request({ host: u.hostname, port: u.port, path: '/api/agent/propose', method: 'POST', headers: { host: u.host, 'content-type': 'application/json', authorization: `Bearer ${agentToken()}`, 'transfer-encoding': 'chunked' } }, (res) => {
+      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => ok({ status: res.statusCode!, body: b }));
+    });
+    req.on('error', bad);
+    for (let i = 0; i < 5; i++) req.write('x'.repeat(1e6));
+    req.end();
+  });
+  assert.equal(chunked.status, 413, chunked.body);
+  // past the drain limit the server drops the connection rather than reading on
+  const endless = await new Promise<string>((ok) => {
+    const req = http.request({ host: u.hostname, port: u.port, path: '/api/agent/propose', method: 'POST', headers: { host: u.host, 'content-type': 'application/json', authorization: `Bearer ${agentToken()}`, 'transfer-encoding': 'chunked' } }, () => ok('response'));
+    req.on('error', () => ok('dropped'));
+    const chunk = 'x'.repeat(1e6); let sent = 0;
+    const pump = () => { while (sent < 40 && req.write(chunk)) sent++; if (sent < 40) req.once('drain', () => { sent++; pump(); }); else req.end(); };
+    pump();
+  });
+  assert.equal(endless, 'dropped');
+  assert.equal((await raw('/api/agent/status', '', { agent: true, method: 'GET' })).status, 200);
+});
+
 await check('AC-10 report: fixture gives exact numbers; live project counts match', async () => {
   const fixture = [
     { t: '2026-01-01T10:00:00.000Z', event: 'init' }, { t: '2026-01-01T10:02:00.000Z', event: 'proposed' },
