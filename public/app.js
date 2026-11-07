@@ -101,7 +101,7 @@ async function load(keepView = true) {
     ? `${S.data.vork} · ADE mode · project ${S.data.project?.split(/[\\/]/).filter(Boolean).at(-1) ?? ''} · proposals come from your agent via MCP · local only`
     : `${S.data.vork} · agent: claude ${S.data.model} (no tools) · local only`;
   $('#meta').title = ADE() ? S.data.project || '' : ''; // only the directory name is on screen (recordings, one-line header); the full path on hover
-  applyMode(); renderVersions(); renderObjects(); renderReview(); renderAdoptions(); renderEvents(); renderAudit(); await drawViewport();
+  applyMode(); renderVersions(); renderObjects(); renderReview(); renderInspector(); renderAdoptions(); renderEvents(); renderAudit(); await drawViewport();
 }
 const ADE = () => S.data?.mode === 'ade';
 /** @param {Data} d */
@@ -149,7 +149,7 @@ async function reviewAdoption(requestId) {
   let plan;
   try { plan = await api('/api/adopt/plan', { requestId }); } catch (e) { return fail('adopt', `Cannot adopt ${requestId}: ${why(e)}`); }
   clearFails('adopt');
-  S.viewId = plan.versionId; renderVersions(); renderObjects(); renderReview(); await drawViewport();
+  await openVersion(plan.versionId);
   const rows = [
     ['version', `${plan.versionId} (${plan.versionStatus})${plan.acceptsProposal ? ' — approving also accepts this proposal as HEAD' : ''}`],
     ['scene hash', plan.hash], ['agent says', plan.reason],
@@ -187,7 +187,7 @@ function notify(id) {
   n.innerHTML = `New proposal <b>${esc(id)}</b> from your agent <button type="button" class="ghost">View</button><button type="button" class="ghost" aria-label="Dismiss">✕</button>`;
   const close = closeNotice;
   const [view, dismiss] = /** @type {NodeListOf<HTMLButtonElement>} */ (n.querySelectorAll('button'));
-  view.onclick = async () => { close(); S.viewId = id; renderVersions(); renderObjects(); renderReview(); await drawViewport(); };
+  view.onclick = async () => { close(); await openVersion(id); };
   dismiss.onclick = close;
   say(`New proposal ${id} from your agent. Press View to open it.`);
 }
@@ -214,6 +214,8 @@ setInterval(async () => {
 }, 2500);
 
 // ---------- versions ----------
+/** Shows a version: the list, the inspector and the viewport follow. @param {string} id */
+function openVersion(id) { S.viewId = id; renderVersions(); renderObjects(); renderReview(); renderInspector(); return drawViewport(); }
 /** @param {Version} v */
 function depth(v) { let /** @type {number} */ d = 0, /** @type {Version | undefined} */ p = v; while (p?.parent && d < 3) { const parent = V(p.parent); if (parent && S.data.versions.filter((x) => x.parent === parent.id && x.status !== 'discarded').length > 1) d++; p = parent; } return d; }
 function renderVersions() {
@@ -225,7 +227,7 @@ function renderVersions() {
       <span class="vid">${v.id}${v.parent ? ` ← ${v.parent}` : ''} ${v.id === S.data.head ? '<span class="headmark">● HEAD</span>' : ''}</span>
       <span class="badge ${v.origin}">${v.origin}</span>
       <span class="vtitle">${esc(title)}</span></button>`;
-    /** @type {HTMLButtonElement} */ (li.querySelector('button')).onclick = () => { S.viewId = v.id; renderVersions(); renderObjects(); renderReview(); drawViewport(); say(`Viewing ${v.id}, ${v.status}`); };
+    /** @type {HTMLButtonElement} */ (li.querySelector('button')).onclick = () => { openVersion(v.id); say(`Viewing ${v.id}, ${v.status}`); };
     list.append(li);
   }
   renderJobs();
@@ -487,8 +489,7 @@ $('#askForm').addEventListener('submit', async (e) => {
     trackJob(job, async (j) => {
       S.lastResult = j;
       await load();
-      if (j.status === 'done' && j.result?.kind === 'proposal') { S.viewId = j.result.versionId; renderVersions(); renderObjects(); await drawViewport(); }
-      renderReview();
+      if (j.status === 'done' && j.result?.kind === 'proposal') await openVersion(j.result.versionId); else renderReview();
     });
   } catch (err) { fail('ask', `Could not start: ${why(err)}. Your request is kept.`); }
 });
@@ -603,9 +604,7 @@ function renderReview() {
   const shownMore = same && box.dataset.more === '1';
   box.dataset.view = v.id; box.dataset.more = shownMore ? '1' : '';
   box.hidden = false;
-  box.style.borderColor = v.status === 'proposed' ? 'var(--warn)' : 'var(--line)';
   box.innerHTML = `
-    <h3>${v.status === 'proposed' ? 'Proposal — not applied yet' : v.status === 'accepted' ? 'Accepted proposal' : 'Discarded proposal'} · ${v.id} from ${v.parent}</h3>
     ${V(/** @type {string} */ (v.parent))?.status !== 'accepted' ? `<p class="flag">⚠ Built on ${esc(v.parent)}, which is ${esc(V(/** @type {string} */ (v.parent))?.status)}. Accepting this also accepts that version's changes (not shown in this diff).</p>` : ''}
     <div><h3>Request</h3>${esc(v.instruction)}</div>
     <div><h3>Agent's reading</h3><p class="interp">${esc(p.interpretation)}</p>
@@ -618,11 +617,7 @@ function renderReview() {
       ${ghost.length ? `<p class="flag">⚠ Claimed but not changed: ${ghost.map(esc).join(', ')}</p>` : ''}</div>
     ${p.policy.flags.length ? `<div><h3>Needs attention</h3><ul>${p.policy.flags.map((f) => `<li class="flag">${f.level}: ${esc(f.msg)}</li>`).join('')}</ul></div>` : ''}
     <details><summary class="hint">Context that was sent</summary><pre class="hint" style="white-space:pre-wrap">${esc(p.context.join('\n\n') || 'scene only')}</pre></details>
-    <p class="hint">${p.via === 'mcp' ? 'Proposed by your ADE agent via MCP' : `Agent cost ${p.cost ? '$' + p.cost.toFixed(3) : 'n/a'}`}. Judge the image, not the explanation.</p>
-    ${v.status === 'proposed' ? `<div class="btnrow">
-      <button class="primary" id="acceptBtn">Accept as new HEAD</button>
-      <button class="ghost" id="refineBtn">Refine from this</button>
-      <button class="ghost danger" id="discardBtn">Discard</button></div>` : ''}`;
+    <p class="hint">${p.via === 'mcp' ? 'Proposed by your ADE agent via MCP' : `Agent cost ${p.cost ? '$' + p.cost.toFixed(3) : 'n/a'}`}. Judge the image, not the explanation.</p>`;
   // rows inside a group or past the cap are built only when the human opens them
   box.querySelectorAll('details[data-group]').forEach((el) => el.addEventListener('toggle', () => {
     const tb = /** @type {HTMLElement} */ (el.querySelector('tbody'));
@@ -631,10 +626,33 @@ function renderReview() {
   const more = box.querySelector('#moreDiff'); if (more) /** @type {HTMLButtonElement} */ (more).onclick = () => { box.dataset.more = '1'; /** @type {HTMLElement} */ (more.closest('tr')).outerHTML = hidden.map(row).join(''); };
   for (const g of openGroups) /** @type {HTMLDetailsElement | null} */ (box.querySelector(`details[data-group="${g}"]`))?.setAttribute('open', '');
   if (shownMore && more) /** @type {HTMLButtonElement} */ (more).click();
-  if (v.status !== 'proposed') return;
-  $('#acceptBtn').onclick = () => decide('accept');
-  $('#discardBtn').onclick = () => decide('discard');
-  $('#refineBtn').onclick = () => { /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = ''; /** @type {HTMLTextAreaElement} */ ($('#instruction')).placeholder = `Refine ${v.id}: what should differ?`; $('#instruction').focus(); };
+}
+
+// ---------- inspector head: the version on screen and what can be done with it (#56) ----------
+const STATUS_TEXT = /** @type {Record<string, string>} */ ({ proposed: 'Proposal — not applied yet', accepted: 'Accepted', discarded: 'Discarded' });
+function renderInspector() {
+  const v = viewV();
+  $('#h-insp').textContent = `${v.id} · ${v.origin === 'starter' ? 'Starter scene' : STATUS_TEXT[v.status] || v.status}`;
+  $('#vstate').innerHTML = [
+    v.id === S.data.head ? '<b>HEAD</b>' : v.status === 'accepted' ? 'accepted, not HEAD' : '',
+    v.parent ? `from ${esc(v.parent)}` : '', `by ${esc(v.origin)}`,
+  ].filter(Boolean).join(' · ');
+  const box = $('#decide');
+  box.innerHTML = v.status === 'proposed' ? `<button class="primary" id="acceptBtn">Accept as new HEAD</button>
+    <button class="ghost" id="refineBtn">Refine from this</button>
+    <button class="ghost danger" id="discardBtn">Discard</button>` : '';
+  if (v.status === 'proposed') {
+    $('#acceptBtn').onclick = () => decide('accept');
+    $('#discardBtn').onclick = () => decide('discard');
+    $('#refineBtn').onclick = () => { /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = ''; /** @type {HTMLTextAreaElement} */ ($('#instruction')).placeholder = `Refine ${v.id}: what should differ?`; $('#instruction').focus(); };
+  }
+  $('#finalBtn').hidden = v.status === 'discarded';
+  // adoption requests of this version, next to its actions
+  const reqs = (S.data.adoptionRequests || []).filter((a) => a.version === v.id && (a.status === 'pending' || a.status === 'adopting'));
+  $('#vrequests').hidden = !reqs.length;
+  $('#vrequests').innerHTML = reqs.map((a) => `<li><span>Adoption request <b>${esc(a.slug)}</b></span>${a.status === 'adopting' ? '<span class="hint">adopting…</span>' : `<button class="ghost" data-req="${esc(a.id)}">Review…</button>`}</li>`).join('');
+  $('#vrequests').querySelectorAll('button[data-req]').forEach((b) => (/** @type {HTMLButtonElement} */ (b).onclick = () => reviewAdoption(/** @type {HTMLButtonElement} */ (b).dataset.req)));
+  renderBusy();
 }
 /** @param {string} decision */
 async function decide(decision) {

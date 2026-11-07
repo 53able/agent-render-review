@@ -23,7 +23,7 @@ if (!fs.existsSync(CHROME)) {
 await acquireGpuLock('e2e');
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vd-e2e-')));
 // The README images in docs/ are rewritten only with E2E_UPDATE_SCREENSHOTS=1; otherwise screenshots go to the temp folder.
-const SHOTS = process.env.E2E_UPDATE_SCREENSHOTS === '1' ? path.join(ROOT, 'docs') : tmp;
+const SHOTS = process.env.E2E_UPDATE_SCREENSHOTS === '1' ? path.join(ROOT, 'docs') : process.env.E2E_SHOTS_DIR || tmp; // E2E_SHOTS_DIR: keep them to look at
 interface SceneNode { name: string; energy?: number; materials?: { inputs: Record<string, number> }[] }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let pass = 0, failures = 0; const procs: ChildProcess[] = [];
@@ -160,6 +160,21 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.click('#notice button');
     await page.waitForSelector(`#canvas[data-ready="${vid}:draft"]`, { timeout: 15000 });
     assert.match(await page.textContent('#review') as string, /Proposed by your ADE agent via MCP/);
+  });
+
+  await check('#56 at 1440×900 an opened proposal shows the render and Accept together, without scrolling', async () => {
+    await page.setViewportSize({ width: 1440, height: 900 }); await sleep(300);
+    const inView = async (sel: string) => { const b = (await page.locator(sel).boundingBox())!; return b.y >= 0 && b.y + b.height <= 900 && b.x >= 0 && b.x + b.width <= 1440; };
+    assert.equal(await page.evaluate(() => [document.scrollingElement!.scrollTop, document.querySelector('.inspector')!.scrollTop].join()), '0,0');
+    assert.ok(await inView('#acceptBtn'), 'Accept is on screen'); assert.ok(await inView('#canvas'), 'the render is on screen');
+    assert.match(await page.textContent('#h-insp') as string, new RegExp(`^${vid} · Proposal`));
+    // keyboard order follows the DOM: version list, then the viewport, then the inspector's actions
+    assert.ok(await page.evaluate(() => {
+      const [a, b, c] = ['#versionList', '#canvas', '#acceptBtn'].map((q) => document.querySelector(q)!);
+      return !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) && !!(b.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }));
+    await page.screenshot({ path: path.join(SHOTS, 'screenshot-proposal.png') });
+    await page.setViewportSize({ width: 1500, height: 1000 });
   });
 
   await check('ADE: feedback with a clicked selection reaches the agent and shows as read', async () => {

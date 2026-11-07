@@ -15,11 +15,20 @@
 <div id="conn" class="conn" role="alert" hidden></div>
 
 <main class="layout">
-  <!-- Versions -->
+  <!-- Versions: what needs a decision, every version, and the history -->
   <aside class="panel versions" aria-labelledby="h-versions">
+    <section id="adoptBox" class="adopt" hidden aria-labelledby="h-adopt">
+      <h2 id="h-adopt">Adoption requests</h2>
+      <ul id="adoptList" class="alist"></ul>
+    </section>
+    <div id="err-adopt" class="errs"></div>
     <h2 id="h-versions">Versions</h2>
     <p class="hint">Every change is a version. Proposals stay separate until you accept them.</p>
     <ol id="versionList" class="vlist"></ol>
+    <details class="auditbox">
+      <summary>History (audit log)</summary>
+      <ol id="audit" class="audit"></ol>
+    </details>
   </aside>
 
   <!-- Viewport -->
@@ -48,8 +57,29 @@
     <p class="hint">Numbers above come from vork's render metadata, not from the agent.</p>
   </section>
 
-  <!-- Direction -->
-  <aside class="panel direct" aria-labelledby="h-direct">
+  <!-- Inspector of the version on screen: its state and what can be done with it first, then what changed,
+       then selection (nouns) and what to send about it (verbs) (#56) -->
+  <aside class="panel inspector" aria-labelledby="h-insp">
+    <section class="vhead" aria-labelledby="h-insp">
+      <h2 id="h-insp" class="insp-title"></h2>
+      <p id="vstate" class="vstate"></p>
+      <div class="btnrow" id="actions">
+        <span id="decide" class="btnrow"></span>
+        <button id="finalBtn" class="ghost">Plan final render…</button>
+      </div>
+      <p id="finalBusy" class="hint" hidden></p>
+      <ul id="vrequests" class="alist" hidden aria-label="Adoption requests for this version"></ul>
+      <div id="err-review" class="errs"></div>
+      <div id="err-final" class="errs"></div>
+    </section>
+
+    <section id="jobBox" class="job" hidden aria-labelledby="h-job">
+      <h2 id="h-job">Working</h2>
+      <ol id="jobList" class="jobs"></ol>
+    </section>
+
+    <section id="review" class="review" hidden aria-label="What this proposal changes"></section>
+
     <section aria-labelledby="h-objects">
       <h2 id="h-objects">Objects</h2>
       <input type="search" id="objectFilter" class="ofilter" placeholder="Filter by name" aria-label="Filter objects by name" autocomplete="off">
@@ -58,12 +88,6 @@
       <div id="quick" class="quick"></div>
       <div id="err-edit" class="errs"></div>
     </section>
-
-    <section id="adoptBox" class="adopt" hidden aria-labelledby="h-adopt">
-      <h2 id="h-adopt">Adoption requests</h2>
-      <ul id="adoptList" class="alist"></ul>
-    </section>
-    <div id="err-adopt" class="errs"></div>
 
     <section aria-labelledby="h-ask" class="ask">
       <h2 id="h-ask">Direct the agent</h2>
@@ -85,27 +109,6 @@
       <div id="err-ask" class="errs"></div>
       <ol id="eventList" class="events" hidden aria-label="Messages to the agent"></ol>
     </section>
-
-    <section id="jobBox" class="job" hidden aria-labelledby="h-job">
-      <h2 id="h-job">Working</h2>
-      <ol id="jobList" class="jobs"></ol>
-    </section>
-
-    <section id="review" class="review" hidden aria-labelledby="h-review"></section>
-    <div id="err-review" class="errs"></div>
-
-    <section class="final" aria-labelledby="h-final">
-      <h2 id="h-final">Final render</h2>
-      <p class="hint">Uses GPU time and writes a file. Requires approval for the exact scene shown.</p>
-      <button id="finalBtn" class="ghost">Plan final render…</button>
-      <p id="finalBusy" class="hint" hidden></p>
-      <div id="err-final" class="errs"></div>
-    </section>
-
-    <details class="auditbox">
-      <summary>Audit log</summary>
-      <ol id="audit" class="audit"></ol>
-    </details>
   </aside>
 </main>
 
