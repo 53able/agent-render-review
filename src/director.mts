@@ -70,6 +70,22 @@ export interface DirectorOptions {
 
 export type Director = ReturnType<typeof createDirector>;
 
+// The audit fields copied to the diagnostic log (docs/logging.md section 6). Anything else, such as comment, the
+// agent's free-text reason or the error message of agent_error, can carry user input and stays in state.json only.
+const AUDIT_LOG_KEYS = new Set(['version', 'request', 'jobId', 'job', 'via', 'flags', 'selection', 'seconds', 'errorType', 'exitCode', 'timedOut', 'head', 'mode', 'node', 'field', 'overwrote', 'slug', 'parent', 'base', 'hash']);
+// The only reason the audit gets is written by Director itself (rejectRequestsOfDiscarded).
+const AUDIT_SYSTEM_REASONS = new Set(['version discarded']);
+function auditLogFields(event: string, data: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { auditEvent: event };
+  for (const [k, v] of Object.entries(data)) if (AUDIT_LOG_KEYS.has(k)) out[k] = v;
+  if (typeof data.instruction === 'string') out.instructionLen = data.instruction.length;
+  if (typeof data.reason === 'string' && AUDIT_SYSTEM_REASONS.has(data.reason)) out.reason = data.reason;
+  // kind here is the check result (blocked | invalid); as kind it would overwrite the job kind from withJob.
+  if (data.kind !== undefined) out.checkKind = data.kind;
+  return out;
+}
+
+
 export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter, proposer, clock = Date.now }: DirectorOptions) {
   const MODE: 'ade' | 'standalone' = PROJECT ? 'ade' : 'standalone';
   const L = log('director');
@@ -88,7 +104,10 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   const STATE_FILE = path.join(RUNS, 'state.json');
   const state: DirectorState = normalizeState(fs.existsSync(STATE_FILE) ? JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) : {});
   const save = () => { fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state, null, 2)); fs.renameSync(STATE_FILE + '.tmp', STATE_FILE); };
-  const audit = (event: string, data: Record<string, unknown> = {}) => { state.audit.push({ t: new Date().toISOString(), event, ...data }); save(); };
+  const audit = (event: string, data: Record<string, unknown> = {}) => {
+    state.audit.push({ t: new Date().toISOString(), event, ...data }); save();
+    L.info('audit', 'Audit event recorded', auditLogFields(event, data));
+  };
   const getV = (id: string | null | undefined): Version | undefined => state.versions.find((v) => v.id === id);
   // A discarded version cannot be rendered at final quality, be the base of a proposal, or be adopted.
   // Check it when a request arrives, when a ticket is used, and again after every await before state changes.
@@ -143,7 +162,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   // The one place a job ends (#70). cancelled is what the cancel request does; it is not called for a finished job.
   const endJob = (job: Job, outcome: JobOutcome) => {
     if (outcome.status === 'cancelled') {
-      job.status = 'cancelled'; job.ac.abort(); step(job, 'Cancelled by director', 'failed'); audit('cancelled', { job: job.kind, version: job.versionId });
+      job.status = 'cancelled'; job.ac.abort(); step(job, 'Cancelled by director', 'failed'); audit('cancelled', { job: job.kind, version: job.versionId, jobId: job.id });
       for (const [rid, aj] of adoptionJobs) if (aj === job) adoptionJobs.delete(rid); // the request is pending again
       return;
     }
@@ -396,7 +415,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
           step(job, 'vork render std/final (approved scene)');
           const r = await renderVersion(job, v, 'final', { pinnedText: t.sceneText }); if (job.status === 'cancelled') return;
           if (!r.ok) throw new Error(`final render failed: ${r.log && /device lost/i.test(r.log) ? renderFailure(r, LIMITS.final / 1000) : r.log?.slice(-400)}`);
-          audit('final_rendered', { version: v.id, seconds: r.info.seconds });
+          audit('final_rendered', { version: v.id, seconds: r.info.seconds, jobId: job.id });
         }
         step(job, 'Writing into the project');
         // Check again right before writing: the request is still ours and pending, the version not discarded.
@@ -425,7 +444,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
         replaceFiles([[targets.asset, png], [targets.manifest, JSON.stringify(manifest, null, 2)]]);
         if (v.status === 'proposed') { acceptVersion(state, v); audit('accept', { version: v.id, via: 'adoption' }); }
         settleRequest(ar, 'adopted'); save();
-        audit('adopted', { request: ar.id, version: v.id, hash: t.hash, asset: targets.assetRel, sha256: pngSha, overwrote });
+        audit('adopted', { request: ar.id, version: v.id, jobId: job.id, hash: t.hash, asset: targets.assetRel, sha256: pngSha, overwrote });
         pushEvent({ type: 'adopted', request: ar.id, version: v.id, slug: t.slug, asset: targets.assetRel, manifest: targets.manifestRel, sha256: pngSha });
         step(job, 'Adopted', 'done'); job.result = { asset: targets.assetRel, manifest: targets.manifestRel, sha256: pngSha, overwrote };
       } finally { if (adoptionJobs.get(ar.id) === job) adoptionJobs.delete(ar.id); }
@@ -512,7 +531,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     const instruction = body.instruction.trim();
     runJob(job, () => propose(job, { baseId: body.baseId, instruction, selection, context }),
       (r) => { job.result = r; if (r && ['proposal', 'question'].includes(r.kind)) return { status: 'done' }; job.error = r?.kind || 'failed'; return { status: 'failed' }; },
-      (e) => { job.error = String(e.message || e); step(job, 'Agent call failed', 'failed', job.error); audit('agent_error', { error: job.error }); return { status: 'failed', err: e }; });
+      (e) => { job.error = String(e.message || e); step(job, 'Agent call failed', 'failed', job.error); audit('agent_error', { error: job.error, jobId: job.id, errorType: errFields(e, { message: false }).errorType }); return { status: 'failed', err: e }; });
     return job;
   }
 
@@ -547,7 +566,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     }
     const job = newJob('render', versionId); step(job, `vork render ${PROFILES[profile]}`);
     runJob(job, () => renderVersion(job, v, profile), (r) => {
-      if (r.ok) { step(job, 'Done', 'done'); job.result = r.info; if (profile === 'final') audit('final_rendered', { version: versionId, seconds: r.info.seconds }); return { status: 'done' }; }
+      if (r.ok) { step(job, 'Done', 'done'); job.result = r.info; if (profile === 'final') audit('final_rendered', { version: versionId, seconds: r.info.seconds, jobId: job.id }); return { status: 'done' }; }
       job.error = renderFailure(r, LIMITS[profile] / 1000); step(job, job.error, 'failed', r.log);
       return { status: 'failed', render: { code: r.code, timedOut: r.timedOut, log: r.log } };
     });
