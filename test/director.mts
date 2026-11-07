@@ -501,6 +501,132 @@ await check('#80 T3 every logged event has service and component', async () => {
   for (const e of logged) { assert.equal(e.service, 'render-director', JSON.stringify(e)); assert.equal(typeof e.component, 'string', JSON.stringify(e)); }
 });
 
+// #70: how each job started in the background ends today (status, error, result, steps, audit). Pinned before the
+// endings are moved onto one function, so that move cannot change them.
+const ending = (job: { status: string; error: string | null; steps: { label: string; status: string; detail: string | null | undefined }[] }) =>
+  ({ status: job.status, error: job.error, steps: job.steps.map((s) => [s.label, s.status, s.detail]) });
+const auditSince = (d: ReturnType<typeof setup>['d'], from: number) => d.state.audit.slice(from).map(({ t, ...rest }) => rest);
+const boom = async (): Promise<RenderOutcome> => { throw new Error('boom'); };
+
+await check('#70 startRender: done, failed render, thrown error, cancelled', async () => {
+  const { d, fake } = setup(); const orig = fake.renderer.render; let from = d.state.audit.length;
+  const done = await waitJob(d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }));
+  assert.deepEqual(ending(done), { status: 'done', error: null, steps: [['vork render std/draft', 'done', null], ['Done', 'done', null]] });
+  assert.equal((done.result as { profile: string }).profile, 'draft');
+  fake.fail('bad');
+  const failed = await waitJob(d.startRender({ versionId: 'v001', profile: 'previs', ticket: '' }));
+  assert.deepEqual(ending(failed), { status: 'failed', error: 'vork exited 1', steps: [['vork render std/previs', 'done', null], ['vork exited 1', 'failed', 'bad']] });
+  assert.equal(failed.result, null);
+  fake.fail(null); fake.renderer.render = boom;
+  const thrown = await waitJob(d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }));
+  assert.deepEqual(ending(thrown), { status: 'failed', error: 'boom', steps: [['vork render std/draft', 'done', null], ['Failed', 'failed', 'boom']] });
+  assert.equal(thrown.result, null);
+  fake.renderer.render = orig;
+  assert.deepEqual(auditSince(d, from), [], 'a non-final render, done or failed, is not audited');
+  const release = fake.hold(); const cancelled = d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }); await tick();
+  assert.equal(d.cancelJob(cancelled.id), cancelled); release(); await tick(); await tick();
+  assert.deepEqual(ending(cancelled), { status: 'cancelled', error: null, steps: [['vork render std/draft', 'done', null], ['Cancelled by director', 'failed', null]] });
+  assert.equal(cancelled.result, null);
+  assert.deepEqual(auditSince(d, from), [{ event: 'cancelled', job: 'render', version: 'v001', jobId: cancelled.id }]);
+  from = d.state.audit.length;
+  const final = await waitJob(d.startRender({ versionId: 'v001', profile: 'final', ticket: d.planFinal('v001').ticket }));
+  assert.equal(final.status, 'done');
+  assert.deepEqual(auditSince(d, from), [{ event: 'final_approved', version: 'v001', hash: d.hashScene('v001') }, { event: 'final_rendered', version: 'v001', seconds: 0.01, jobId: final.id }]);
+  assert.deepEqual(d.cancelJob(final.id)?.status, 'done', 'cancelling a finished job changes nothing');
+  assert.equal(final.steps.length, 2);
+});
+
+await check('#70 directEdit: done, failed draft, failed previs (not reflected), thrown error, cancelled', async () => {
+  const { d, fake } = setup(); const orig = fake.renderer.render;
+  const edit = () => d.directEdit({ baseId: 'v001', node: 'vase', field: 'specular_roughness', value: 0.3 });
+  const ok = edit(); await waitJob(ok.job);
+  assert.deepEqual(ending(ok.job), { status: 'done', error: null, steps: [['vork render std/draft', 'done', null], ['Done', 'done', null]] });
+  assert.equal(ok.job.result, ok.v.renders.draft); assert.ok(ok.v.renders.previs);
+  fake.fail('bad');
+  const failed = edit(); await waitJob(failed.job);
+  assert.deepEqual(ending(failed.job), { status: 'failed', error: 'vork exited 1', steps: [['vork render std/draft', 'done', null], ['Render failed: vork exited 1', 'failed', 'bad']] });
+  assert.equal(failed.job.result, undefined); assert.equal(fake.calls.at(-1)!.profile, 'draft', 'no previs after a failed draft');
+  fake.fail(null);
+  fake.renderer.render = async (o) => (o.profile === 'previs' ? { ok: false, code: 2, timedOut: false, log: 'previs bad', seconds: 0 } : orig(o));
+  const previsFailed = edit(); await waitJob(previsFailed.job);
+  assert.deepEqual(ending(previsFailed.job), { status: 'done', error: null, steps: [['vork render std/draft', 'done', null], ['Done', 'done', null]] });
+  assert.equal(previsFailed.job.result, previsFailed.v.renders.draft); assert.equal(previsFailed.v.renders.previs, undefined);
+  fake.renderer.render = boom;
+  const thrown = edit(); await waitJob(thrown.job);
+  assert.deepEqual(ending(thrown.job), { status: 'failed', error: 'boom', steps: [['vork render std/draft', 'done', null], ['Failed', 'failed', 'boom']] });
+  assert.equal(thrown.job.result, null);
+  fake.renderer.render = orig;
+  const release = fake.hold(); const cancelled = edit(); await tick();
+  d.cancelJob(cancelled.job.id); release(); await tick(); await tick();
+  assert.deepEqual(ending(cancelled.job), { status: 'cancelled', error: null, steps: [['vork render std/draft', 'done', null], ['Cancelled by director', 'failed', null]] });
+  assert.equal(cancelled.job.result, null); assert.equal(cancelled.v.renders.draft, undefined);
+  assert.deepEqual(d.state.audit.slice(1).map((a) => a.event), ['direct_edit', 'direct_edit', 'direct_edit', 'direct_edit', 'direct_edit', 'cancelled']);
+  assert.deepEqual(auditSince(d, d.state.audit.length - 1), [{ event: 'cancelled', job: 'render', version: cancelled.v.id, jobId: cancelled.job.id }]);
+});
+
+await check('#70 startAdoption: failed final render, cancelled, done', async () => {
+  const { d, fake } = setup({ ade: true });
+  const { v } = await agentProposal(d, [0.6, 0.3, 0.1]);
+  const requestId = d.requestAdoption({ version: v.id, slug: 'endings' }); let from = d.state.audit.length;
+  fake.fail('bad');
+  const failed = await waitJob(d.startAdoption(d.planAdoption({ requestId }).ticket));
+  assert.deepEqual(ending(failed), { status: 'failed', error: 'final render failed: bad', steps: [['vork render std/final (approved scene)', 'done', null], ['Failed', 'failed', 'final render failed: bad']] });
+  assert.equal(failed.result, null); assert.equal(d.adoptionJobs.size, 0); assert.equal(d.state.adoptionRequests[0].status, 'pending');
+  assert.deepEqual(auditSince(d, from), [], 'a failed adoption is not audited');
+  fake.fail(null);
+  const release = fake.hold(); const cancelled = d.startAdoption(d.planAdoption({ requestId }).ticket); await tick();
+  assert.equal(d.adoptionJobs.size, 1); d.cancelJob(cancelled.id); assert.equal(d.adoptionJobs.size, 0, 'the request is free again right away');
+  release(); await tick(); await tick();
+  assert.deepEqual(ending(cancelled), { status: 'cancelled', error: null, steps: [['vork render std/final (approved scene)', 'done', null], ['Cancelled by director', 'failed', null]] });
+  assert.equal(cancelled.result, null); assert.equal(d.state.adoptionRequests[0].status, 'pending');
+  assert.deepEqual(auditSince(d, from), [{ event: 'cancelled', job: 'adopt', version: v.id, jobId: cancelled.id }]);
+  from = d.state.audit.length;
+  const done = await waitJob(d.startAdoption(d.planAdoption({ requestId }).ticket));
+  assert.deepEqual(ending(done), { status: 'done', error: null, steps: [['vork render std/final (approved scene)', 'done', null], ['Writing into the project', 'done', null], ['Adopted', 'done', null]] });
+  assert.deepEqual(Object.keys(done.result as object), ['asset', 'manifest', 'sha256', 'overwrote']);
+  assert.deepEqual(auditSince(d, from).map((a) => a.event), ['final_rendered', 'accept', 'adopted']);
+  assert.equal(d.adoptionJobs.size, 0);
+});
+
+await check('#70 startPropose: proposal, question, blocked twice, empty answer, thrown error, cancelled', async () => {
+  let answer: 'ok' | 'question' | 'blocked' | 'null' | 'throw' = 'ok'; let gate: Promise<void> | null = null;
+  const proposer: Proposer = async () => {
+    if (gate) await gate;
+    if (answer === 'null') return null;
+    if (answer === 'throw') throw new Error('claude exited 1');
+    const scene = answer === 'blocked' ? { ...starter, programs: { p: {} } } as Scene : withColor([0.3, 0.3, 0.6]);
+    return { out: { interpretation: 'i', assumptions: [], clarifying_question: answer === 'question' ? 'which one?' : null, claimed_changes: [], scene }, cost: 0, ms: 1 };
+  };
+  const { d } = setup({ proposer }); let from = d.state.audit.length;
+  const run = (a: typeof answer) => { answer = a; return waitJob(d.startPropose({ baseId: 'v001', instruction: 'do it' })); };
+  const DRAFTING = 'Agent is drafting a scene change', CHECKING = 'Checking policy and validating with vork';
+  const proposal = await run('ok');
+  assert.deepEqual(ending(proposal), { status: 'done', error: null, steps: [[DRAFTING, 'done', null], [CHECKING, 'done', null], ['Rendering draft preview of the proposal', 'done', null], ['Proposal ready for review', 'done', null]] });
+  assert.deepEqual(proposal.result, { kind: 'proposal', versionId: 'v002' });
+  assert.deepEqual(auditSince(d, from).map((a) => a.event), ['proposed']); from = d.state.audit.length;
+  const question = await run('question');
+  assert.deepEqual(ending(question), { status: 'done', error: null, steps: [[DRAFTING, 'done', null], ['Agent needs clarification', 'done', null]] });
+  assert.equal((question.result as { kind: string }).kind, 'question');
+  const blocked = await run('blocked');
+  const why = (blocked.result as { policy: { blockers: string[] } }).policy.blockers.join('; '); assert.ok(why);
+  assert.deepEqual(ending(blocked), { status: 'failed', error: 'blocked', steps: [[DRAFTING, 'done', null], [CHECKING, 'failed', why], ['Agent is repairing its proposal (1 retry)', 'done', null], [CHECKING, 'done', null], ['Blocked by policy', 'failed', why]] });
+  assert.equal((blocked.result as { kind: string }).kind, 'blocked');
+  const empty = await run('null');
+  assert.deepEqual(ending(empty), { status: 'failed', error: 'failed', steps: [[DRAFTING, 'running', null]] }, 'the last step is left running');
+  assert.equal(empty.result, undefined);
+  assert.deepEqual(auditSince(d, from), [], 'a question, a blocked proposal and an empty answer are not audited');
+  const thrown = await run('throw');
+  assert.deepEqual(ending(thrown), { status: 'failed', error: 'claude exited 1', steps: [[DRAFTING, 'done', null], ['Agent call failed', 'failed', 'claude exited 1']] });
+  assert.equal(thrown.result, null);
+  assert.deepEqual(auditSince(d, from), [{ event: 'agent_error', error: 'claude exited 1', jobId: thrown.id, errorType: 'Error' }]); from = d.state.audit.length;
+  let release!: () => void; gate = new Promise((r) => (release = r)); answer = 'ok';
+  const cancelled = d.startPropose({ baseId: 'v001', instruction: 'do it' }); await tick();
+  d.cancelJob(cancelled.id); release(); gate = null; await tick(); await tick();
+  assert.deepEqual(ending(cancelled), { status: 'cancelled', error: null, steps: [[DRAFTING, 'done', null], ['Cancelled by director', 'failed', null]] });
+  assert.equal(cancelled.result, null);
+  assert.deepEqual(auditSince(d, from), [{ event: 'cancelled', job: 'propose', version: 'v001', jobId: cancelled.id }]);
+});
+
 shutdownLogging();
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${failures} failed`);
