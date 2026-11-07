@@ -310,6 +310,38 @@ await check('#8 propose refuses unnamed and "#"-named nodes before rendering; ed
   }
 });
 
+await check('#9 propose and adoption-request reject mistyped optional fields with 400, before rendering', async () => {
+  const versions = (await state()).versions.length;
+  const ok = { interpretation: 'x', claimed_changes: [], scene: base };
+  for (const extra of [{ responds_to: { toString: 1 } }, { responds_to: { a: [1, 2, 3] } }, { responds_to: '3' }, { responds_to: 1.5 }, { assumptions: [{ toString: 1 }] }, { assumptions: 'x' }, { assumptions: ['a', 2] }]) {
+    const r = await raw('/api/agent/propose', JSON.stringify({ ...ok, ...extra }), { agent: true });
+    assert.equal(r.status, 400, JSON.stringify(extra)); assert.match(r.json.error, /responds_to|assumptions/);
+  }
+  assert.equal((await state()).versions.length, versions);
+  const requests = (await state()).adoptionRequests.length;
+  for (const reason of [{ toString: 1 }, 1, ['x']]) {
+    const r = await raw('/api/agent/adoption-request', JSON.stringify({ version: 'v001', slug: 'hero', reason }), { agent: true });
+    assert.equal(r.status, 400, JSON.stringify(reason)); assert.match(r.json.error, /reason/);
+  }
+  assert.equal((await state()).adoptionRequests.length, requests);
+});
+
+await check('#9 standalone /api/propose rejects a non-string instruction with 400', async () => {
+  const { spawn } = await import('node:child_process');
+  const runs = path.join(tmp, 'standalone-runs'); const port = 47900 + Math.floor(Math.random() * 90);
+  const p = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR, VORK_DIRECTOR_RUNS: runs }, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !fs.existsSync(path.join(runs, 'server.json')); i++) await new Promise((r) => setTimeout(r, 150));
+    const url = `http://127.0.0.1:${port}`;
+    const pr = await fetch(`${url}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: PAIR }) });
+    const cookie = pr.headers.get('set-cookie')!.split(';')[0];
+    for (const instruction of [1, { trim: 1 }, ['x'], null, '  ']) {
+      const r = await fetch(`${url}/api/propose`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ baseId: 'v001', instruction }) });
+      assert.equal(r.status, 400, JSON.stringify(instruction));
+    }
+  } finally { p.kill('SIGTERM'); }
+});
+
 await check('AC-10 report: fixture gives exact numbers; live project counts match', async () => {
   const fixture = [
     { t: '2026-01-01T10:00:00.000Z', event: 'init' }, { t: '2026-01-01T10:02:00.000Z', event: 'proposed' },

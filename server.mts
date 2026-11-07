@@ -672,10 +672,15 @@ ${VORK_HELP}`;
       if (!base || base.status === 'discarded') return send(res, 400, { error: 'base must be an existing, not discarded version' });
       if (typeof b.interpretation !== 'string' || !b.interpretation.trim() || !Array.isArray(b.claimed_changes)) return send(res, 400, { error: 'interpretation and claimed_changes are required' });
       if (!b.claimed_changes.every(isClaimedChange)) return send(res, 400, { error: 'each claimed_changes item must be { node, what, why } with string values' });
+      // Checked before validateScene so a bad field does not cost a vork render.
+      if (b.assumptions != null && !(Array.isArray(b.assumptions) && b.assumptions.every((a) => typeof a === 'string'))) return send(res, 400, { error: 'assumptions must be an array of strings' });
+      if (b.responds_to != null && !Number.isInteger(b.responds_to)) return send(res, 400, { error: 'responds_to must be an integer' });
+      const assumptions: string[] = (b.assumptions as string[] | null | undefined) ?? [];
+      const respondsTo = (b.responds_to as number | null | undefined) ?? null;
       const job = newJob('agent-propose', baseId!);
       const check = await validateScene(job, b.scene);
       if (!check.ok) { audit('agent_proposal_rejected', { kind: check.kind, base: baseId }); return send(res, 422, { error: check.kind === 'blocked' ? 'policy' : 'vork rejected the scene', blockers: check.policy?.blockers || [], log: check.log || null, version: null }); }
-      const proposal: Proposal = { interpretation: b.interpretation, assumptions: Array.isArray(b.assumptions) ? b.assumptions.map(String) : [], claimed_changes: b.claimed_changes.map(({ node, what, why }) => ({ node, what, why })), policy: check.policy, context: b.responds_to ? [`responds to feedback #${b.responds_to}`] : [], via: 'mcp', respondsTo: b.responds_to ?? null };
+      const proposal: Proposal = { interpretation: b.interpretation, assumptions, claimed_changes: b.claimed_changes.map(({ node, what, why }) => ({ node, what, why })), policy: check.policy, context: respondsTo != null ? [`responds to feedback #${respondsTo}`] : [], via: 'mcp', respondsTo };
       const { v, draft } = await createProposal(job, { baseId, scene: b.scene, instruction: b.interpretation, proposal });
       return send(res, 200, { version: v.id, status: v.status, head: state.head, render: draft.ok ? renderSummary(draft.info) : null, renderError: draft.ok ? null : draft.log, diff: diffScenes(sceneOf(baseId!), b.scene), flags: check.policy.flags });
     }
@@ -706,10 +711,11 @@ ${VORK_HELP}`;
       const b = await readBody<{ version: string; slug: unknown; reason?: unknown }>(req); const v = getV(b.version);
       if (!PROJECT) return send(res, 409, { error: 'adoption needs Director started with --project' });
       if (!v || v.status === 'discarded') return send(res, 400, { error: 'version must exist and not be discarded' });
+      if (b.reason != null && typeof b.reason !== 'string') return send(res, 400, { error: 'reason must be a string' });
       let slug: string;
       try { ({ slug } = adoptionTargets(b.slug)); } catch (e: any) { return send(res, 400, { error: e.message }); }
       const reqId = `a${String(state.adoptionRequests.length + 1).padStart(3, '0')}`;
-      state.adoptionRequests.push({ id: reqId, version: v.id, slug, reason: String(b.reason || ''), status: 'pending', t: new Date().toISOString() });
+      state.adoptionRequests.push({ id: reqId, version: v.id, slug, reason: b.reason ?? '', status: 'pending', t: new Date().toISOString() });
       audit('adoption_requested', { request: reqId, version: v.id, slug });
       return send(res, 200, { request: reqId, status: 'pending_human_approval', note: 'A human must approve this in Director. Call wait_for_feedback to learn the outcome.' });
     }
@@ -792,10 +798,14 @@ ${VORK_HELP}`;
 
       if (req.method === 'POST' && url.pathname === '/api/propose') {
         if (MODE === 'ade') return send(res, 409, { error: 'ADE mode: proposals come from your ADE agent via MCP. Send feedback instead.' });
-        const body = await readBody<{ baseId: string; instruction?: string; selection?: string[]; context?: { selection?: boolean; exposure?: boolean; history?: boolean } }>(req);
-        if (!getV(body.baseId) || !body.instruction?.trim()) return send(res, 400, { error: 'need baseId and instruction' });
+        const body = await readBody<{ baseId: string; instruction?: unknown; selection?: unknown; context?: unknown }>(req);
+        if (!getV(body.baseId) || typeof body.instruction !== 'string' || !body.instruction.trim()) return send(res, 400, { error: 'need baseId and instruction' });
+        // Same rule as /api/feedback: keep only string selections. Context flags are read as booleans.
+        const selection = (Array.isArray(body.selection) ? body.selection : []).filter((x): x is string => typeof x === 'string').slice(0, 50);
+        const ctx = isPlainObject(body.context) ? body.context : {};
+        const context = { selection: ctx.selection === true, exposure: ctx.exposure === true, history: ctx.history === true };
         const job = newJob('propose', body.baseId);
-        propose(job, { baseId: body.baseId, instruction: body.instruction.trim(), selection: body.selection || [], context: body.context || {} })
+        propose(job, { baseId: body.baseId, instruction: body.instruction.trim(), selection, context })
           .then((r) => { if (job.status === 'cancelled') return; job.status = r && ['proposal', 'question'].includes(r.kind) ? 'done' : 'failed'; job.result = r; if (job.status === 'failed') job.error = r?.kind || 'failed'; })
           .catch((e) => { if (job.status === 'cancelled') return; job.status = 'failed'; job.error = String(e.message || e); step(job, 'Agent call failed', 'failed', job.error); audit('agent_error', { error: job.error }); });
         return send(res, 202, publicJob(job));
