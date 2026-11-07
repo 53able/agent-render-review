@@ -44,7 +44,7 @@ export interface Proposal {
 }
 export type VersionStatus = 'proposed' | 'accepted' | 'discarded';
 /** A page preview as state.json keeps it: the screenshot is <version folder>/page-<source>.png, source being the render it used. */
-export interface PagePreviewOk { ok: true; matched: number; warning: string | null; sha256?: string; source: Profile }
+export interface PagePreviewOk { ok: true; matched: number; warning: string | null; sha256: string; source: Profile }
 export type PagePreviewResult = { ok: false; reason: string } | PagePreviewOk;
 export interface Version {
   id: string; parent: string | null; origin: 'starter' | 'agent' | 'human'; instruction: string | null; proposal: Proposal | null;
@@ -239,6 +239,7 @@ export const requestsOfDiscarded = (state: DirectorState, busy: (requestId: stri
 /**
  * Fills in what a state.json from an older Director lacks, and drops what it kept that Director no longer stores:
  * the URLs and the absolute path of a render, and the URL of a page preview (its source render is read from it) (#42).
+ * A page preview without a hash is dropped (#43).
  */
 export function normalizeState(raw: Partial<DirectorState>): DirectorState {
   const state = raw as DirectorState;
@@ -251,7 +252,8 @@ export function normalizeState(raw: Partial<DirectorState>): DirectorState {
       const from = typeof old.image === 'string' ? /\/page-(previs|draft|final)\.png(\?|$)/.exec(old.image)?.[1] : undefined;
       old.source ||= from as Profile;
       delete old.image;
-      if (!isProfile(old.source)) delete v.pagePreviews[k];
+      // A preview without a hash (from before #26) cannot be served (#43); the UI takes a new one when it is opened.
+      if (!isProfile(old.source) || typeof old.sha256 !== 'string') delete v.pagePreviews[k];
     }
   }
   return state;

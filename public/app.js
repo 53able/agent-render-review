@@ -1,6 +1,6 @@
 // ---------- types (JSDoc only; no runtime effect) ----------
 /** @typedef {{ pass_index: number, name: string }} RenderObject */
-/** @typedef {{ image: string, ids: string, width: number, height: number, objects: RenderObject[], profile: string, seconds: number, settings: { integrator: string, samples: number }, exposure: { mean: number, clipped: number, near_black: number }, warnings: string[] }} Render */
+/** @typedef {{ image: string, ids: string | null, width: number, height: number, objects: RenderObject[], profile: string, seconds: number, settings: { integrator: string, samples: number }, exposure: { mean: number, clipped: number, near_black: number }, warnings: string[] }} Render */
 /** @typedef {{ ok: boolean, reason?: string, image: string, matched: number, warning?: string }} PagePreview */
 /** @typedef {{ name: string, type: string, shape?: string, energy?: number, color?: number[], materials?: { inputs: Record<string, any> }[] }} SceneNode */
 /** @typedef {{ nodes: SceneNode[] }} Scene */
@@ -209,8 +209,9 @@ async function drawViewport() {
   const p = /** @type {Version | undefined} */ (v.parent && V(v.parent)); const pr = p?.renders[S.profile];
   S.imgB = S.compare && pr ? await loadImg(pr.image) : null;
   $('#wipe').hidden = !S.imgB;
-  const buf = await (await fetch(r.ids)).arrayBuffer();
-  S.ids = { w: r.width, h: r.height, arr: new Uint16Array(buf), objects: Object.fromEntries(r.objects.map((o) => [o.pass_index, o.name])) };
+  // ids is null for a render recorded before object ids were hashed: Director does not serve that file (#43).
+  const buf = r.ids ? await (await fetch(r.ids)).arrayBuffer() : null;
+  S.ids = buf && { w: r.width, h: r.height, arr: new Uint16Array(buf), objects: Object.fromEntries(r.objects.map((o) => [o.pass_index, o.name])) };
   for (const c of [cv, ov]) { c.width = r.width; c.height = r.height; }
   $('#viewport').style.aspectRatio = `${r.width} / ${r.height}`;
   paint();
@@ -312,7 +313,13 @@ function renderMeasure(r) {
     ['render', `${r.profile} · ${r.seconds.toFixed(2)}s`], ['integrator', `${r.settings.integrator} · ${r.settings.samples} spp`],
     ['mean', e.mean.toFixed(3)], ['clipped', pct(e.clipped), e.clipped > 0.01], ['near-black', pct(e.near_black), e.near_black > 0.05],
     ['warnings', r.warnings.length, r.warnings.length > 0],
-  ].map(([k, v, w]) => `<div><dt>${k}</dt><dd class="${w ? 'warn' : ''}">${esc(v)}</dd></div>`).join('');
+  ].map(([k, v, w]) => `<div><dt>${k}</dt><dd class="${w ? 'warn' : ''}">${esc(v)}</dd></div>`).join('')
+    + (r.ids ? '' : `<div><dd class="warn">Object ids of this render predate recorded hashes, so clicking cannot select. ${r.profile === 'final' ? 'Plan the final render again to fix it.' : `<button type="button" class="ghost" id="rerender">Render ${esc(r.profile)} again</button>`}</dd></div>`);
+  const again = /** @type {HTMLButtonElement | null} */ (m.querySelector('#rerender'));
+  if (again) again.onclick = async () => {
+    try { trackJob(await api('/api/render', { versionId: S.viewId, profile: r.profile }), () => load()); }
+    catch (e) { alertMsg(`Could not start: ${/** @type {Error} */ (e).message}`); }
+  };
 }
 
 // ---------- objects & direct manipulation ----------

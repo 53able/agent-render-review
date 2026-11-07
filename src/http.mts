@@ -25,6 +25,22 @@ class PayloadTooLarge extends Error {
 const MAX_BODY = 4e6;
 const REFUSAL_STATUS: Record<Refusal['kind'], number> = { invalid: 400, forbidden: 403, not_found: 404, conflict: 409, unprocessable: 422, too_many: 429, failed: 500 };
 
+// Hashes a /runs/ file may have: null if Director has no record of it, or a record without a hash (#43). A record
+// from before #26 has no hash for ids.bin; that file is not served until the render is made again.
+export function recordedHashes(getV: (id: string) => Version | undefined, pathname: string): string[] | null {
+  const m = /^\/runs\/(v\d{3})\/(page-)?(previs|draft|final)\.(png|ids\.bin)$/.exec(pathname); const v = m && getV(m[1]);
+  if (!m || !v) return null;
+  const [, , page, profile, ext] = m as unknown as [string, string, string | undefined, Profile, string];
+  if (page) {
+    if (ext !== 'png') return null;
+    const shots = Object.values(v.pagePreviews || {}).filter((p) => p.source === profile).map((p) => p.sha256).filter((h): h is string => !!h);
+    return shots.length ? shots : null;
+  }
+  const r = v.renders[profile]; if (!r) return null;
+  const h = ext === 'png' ? r.sha256 : r.idsSha256;
+  return h ? [h] : null;
+}
+
 export interface HttpOptions {
   director: Director;
   /** The folder of the app (paths in a final plan are shown relative to it in standalone mode). */
@@ -109,28 +125,14 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
   const cookie = (req: http.IncomingMessage, name: string): string | undefined => (req.headers.cookie || '').split(';').map((s) => s.trim().split('=')).find(([k]) => k === name)?.[1];
   const tokenEq = (a: unknown, b: string): boolean => typeof a === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 
-  // Hashes a /runs/ file may have: null if Director has no record of it, [] if the record predates hashes.
-  const recordedHashes = (pathname: string): string[] | null => {
-    const m = /^\/runs\/(v\d{3})\/(page-)?(previs|draft|final)\.(png|ids\.bin)$/.exec(pathname); const v = m && getV(m[1]);
-    if (!m || !v) return null;
-    const [, , page, profile, ext] = m as unknown as [string, string, string | undefined, Profile, string];
-    if (page) {
-      if (ext !== 'png') return null;
-      const shots = Object.values(v.pagePreviews || {}).filter((p) => p.source === profile);
-      if (!shots.length) return null;
-      return shots.some((p) => !p.sha256) ? [] : shots.map((p) => p.sha256!);
-    }
-    const r = v.renders[profile]; if (!r) return null;
-    const h = ext === 'png' ? r.sha256 : r.idsSha256;
-    return h ? [h] : [];
-  };
   // Presenter: the URLs the browser loads are made here from the version, the profile and the recorded hash, so a
-  // URL changes exactly when the file does (#17). state.json keeps no URL (#42).
-  const stamp = (h: string | undefined) => (h ? `?${h.slice(0, 16)}` : '');
+  // URL changes exactly when the file does (#17). state.json keeps no URL (#42). ids is null when the record has no hash
+  // of ids.bin (made before #26): /runs/ does not serve it, and the UI asks for the render to be made again (#43).
+  const stamp = (h: string) => h.slice(0, 16);
   const presentRender = (id: string, r: RenderInfo) => ({
-    ...r, image: `/runs/${id}/${r.profile}.png${stamp(r.sha256)}`, ids: `/runs/${id}/${r.profile}.ids.bin${stamp(r.idsSha256)}`,
+    ...r, image: `/runs/${id}/${r.profile}.png?${stamp(r.sha256)}`, ids: r.idsSha256 ? `/runs/${id}/${r.profile}.ids.bin?${stamp(r.idsSha256)}` : null,
   });
-  const presentPreview = (id: string, p: PagePreviewOk) => ({ ...p, image: `/runs/${id}/page-${p.source}.png${stamp(p.sha256)}` });
+  const presentPreview = (id: string, p: PagePreviewOk & { sha256: string }) => ({ ...p, image: `/runs/${id}/page-${p.source}.png?${stamp(p.sha256)}` });
   const versionView = (v: Version) => {
     const base = v.parent ? sceneOf(v.parent) : null; const scene = sceneOf(v.id);
     const renders = Object.fromEntries(Object.entries(v.renders).map(([k, r]) => [k, r && presentRender(v.id, r)]));
@@ -317,11 +319,10 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         const data = fs.readFileSync(fd);
         // The checks above narrow a race but cannot close it: Node has no openat, so a directory on the path can be
         // swapped for a symlink between the check and the open (#26). A render file is served only if its bytes are
-        // the ones Director recorded. State written before #26 has no hash for ids.bin and page-*.png; those keep
-        // the path checks only.
+        // the ones Director recorded; a file whose record has no hash is not served at all (#43).
         if (root === RUNS) {
-          const hashes = recordedHashes(url.pathname);
-          if (!hashes || (hashes.length && !hashes.includes(sha256(data)))) return send(res, 404, 'not found', 'text/plain');
+          const hashes = recordedHashes(getV, url.pathname);
+          if (!hashes || !hashes.includes(sha256(data))) return send(res, 404, 'not found', 'text/plain');
         }
         return send(res, 200, data, MIME[path.extname(real)] || 'application/octet-stream');
       } finally { fs.closeSync(fd); }

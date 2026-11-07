@@ -283,7 +283,7 @@ const atLeast = (spec: Record<string, Spec>): Spec => (x, at) => { assert.equal(
 const EXPOSURE = atLeast({ mean: 'number', clipped: 'number', near_black: 'number' });
 const OBJECTS: Spec = [atLeast({ pass_index: 'number', name: 'string' })];
 const RENDER_INFO: Spec = {
-  profile: 'string', seconds: 'number', width: 'number', height: 'number', image: 'string', ids: 'string', sha256: 'string',
+  profile: 'string', seconds: 'number', width: 'number', height: 'number', image: 'string', ids: 'string|null', sha256: 'string',
   'idsSha256?': 'string', sceneHash: 'string|null', objects: OBJECTS, exposure: EXPOSURE, settings: { integrator: 'any', samples: 'number', denoiser: 'any' }, warnings: ['string'],
 };
 const RENDER_SUMMARY: Spec = { profile: 'string', seconds: 'number', width: 'number', height: 'number', file: 'string', exposure: EXPOSURE, objects: OBJECTS, warnings: ['string'] };
@@ -293,7 +293,7 @@ const PROPOSAL: Spec = {
   interpretation: 'string', assumptions: ['string'], claimed_changes: [{ node: 'string', what: 'string', why: 'string' }], policy: POLICY, context: ['string'],
   via: 'string', 'cost?': 'number|null', 'clarifying_question?': 'string|null', 'respondsTo?': 'number|null',
 };
-const PAGE_PREVIEW: Spec = { ok: 'boolean', matched: 'number', image: 'string', warning: 'string|null', 'sha256?': 'string', source: 'string' };
+const PAGE_PREVIEW: Spec = { ok: 'boolean', matched: 'number', image: 'string', warning: 'string|null', sha256: 'string', source: 'string' };
 const VERSION: Spec = {
   id: 'string', parent: 'string|null', origin: 'string', instruction: 'string|null', proposal: orNull(PROPOSAL), status: 'string', created: 'string',
   renders: { 'previs?': RENDER_INFO, 'draft?': RENDER_INFO, 'final?': RENDER_INFO }, 'pagePreviews?': { 'previs?': PAGE_PREVIEW, 'draft?': PAGE_PREVIEW, 'final?': PAGE_PREVIEW },

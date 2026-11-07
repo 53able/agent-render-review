@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createDirector, Refusal } from '../src/director.mts';
 import type { Proposer } from '../src/director.mts';
 import type { Renderer, RenderOutcome } from '../src/vork.mts';
-import type { Scene } from '../src/policy.mts';
+import type { Scene, Version } from '../src/policy.mts';
 import { sha256 } from '../src/policy.mts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -78,13 +78,26 @@ await check('#42 loading an older state.json drops stored URLs and paths and kee
   const runs = path.join(tmp, 'old42'); fs.mkdirSync(path.join(runs, 'v001'), { recursive: true });
   fs.writeFileSync(path.join(runs, 'v001', 'scene.json'), JSON.stringify(starter));
   const draft = { profile: 'draft', seconds: 1, width: 2, height: 1, image: '/runs/v001/draft.png?1', ids: '/runs/v001/draft.ids.bin?1', file: '/elsewhere/v001/draft.png', sha256: 'a', idsSha256: 'b', sceneHash: null, objects: [], exposure: { mean: 0, clipped: 0, near_black: 0 }, settings: { integrator: null, samples: 1, denoiser: null }, warnings: [] };
-  const pagePreviews = { final: { ok: true, matched: 1, image: '/runs/v001/page-draft.png?9', warning: null, sha256: 'c' }, previs: { ok: true, matched: 1, image: 'nonsense', warning: null, sha256: 'd' } };
+  const pagePreviews = { final: { ok: true, matched: 1, image: '/runs/v001/page-draft.png?9', warning: null, sha256: 'c' }, previs: { ok: true, matched: 1, image: 'nonsense', warning: null, sha256: 'd' }, draft: { ok: true, matched: 1, image: '/runs/v001/page-draft.png?1', warning: null } };
   fs.writeFileSync(path.join(runs, 'state.json'), JSON.stringify({ versions: [{ id: 'v001', parent: null, origin: 'starter', instruction: null, proposal: null, status: 'accepted', created: 'x', renders: { draft }, pagePreviews }] }));
   const d = createDirector({ runs, project: null, renderer: fakeRenderer().renderer, starter });
   const v = d.getV('v001')!;
   assert.deepEqual(Object.keys(v.renders.draft!).filter((k) => ['image', 'ids', 'file'].includes(k)), []);
-  assert.deepEqual(v.pagePreviews, { final: { ok: true, matched: 1, warning: null, sha256: 'c', source: 'draft' } }, 'a preview whose source cannot be read is dropped');
+  assert.deepEqual(v.pagePreviews, { final: { ok: true, matched: 1, warning: null, sha256: 'c', source: 'draft' } }, 'a preview whose source cannot be read, or that has no hash (#43), is dropped');
   assert.equal(d.renderFile('v001', 'draft'), path.join(runs, 'v001', 'draft.png'));
+});
+
+await check('#43 /runs/ serves only files whose record has a hash', async () => {
+  const { recordedHashes } = await import('../src/http.mts');
+  const v = { id: 'v001', renders: { draft: { profile: 'draft', sha256: 'p' }, previs: { profile: 'previs', sha256: 'q', idsSha256: 'r' } }, pagePreviews: { final: { source: 'draft', sha256: 's' } } } as unknown as Version;
+  const get = (id: string) => (id === 'v001' ? v : undefined);
+  assert.deepEqual(recordedHashes(get, '/runs/v001/draft.png'), ['p']);
+  assert.equal(recordedHashes(get, '/runs/v001/draft.ids.bin'), null, 'ids.bin of a render recorded before #26');
+  assert.deepEqual(recordedHashes(get, '/runs/v001/previs.ids.bin'), ['r']);
+  assert.deepEqual(recordedHashes(get, '/runs/v001/page-draft.png'), ['s']);
+  assert.equal(recordedHashes(get, '/runs/v001/page-previs.png'), null);
+  assert.equal(recordedHashes(get, '/runs/v001/final.png'), null);
+  assert.equal(recordedHashes(get, '/runs/v002/draft.png'), null);
 });
 
 await check('a render is stored with hashes of the file and the object ids', async () => {
