@@ -975,7 +975,11 @@ ${VORK_HELP}`;
       return send(res, 200, fs.readFileSync(real), MIME[path.extname(real)] || 'application/octet-stream');
     } catch (e: any) {
       if (e instanceof BadRequest) return send(res, 400, { error: e.message });
-      if (e instanceof PayloadTooLarge) return send(res, 413, { error: `request body is larger than ${MAX_BODY / 1e6} MB` }, 'application/json', { connection: 'close' });
+      if (e instanceof PayloadTooLarge) {
+        // Reply once the rest of the body is drained: closing while the client still sends resets the connection.
+        const reply = () => { if (!res.headersSent && !res.destroyed) send(res, 413, { error: `request body is larger than ${MAX_BODY / 1e6} MB` }); };
+        return req.readableEnded ? reply() : void req.once('end', reply);
+      }
       if (res.destroyed) return; // client went away mid-body
       console.error(e); return send(res, 500, { error: 'internal error' });
     }
