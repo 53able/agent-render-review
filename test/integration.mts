@@ -132,10 +132,12 @@ await check('#51 a bad scene_file is refused before Director sees it, and create
 });
 
 let proposed: string;
+const INTERPRETATION = 'blue vase UNIQUE-INSTR-INTEGRATION';
 await check('propose_scene creates a proposed agent version, HEAD unchanged, draft image returned', async () => {
   const scene = structuredClone(base); scene.nodes.find((n: SceneNode) => n.name === 'vase').materials[0].inputs.base_color = [0.1, 0.3, 0.6];
   const headBefore = (await state()).head;
-  const r = await tool('propose_scene', { scene, interpretation: 'blue vase', claimed_changes: [{ node: 'vase', what: 'blue', why: 'test' }] });
+  // INTERPRETATION is checked to be absent from the logs at the end (T4b).
+  const r = await tool('propose_scene', { scene, interpretation: INTERPRETATION, claimed_changes: [{ node: 'vase', what: 'blue', why: 'test' }] });
   assert.ok(!r.isError, r.content[0].text);
   const t = textOf(r); proposed = t.version;
   assert.equal(t.status, 'proposed'); assert.equal(t.head, headBefore);
@@ -1054,10 +1056,14 @@ await check('T12 after SIGTERM the last line of director.jsonl is director.stop'
 await check('T9a every line of director.jsonl is JSON and director.start is there', async () => {
   const events = logLines().map((l) => JSON.parse(l));
   assert.ok(events.some((e) => e.event === 'director.start' && e.mode === 'ade' && typeof e.port === 'number' && e.pid === pid), 'no director.start');
-  for (const e of events) { assert.equal(e.service, 'render-director'); assert.equal(typeof e.component, 'string'); assert.equal(typeof e.event, 'string'); }
+  for (const e of events) {
+    for (const k of ['@timestamp', 'level', 'logger', 'message']) assert.equal(typeof e[k], 'string', `${k} missing: ${JSON.stringify(e)}`);
+    assert.equal(e.service, 'render-director'); assert.equal(typeof e.component, 'string'); assert.equal(typeof e.event, 'string');
+  }
 });
 await check('T9b server.log has no LogTape banner and no INFO structured line', async () => {
   const log = fs.readFileSync(path.join(PROJECT, '.vork', 'server.log'), 'utf8');
+  assert.match(log, /Render Director on http:\/\/127\.0\.0\.1:/); // the file is the one Director writes to, so the checks below mean something
   assert.doesNotMatch(log, /LogTape loggers are configured/);
   for (const l of log.split('\n')) { let e: Json; try { e = JSON.parse(l); } catch { continue; } assert.notEqual(e?.level, 'INFO', l); }
 });
@@ -1071,9 +1077,16 @@ await check('T9c every http.request has reqId, method, route, status and ms, and
   assert.equal(new Set(reqs.map((e) => e.reqId)).size, reqs.length, 'a reqId repeats');
 });
 await check('T10 neither the agent token nor the first pairing token is in director.jsonl or server.log', async () => {
+  // This Director runs with RENDER_DIRECTOR_NO_OPEN=1, so it never hands PAIR to an opener. A failing opener, the path
+  // where PAIR could reach the log through spawnargs, is covered by T10b.
   for (const f of [path.join(LOGS, 'director.jsonl'), path.join(PROJECT, '.vork', 'server.log')]) {
     const text = fs.readFileSync(f, 'utf8');
     assert.ok(!text.includes(directorToken), `agentToken in ${f}`); assert.ok(!text.includes(PAIR), `PAIR in ${f}`);
+  }
+});
+await check('T4b the interpretation of a proposal is in neither director.jsonl nor server.log', async () => {
+  for (const f of [path.join(LOGS, 'director.jsonl'), path.join(PROJECT, '.vork', 'server.log')]) {
+    assert.equal(fs.readFileSync(f, 'utf8').split('UNIQUE-INSTR-INTEGRATION').length - 1, 0, f);
   }
 });
 standalone.proc.kill('SIGTERM');
