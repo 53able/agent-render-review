@@ -67,7 +67,7 @@ default_tools_approval_mode = "approve"   # 無いと承認ポリシーによっ
 | `director_status` | 人間が開くURL、HEAD、版の一覧 |
 | `vork_help` | vork のドキュメント |
 | `get_scene` | 版のシーンJSON |
-| `propose_scene` | シーンを提案する。ポリシー検査とvork検証を通ると `proposed` の版になり、draft画像が返る。HEADは動かない |
+| `propose_scene` | シーンを提案する。シーンは引数 `scene` か、プロジェクト内の JSON ファイル `scene_file`（スクリプトで作った大きなシーン向け）で渡す。ポリシー検査とvork検証を通ると `proposed` の版になり、draft画像が返る。HEADは動かない |
 | `get_render` | 版の画像（MCPのimageコンテンツ）と露出・オブジェクトID |
 | `wait_for_feedback` | 人間のフィードバック、採否、直接編集、採用結果を待つ（最大120秒） |
 | `request_adoption` | 採用を依頼する。書き込むのは人間が承認したときだけ |

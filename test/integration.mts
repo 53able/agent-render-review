@@ -112,6 +112,21 @@ await check('AC-03 policy violations create no version', async () => {
   assert.equal((await state()).versions.length, versionsBefore);
 });
 
+await check('#51 a bad scene_file is refused before Director sees it, and creates no version', async () => {
+  fs.writeFileSync(path.join(PROJECT, 'bad.json'), '{ not json'); fs.writeFileSync(path.join(tmp, 'outside.json'), JSON.stringify(base));
+  fs.symlinkSync(path.join(tmp, 'outside.json'), path.join(PROJECT, 'link.json'));
+  try {
+    for (const [args, why] of [
+      [{ scene: base, scene_file: 'scene.json' }, /exactly one/], [{}, /exactly one/], [{ scene_file: '../outside.json' }, /inside the project/],
+      [{ scene_file: path.join(tmp, 'outside.json') }, /inside the project/], [{ scene_file: 'link.json' }, /outside the project|symlink/], [{ scene_file: 'bad.json' }, /not valid JSON/], [{ scene_file: 'missing.json' }, /not a file/],
+    ] as const) {
+      const r = await tool('propose_scene', { ...args, interpretation: 'file', claimed_changes: [] });
+      assert.equal(r.isError, true, JSON.stringify(args)); assert.match(r.content[0].text, why); assert.match(r.content[0].text, /No version was created/);
+    }
+  } finally { for (const f of ['bad.json', 'link.json']) fs.rmSync(path.join(PROJECT, f), { force: true }); }
+  assert.equal((await state()).versions.length, versionsBefore);
+});
+
 let proposed: string;
 await check('propose_scene creates a proposed agent version, HEAD unchanged, draft image returned', async () => {
   const scene = structuredClone(base); scene.nodes.find((n: SceneNode) => n.name === 'vase').materials[0].inputs.base_color = [0.1, 0.3, 0.6];
@@ -958,6 +973,16 @@ await check('#17 /api/agent/* responses keep their shape', async () => {
   assert.equal(ar.status, 200); assertShape(ar.json, { request: 'string', status: 'string', note: 'string' });
   assert.equal((await human('/api/adopt/reject', { requestId: ar.json.request })).status, 200);
   assertShape((await get('/api/agent/scene?version=v999')).json, { error: 'string' });
+});
+
+await check('#51 propose_scene reads a scene from scene_file and shows the same diff as an inline scene', async () => {
+  const scene = structuredClone(base); scene.nodes.find((n: SceneNode) => n.name === 'vase').materials[0].inputs.base_color = [0.7, 0.2, 0.1];
+  fs.mkdirSync(path.join(PROJECT, 'gen'), { recursive: true }); fs.writeFileSync(path.join(PROJECT, 'gen', 'scene.json'), JSON.stringify(scene));
+  const r = await tool('propose_scene', { base: 'v001', scene_file: 'gen/scene.json', interpretation: 'red vase from a file', claimed_changes: [{ node: 'vase', what: 'red', why: 'test' }] });
+  assert.ok(!r.isError, r.content[0].text);
+  const t = textOf(r); assert.equal(t.status, 'proposed'); assert.deepEqual(t.diff.map((d: Json) => d.path), ['materials[0].inputs.base_color']);
+  const agentScene = (await raw(`/api/agent/scene?version=${t.version}`, '', { agent: true, method: 'GET' })).json.scene;
+  assert.deepEqual(agentScene, scene);
 });
 
 await check('AC-01 nothing new was written under render-director/runs', async () => {

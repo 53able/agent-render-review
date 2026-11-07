@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RenderSummary } from './src/contract.mts';
+import { resolveInside } from './src/policy.mts';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -64,6 +65,19 @@ const renderText = (r: RenderSummary | null | undefined) => r && {
   object_ids: r.objects, warnings: r.warnings,
 };
 
+const MAX_SCENE_FILE = 4e6; // Director's request body limit
+/** A scene file inside the project: the same path rules as an adoption target (no absolute path, no '..', no symlink out). */
+function readSceneFile(rel: string): Record<string, unknown> {
+  const file = resolveInside(PROJECT, rel);
+  const st = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (!st || !st.isFile()) throw new Error(`${JSON.stringify(rel)} is not a file`);
+  if (st.size > MAX_SCENE_FILE) throw new Error(`${JSON.stringify(rel)} is larger than ${MAX_SCENE_FILE / 1e6} MB`);
+  let scene: unknown;
+  try { scene = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e: any) { throw new Error(`${JSON.stringify(rel)} is not valid JSON (${e.message})`); }
+  if (!scene || typeof scene !== 'object' || Array.isArray(scene)) throw new Error(`${JSON.stringify(rel)} must hold a JSON object`);
+  return scene as Record<string, unknown>;
+}
+
 const server = new McpServer({ name: 'render-director', version: '0.2.0' });
 
 server.registerTool('director_status', {
@@ -108,17 +122,25 @@ server.registerTool('propose_scene', {
   description: [
     'Propose a complete revised vork scene (version 2). Director checks it against a policy (relative .glb/image files only, no custom shader programs, resolution <= 1920x1080, a unique non-empty name on every node, not starting with "#"),',
     'validates it with a previs render, stores it as a PROPOSED version (HEAD does not move) and renders a draft. The draft image is returned so you can inspect it.',
+    'Pass the scene inline as scene, or, for a scene your script wrote to a file, as scene_file (a JSON file inside the project, path relative to the project root); do not shrink a large scene to fit it inline.',
     'claimed_changes must list every edit; the human sees them next to the real diff. To claim many nodes at once, set node to a name prefix ending in "*" (e.g. "bird_*" covers bird_0, bird_1, …); the human sees how many nodes each prefix matched, and a bare "*" matches nothing. Then ask the human to review and call wait_for_feedback.',
   ].join(' '),
   inputSchema: {
-    scene: z.record(z.string(), z.unknown()).describe('Complete vork scene JSON, version 2'),
+    scene: z.record(z.string(), z.unknown()).optional().describe('Complete vork scene JSON, version 2. Give this or scene_file'),
+    scene_file: z.string().min(1).max(1024).optional().describe('Instead of scene: a JSON file with the complete scene, relative to the project root'),
     interpretation: z.string().min(1).max(4000).describe('One sentence: what you are trying to achieve'),
     claimed_changes: z.array(z.object({ node: z.string().max(200), what: z.string().max(1000), why: z.string().max(1000) })).max(50),
     assumptions: z.array(z.string().max(1000)).max(20).optional(),
     base: z.string().regex(/^v\d{3}$/).optional().describe('Version this builds on (default HEAD)'),
     responds_to: z.number().int().optional().describe('seq of the feedback event this proposal answers'),
   },
-}, async (args) => {
+}, async ({ scene_file, ...args }) => {
+  if ((args.scene === undefined) === (scene_file === undefined)) return fail('Give exactly one of scene and scene_file. No version was created.');
+  if (scene_file !== undefined) {
+    // Read here and sent to Director like an inline scene, so the diff and the policy check see exactly these bytes (#51).
+    try { args.scene = readSceneFile(scene_file); }
+    catch (e: any) { return fail(`Cannot read scene_file: ${e.message}. No version was created.`); }
+  }
   const r = await call('POST', '/api/agent/propose', args);
   if (!r.ok) return fail(`Proposal rejected (${r.json.error || r.status}). No version was created.`, { blockers: r.json.blockers, vork_log_tail: r.json.log?.slice(-1500) });
   const content: (TextContent | ImageContent)[] = [text({ version: r.json.version, status: r.json.status, head: r.json.head, diff: r.json.diff, flags: r.json.flags, render: renderText(r.json.render), render_error: r.json.renderError, review_url: r.url })];
