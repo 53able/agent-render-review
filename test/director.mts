@@ -249,6 +249,26 @@ await check('final render: needs a ticket for the exact scene; a ticket of a dis
   await refused('forbidden', () => d.agentRender(v.id, 'final'), /human approval/);
 });
 
+await check('#17 policy.mts and director.mts do not load node:http, node:child_process or playwright-core, also through their imports', async () => {
+  const forbidden = /^(node:)?(http|child_process)$|^playwright-core(\/|$)/;
+  // Runtime imports only: `import type` is erased, so it loads nothing.
+  const importsOf = (file: string) => [...fs.readFileSync(file, 'utf8').matchAll(/^\s*(?:import|export)\s+(?!type\b)[^'";]*?from\s+['"]([^'"]+)['"]|^\s*import\s+['"]([^'"]+)['"]|\bimport\(\s*['"]([^'"]+)['"]\s*\)/gm)].map((m) => m[1] ?? m[2] ?? m[3]);
+  for (const start of ['policy.mts', 'director.mts']) {
+    const seen = new Set<string>(); const todo = [path.join(ROOT, 'src', start)];
+    while (todo.length) {
+      const file = todo.pop()!; if (seen.has(file)) continue; seen.add(file);
+      for (const spec of importsOf(file)) {
+        assert.doesNotMatch(spec, forbidden, `${path.relative(ROOT, file)} imports ${spec} (reached from src/${start})`);
+        if (spec.startsWith('.')) todo.push(path.resolve(path.dirname(file), spec));
+      }
+    }
+  }
+  // The check itself must see the imports it is meant to find.
+  assert.ok(importsOf(path.join(ROOT, 'src', 'vork.mts')).includes('node:child_process'));
+  assert.ok(importsOf(path.join(ROOT, 'src', 'http.mts')).includes('node:http'));
+  assert.ok(importsOf(path.join(ROOT, 'src', 'preview.mts')).includes('playwright-core'));
+});
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
