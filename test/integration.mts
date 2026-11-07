@@ -388,7 +388,12 @@ await check('#6 static serving cannot reach server.json or state.json outside pu
     }
   }
   assert.equal((await get('/%E0%A4%A')).status, 400, 'malformed escape');
-  assert.equal((await get('/app.js')).status, 200, 'normal static files still served');
+  // Every same-origin script and stylesheet the page references is still served (data: URLs such as the icon are not requests).
+  const page = await get('/'); assert.equal(page.status, 200, 'index.html');
+  const refs = [...page.body.matchAll(/<(?:script\b[^>]*?\bsrc|link\b[^>]*?\bhref)\s*=\s*["']([^"']+)["']/gi)].map((m) => m[1]!)
+    .filter((u) => !/^data:/i.test(u) && new URL(u, BASE).origin === new URL(BASE).origin);
+  assert.ok(refs.length >= 2, `index.html references its script and stylesheet: ${JSON.stringify(refs)}`);
+  for (const u of refs) assert.equal((await get(new URL(u, BASE).pathname)).status, 200, `normal static file ${u} still served`);
 });
 
 await check('#11 /runs/ does not follow a symlink out of .vork; a runs folder inside public/ is refused', async () => {

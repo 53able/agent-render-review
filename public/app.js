@@ -698,7 +698,7 @@ function renderReview() {
   /** @param {Diff[]} ds */
   const unclaimedNote = (ds) => { const u = ds.filter((d) => !isClaimed(d)).length; return u ? ` <span class="flag">· ⚠ ${u} not mentioned</span>` : ''; };
   const CAP = 200; const hidden = rest.slice(CAP);
-  const diffRows = groupList.map(({ type, kind, ds }, i) => `<tr class="group"><td colspan="3"><details data-group="${i}"><summary>${ds.length} ${esc(type)} node${ds.length > 1 ? 's' : ''} ${esc(kind)}: ${esc(describeNames(ds.map((d) => d.node)))}${unclaimedNote(ds)}</summary><table class="difftable"><tbody></tbody></table></details></td></tr>`).join('')
+  const diffRows = groupList.map(({ type, kind, ds }, i) => `<tr class="group"><td colspan="3"><details data-group="${i}"><summary aria-expanded="false">${ds.length} ${esc(type)} node${ds.length > 1 ? 's' : ''} ${esc(kind)}: ${esc(describeNames(ds.map((d) => d.node)))}${unclaimedNote(ds)}</summary><table class="difftable"><tbody></tbody></table></details></td></tr>`).join('')
     + rest.slice(0, CAP).map(row).join('')
     + (hidden.length ? `<tr class="group"><td colspan="3"><button type="button" class="ghost" id="moreDiff">Show remaining ${hidden.length} rows</button>${unclaimedNote(hidden)}</td></tr>` : '');
   // The poll re-renders this panel; keep what the human opened in the diff while it shows the same version.
@@ -731,6 +731,7 @@ function renderReview() {
   const toHead = box.querySelector('#showHeadDiff'); if (toHead) /** @type {HTMLButtonElement} */ (toHead).onclick = () => setBase(v.id, 'head');
   // rows inside a group or past the cap are built only when the human opens them
   box.querySelectorAll('details[data-group]').forEach((el) => el.addEventListener('toggle', () => {
+    /** @type {HTMLElement} */ (el.querySelector('summary')).setAttribute('aria-expanded', String(/** @type {HTMLDetailsElement} */ (el).open));
     const tb = /** @type {HTMLElement} */ (el.querySelector('tbody'));
     if (/** @type {HTMLDetailsElement} */ (el).open && !tb.children.length) tb.innerHTML = groupList[Number(/** @type {HTMLElement} */ (el).dataset.group)].ds.map(row).join('');
   }));

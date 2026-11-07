@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { acquireGpuLock } from './gpu-lock.mts';
+import { largeScene, largeNodeName, LARGE_SCENE_EXTRA } from './fixtures/large-scene.mts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
@@ -50,6 +51,54 @@ const newPage = async () => {
 const idle = (page: Page, t = 120000) => page.waitForFunction(() => !document.querySelector('#jobList [data-status="running"]'), null, { timeout: t });
 const clickObject = async (page: Page, fx: number, fy: number) => { await page.waitForSelector('#canvas[data-ready]'); const b = await page.locator('#canvas').boundingBox(); await page.mouse.click(b!.x + b!.width * fx, b!.y + b!.height * fy); };
 
+// ---- Checks added before the React migration (plan Step 1). They select by id, attribute and role only, and check
+// presence with page.$ and the hidden attribute, so they run unchanged against the old and the new UI. ----
+interface StateVersion { id: string; parent: string | null; status: string; renders: Record<string, unknown>; scene: { nodes: { name: string; materials?: { inputs: Record<string, unknown> }[] }[] } }
+const versionsOf = async (page: Page): Promise<StateVersion[]> => (await page.evaluate(() => fetch('/api/state').then((r) => r.json()))).versions;
+const isHidden = (page: Page, sel: string) => page.$eval(sel, (e) => e.hasAttribute('hidden'));
+// AC-12: these stay in the DOM; only the hidden attribute shows or hides them (no conditional rendering).
+const ALWAYS_PRESENT = ['#jobList', '#jobBox', '#notice', '#adoptBox', '#wipe', '#empty', '#starters', '#review', '#eventList', '#adeHint', '#objectMore'];
+async function assertAlwaysPresent(page: Page) {
+  for (const sel of ALWAYS_PRESENT) {
+    const el = await page.$(sel);
+    assert.notEqual(el, null, `${sel} must always be in the DOM`);
+    assert.ok(await el!.evaluate((e) => e.closest('[hidden]') !== null || e.getClientRects().length > 0), `${sel} is either hidden by the hidden attribute or shown`);
+  }
+  assert.match(await page.getAttribute('#canvas', 'data-ready') ?? '', /^[\w-]+:(draft|previs|final)$/, '#canvas[data-ready] is `${versionId}:${profile}`');
+}
+// AC-13: a drag sends several `input` events and one `change` on release. The native value setter is used so a
+// framework that tracks the value property sees the same events a real drag produces.
+const dragQuickInput = (page: Page, type: 'range' | 'color', values: string[]) => page.evaluate(({ type, values }) => {
+  const el = document.querySelector<HTMLInputElement>(`#quick input[type=${type}]`)!;
+  const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+  for (const v of values) { set.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); }
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}, { type, values });
+/** Waits until the version count reaches n and the newest version's draft is on screen; returns the versions. */
+async function waitForNewVersion(page: Page, n: number) {
+  for (let i = 0; i < 100; i++) { const vs = await versionsOf(page); if (vs.length >= n) break; await sleep(150); }
+  const vs = await versionsOf(page); assert.equal(vs.length, n, 'exactly one new version');
+  await page.waitForSelector(`#canvas[data-ready="${vs.at(-1)!.id}:draft"]`, { timeout: 120000 }); await idle(page);
+  await sleep(1500); // a duplicate version from a second change event would have been created by now
+  return versionsOf(page);
+}
+/** A point inside `name` (or, for null, on no object), from the object-id pass of what the canvas shows; fractions of the canvas box. */
+const spotOf = (page: Page, name: string | null) => page.evaluate(async (name) => {
+  const [id, profile] = document.querySelector('#canvas')!.getAttribute('data-ready')!.split(':');
+  const st = await (await fetch('/api/state')).json();
+  const r = st.versions.find((v: { id: string }) => v.id === id).renders[profile!];
+  const arr = new Uint16Array(await (await fetch(r.ids)).arrayBuffer());
+  const names = new Map<number, string>(r.objects.map((o: { pass_index: number; name: string }) => [o.pass_index, o.name]));
+  const w: number = r.width, h: number = r.height, m = 4; const hits: number[] = [];
+  for (let y = m; y < h - m; y++) for (let x = m; x < w - m; x++) {
+    const i = y * w + x; if ((names.get(arr[i]!) ?? null) !== name) continue;
+    if ([-m, m].every((d) => arr[i + d] === arr[i] && arr[i + d * w] === arr[i])) hits.push(i);
+  }
+  if (!hits.length) return null;
+  const i = hits[hits.length >> 1]!; return { fx: (i % w + 0.5) / w, fy: (Math.floor(i / w) + 0.5) / h };
+}, name);
+const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { const b = (await page.locator('#canvas').boundingBox())!; return { x: b.x + b.width * spot.fx, y: b.y + b.height * spot.fy }; };
+
 // ---------------- Part A: standalone ----------------
 {
   const url = await startDirector(['--port', '4791'], { RENDER_DIRECTOR_RUNS: path.join(tmp, 'runs') });
@@ -69,6 +118,38 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await sleep(400); await idle(page);
     assert.equal(await page.locator('#versionList li').count(), before + 1);
     assert.match(await page.textContent('#versionList') as string, /vase\.specular_roughness = 0\.8/);
+  });
+  await check('AC-13 standalone: a slider drag (input ×3, then change) creates one version with the released value', async () => {
+    await page.waitForSelector('#quick input[type=range]'); await idle(page);
+    const before = await versionsOf(page);
+    await dragQuickInput(page, 'range', ['0.3', '0.45', '0.62']);
+    const after = await waitForNewVersion(page, before.length + 1);
+    assert.equal(after.at(-1)!.scene.nodes.find((n) => n.name === 'vase')!.materials![0]!.inputs.specular_roughness, 0.62);
+  });
+  await check('AC-13 standalone: a colour drag (input ×3, then change) creates one version with the released colour', async () => {
+    await page.waitForSelector('#quick input[type=color]'); await idle(page);
+    const before = await versionsOf(page);
+    await dragQuickInput(page, 'color', ['#ff0000', '#00ff00', '#3366cc']);
+    const after = await waitForNewVersion(page, before.length + 1);
+    // vork colours are linear: sRGB #3366cc → linear (0.2, 0.4, 0.8 through the sRGB transfer function)
+    const lin = [0x33, 0x66, 0xcc].map((c) => ((c / 255 + 0.055) / 1.055) ** 2.4);
+    const got = after.at(-1)!.scene.nodes.find((n) => n.name === 'vase')!.materials![0]!.inputs.base_color as number[];
+    assert.equal(got.length, 3); got.forEach((c, i) => assert.ok(Math.abs(c - lin[i]!) < 1e-3, `base_color ${JSON.stringify(got)} ≈ ${JSON.stringify(lin)}`));
+  });
+  await check('standalone: hovering an object shows #tip with its name', async () => {
+    await page.waitForSelector('#canvas[data-ready]');
+    const vase = await spotOf(page, 'vase'); assert.ok(vase, 'the vase is on screen');
+    const p = await canvasPoint(page, vase); await page.mouse.move(p.x, p.y);
+    await page.waitForFunction(() => !document.querySelector('#tip')!.hasAttribute('hidden'), null, { timeout: 3000 });
+    assert.match(await page.textContent('#tip') as string, /vase/);
+  });
+  await check('standalone: Shift-click adds an object to the selection', async () => {
+    assert.match(await page.textContent('#selCount') as string, /vase/, 'the vase is still selected from the edits above');
+    const ring = await spotOf(page, 'ring'); assert.ok(ring, 'the ring is on screen');
+    const p = await canvasPoint(page, ring);
+    await page.keyboard.down('Shift'); await page.mouse.click(p.x, p.y); await page.keyboard.up('Shift');
+    const sel = await page.textContent('#selCount') as string;
+    assert.match(sel, /vase/); assert.match(sel, /ring/);
   });
   await check('AC-11 standalone: compare wipe appears against the parent', async () => {
     await page.check('#compareToggle'); await sleep(600);
@@ -97,6 +178,26 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.waitForFunction(() => document.querySelector('[data-profile="final"]')!.getAttribute('aria-checked') === 'true', null, { timeout: 120000 });
     assert.match(await page.textContent('#measure') as string, /final/);
   });
+  // main #54 (87171ad): the poll no longer pauses for jobs or dialogs, and the final render is planned inline (#57),
+  // so this pins that /api/state keeps being polled while the plan is open, and after it closes.
+  await check('standalone: polling /api/state continues while the final render plan is open and after it closes', async () => {
+    await idle(page);
+    let polls = 0; const count = (r: { url(): string }) => { if (new URL(r.url()).pathname === '/api/state') polls++; };
+    page.on('request', count);
+    try {
+      await page.click('#finalBtn');
+      await page.waitForSelector('#finalPlanBox:not([hidden])', { timeout: 10000 });
+      polls = 0;
+      await sleep(5600); // more than two 2.5 s poll intervals
+      assert.ok(polls >= 2, `polling continued while the plan was open (${polls} requests)`);
+      await page.focus('#finalApprove'); await page.keyboard.press('Escape');
+      await page.waitForSelector('#finalPlanBox', { state: 'hidden', timeout: 5000 });
+      polls = 0;
+      await sleep(5600);
+      assert.ok(polls >= 2, `polling continued after the plan closed (${polls} requests)`);
+    } finally { page.off('request', count); }
+  });
+  await check('AC-12 standalone: the always-present elements are in the DOM', () => assertAlwaysPresent(page));
   if (process.env.E2E_AGENT === '1') {
     await check('AC-11 standalone: built-in agent proposal can be discarded', async () => {
       await page.fill('#instruction', 'rimライトを強めて輪郭を際立たせる'); await page.click('#askBtn'); await sleep(800);
@@ -451,6 +552,105 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     const st = await page.evaluate(async () => (await fetch('/api/state')).json());
     assert.equal(st.adoptionRequests.find((a: { id: string }) => a.id === r.request).status, 'pending');
     assert.equal(await page.evaluate(async (id) => (await fetch('/api/adopt/reject', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: id }) })).status, r.request), 200);
+  });
+
+  await check('AC-12 ADE: the always-present elements are in the DOM', () => assertAlwaysPresent(page));
+
+  const statusOf = async (id: string) => ((await agent('GET', '/api/agent/status')).versions as { id: string; status: string }[]).find((v) => v.id === id)?.status;
+  const firstNoticeButton = () => page.locator('#notice button').first();
+  let large = '', baseCount = 0;
+  await check('ADE: a new agent proposal marks the tab title with (1); the notice offers View first', async () => {
+    const base = (await agent('GET', '/api/agent/scene')).scene; baseCount = base.nodes.length;
+    const r = await agent('POST', '/api/agent/propose', { scene: largeScene(base), interpretation: '小さな点を250個並べる', claimed_changes: [{ node: 'dot*', what: `add ${LARGE_SCENE_EXTRA} small spheres`, why: 'large-scene fixture' }] });
+    large = r.version; assert.ok(large, JSON.stringify(r));
+    await page.waitForSelector('#notice:not([hidden])', { timeout: 15000 });
+    assert.match(await page.title(), /^\(1\) /);
+    assert.match(await firstNoticeButton().textContent() as string, /View/);
+  });
+  await check('ADE: opening the proposal from the notice clears the notice and the title mark', async () => {
+    await firstNoticeButton().click();
+    await page.waitForSelector(`#canvas[data-ready="${large}:draft"]`, { timeout: 15000 });
+    assert.notEqual(await page.$('#notice'), null); assert.equal(await isHidden(page, '#notice'), true);
+    assert.doesNotMatch(await page.title(), /\(1\)/);
+  });
+  await check('ADE: a scene with more than 200 objects lists 200 and shows #objectMore', async () => {
+    assert.equal(await page.locator('#objectList li').count(), 200);
+    assert.notEqual(await page.$('#objectMore'), null); assert.equal(await isHidden(page, '#objectMore'), false);
+    assert.match(await page.textContent('#objectMore') as string, new RegExp(`\\b${baseCount + LARGE_SCENE_EXTRA - 200} more\\b`));
+  });
+  await check('ADE: added nodes collapse into a diff group whose rows are not built until it is opened', async () => {
+    assert.ok(await page.locator('#review [data-group]').count() >= 1, 'a diff group');
+    assert.equal(await page.locator('#review [data-group] tbody tr').count(), 0, 'no rows before the group is opened');
+    assert.equal(await page.locator('#review [data-group] [aria-expanded]').first().getAttribute('aria-expanded'), 'false');
+  });
+  await check('ADE: Accept makes the viewed proposal the new HEAD', async () => {
+    await page.click('#acceptBtn');
+    for (let i = 0; i < 50 && (await agent('GET', '/api/agent/status')).head !== large; i++) await sleep(100);
+    assert.equal((await agent('GET', '/api/agent/status')).head, large);
+    assert.equal(await statusOf(large), 'accepted');
+  });
+
+  let refine = '', noticed = '';
+  await check('ADE: an opened diff group and the remaining rows stay open when the poll re-renders the review', async () => {
+    // From the accepted large scene: 3 dots removed (a group) and every other dot changed (more rows than the 200 shown).
+    const scene = (await agent('GET', '/api/agent/scene')).scene;
+    const gone = new Set([0, 1, 2].map((i) => largeNodeName(LARGE_SCENE_EXTRA - 1 - i)));
+    scene.nodes = scene.nodes.filter((n: { name: string }) => !gone.has(n.name));
+    for (const n of scene.nodes) if (n.name.startsWith('dot')) n.materials[0].inputs.specular_roughness = 0.2;
+    const r = await agent('POST', '/api/agent/propose', { scene, interpretation: '点を少しつややかにして3つ減らす', claimed_changes: [{ node: 'dot*', what: 'roughness 0.2, 3 removed', why: 'large diff fixture' }] });
+    refine = r.version; assert.ok(refine, JSON.stringify(r));
+    await page.waitForSelector('#notice:not([hidden])', { timeout: 15000 });
+    await firstNoticeButton().click();
+    await page.waitForSelector(`#canvas[data-ready="${refine}:draft"]`, { timeout: 15000 });
+    const trigger = page.locator('#review [data-group] [aria-expanded]').first();
+    await trigger.click();
+    await page.waitForFunction(() => document.querySelector('#review [data-group] [aria-expanded]')!.getAttribute('aria-expanded') === 'true', null, { timeout: 3000 });
+    assert.equal(await page.locator('#review [data-group] tbody tr').count(), 3, 'the opened group lists its rows');
+    await page.click('#moreDiff');
+    await page.waitForFunction(() => !document.querySelector('#moreDiff'), null, { timeout: 3000 });
+    const rows = await page.locator('#review tr').count();
+    // Another proposal changes the state; the poll re-renders while the human keeps looking at this one.
+    const small = (await agent('GET', `/api/agent/scene?version=${vid}`)).scene;
+    // Without the floor and the backdrop, part of the frame shows no object (used by the empty-click check below).
+    small.nodes = small.nodes.filter((n: SceneNode) => n.name !== 'floor' && n.name !== 'backdrop');
+    const r2 = await agent('POST', '/api/agent/propose', { base: vid, scene: small, interpretation: '床と背景を外す', claimed_changes: [{ node: 'floor', what: 'removed', why: 'poll trigger' }, { node: 'backdrop', what: 'removed', why: 'empty space to click' }] });
+    assert.ok(r2.version, JSON.stringify(r2));
+    await page.waitForSelector('#notice:not([hidden])', { timeout: 15000 }); // announced after the poll reloaded the page state
+    await sleep(300);
+    assert.equal(await trigger.getAttribute('aria-expanded'), 'true', 'the group is still open');
+    assert.equal(await page.locator('#review [data-group] tbody tr').count(), 3);
+    assert.equal(await page.$('#moreDiff'), null, 'the remaining rows are still shown');
+    assert.equal(await page.locator('#review tr').count(), rows);
+    noticed = r2.version;
+  });
+  await check('ADE: the notice clears when its proposal stops being a proposal without being opened', async () => {
+    assert.ok(noticed, 'needs the proposal announced above');
+    assert.match(await page.title(), /^\(1\) /);
+    const st = await page.evaluate((id) => fetch('/api/decide', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ versionId: id, decision: 'discard' }) }).then((r) => r.status), noticed);
+    assert.equal(st, 200);
+    await page.waitForFunction(() => document.querySelector('#notice')!.hasAttribute('hidden'), null, { timeout: 10000 });
+    assert.doesNotMatch(await page.title(), /\(1\)/);
+    assert.match(await page.getAttribute('#canvas', 'data-ready') ?? '', new RegExp(`^${refine}:`), 'the view did not move');
+  });
+  await check('ADE: Discard drops the viewed proposal and shows its parent', async () => {
+    await page.click('#discardBtn');
+    await page.waitForSelector(`#canvas[data-ready="${large}:draft"]`, { timeout: 15000 });
+    // #55: the discard is sent once the few-second undo time is over
+    for (let i = 0; i < 100 && await statusOf(refine) !== 'discarded'; i++) await sleep(150);
+    assert.equal(await statusOf(refine), 'discarded');
+    assert.equal((await agent('GET', '/api/agent/status')).head, large);
+  });
+  await check('ADE: clicking where there is no object clears the selection', async () => {
+    assert.ok(noticed, 'needs the proposal without floor and backdrop');
+    await page.click(`button[data-id="${noticed}"]`);
+    await page.waitForSelector(`#canvas[data-ready="${noticed}:draft"]`, { timeout: 15000 });
+    const vase = await spotOf(page, 'vase'); assert.ok(vase, 'the vase is on screen');
+    // The vase may still be selected from the feedback check; clicking the only selected object would deselect it.
+    if (!/vase/.test(await page.textContent('#selCount') as string)) { const pv = await canvasPoint(page, vase); await page.mouse.click(pv.x, pv.y); }
+    assert.match(await page.textContent('#selCount') as string, /vase/);
+    const empty = await spotOf(page, null); assert.ok(empty, 'some pixel shows no object');
+    const pe = await canvasPoint(page, empty); await page.mouse.click(pe.x, pe.y);
+    assert.doesNotMatch(await page.textContent('#selCount') as string, /vase/);
   });
 
   await check('ADE: no page errors', async () => assert.deepEqual(page.errors, []));
