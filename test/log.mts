@@ -26,14 +26,19 @@ await check('T6 a process that sets up logging writes nothing to stdout and only
     import { setupLogging, log } from ${JSON.stringify(path.join(ROOT, 'src', 'log.mts'))};
     setupLogging({ dir: ${JSON.stringify(dir)}, level: 'debug' });
     const L = log('child');
-    L.debug('t6.debug', 'debug line'); L.info('t6.info', 'info line'); L.warn('t6.warn', 'warn line'); L.error('t6.error', 'error line');
+    L.debug('t6.debug', 'debug line'); L.info('t6.info', 'info line'); L.warn('t6.warn', 'warn line');
+    L.error('t6.error', 'error line', { vorkLogTail: 'TAIL-ONLY-IN-FILE', stack: 'STACK-ONLY-IN-FILE', exitCode: 1 });
   `; // ends on its own, without process.exit
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', child], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout.length, 0, `stdout: ${r.stdout}`);
   const err = r.stderr.split('\n').filter(Boolean).map((l) => JSON.parse(l));
   assert.deepEqual(err.map((e) => [e.event, e.level]), [['t6.warn', 'WARN'], ['t6.error', 'ERROR']]);
-  assert.deepEqual(lines(dir).map((e) => e.event), ['t6.debug', 't6.info', 't6.warn', 't6.error']); // the last event is not left in a buffer
+  // server.log has no size limit: vorkLogTail and stack stay in the rotated file only.
+  assert.equal(err[1].exitCode, 1); assert.ok(!r.stderr.includes('ONLY-IN-FILE'), r.stderr);
+  const file = lines(dir);
+  assert.deepEqual(file.map((e) => e.event), ['t6.debug', 't6.info', 't6.warn', 't6.error']); // the last event is not left in a buffer
+  assert.deepEqual([file[3].vorkLogTail, file[3].stack], ['TAIL-ONLY-IN-FILE', 'STACK-ONLY-IN-FILE']);
 });
 
 await check('T7 with the production settings and maxSize 10000, 1000 events rotate into at most maxFiles + 1 files of JSON lines', async () => {
@@ -49,6 +54,30 @@ await check('T7 with the production settings and maxSize 10000, 1000 events rota
     for (const l of text.split('\n').filter(Boolean)) JSON.parse(l);
   }
   assert.equal(lines(dir).at(-1).i, 999);
+});
+
+await check('T7b deleting director.jsonl while logging neither throws nor writes to another descriptor, and rotation goes on', async () => {
+  const dir = newDir(); const maxFiles = 3; const logs = path.join(dir, 'logs');
+  setupLogging({ dir, level: 'info', stderrLevel: 'fatal', maxSize: 2000, maxFiles });
+  L.info('t7b.first', 'first');
+  fs.rmSync(path.join(logs, 'director.jsonl'));
+  // @logtape/file 2.4.2 closed its descriptor here, failed to rename the missing file and kept the closed number:
+  // a file opened next got that number, and the log went into it.
+  for (let i = 0; i < 30; i++) L.info('t7b.fill', 'fill', { i, pad: 'x'.repeat(100) });
+  const victim = path.join(dir, 'victim.txt'); const vfd = fs.openSync(victim, 'w');
+  try {
+    for (let i = 0; i < 60; i++) L.info('t7b.after', 'after', { i, pad: 'x'.repeat(100) });
+    fs.writeSync(vfd, 'mine\n');
+  } finally { fs.closeSync(vfd); }
+  assert.equal(fs.readFileSync(victim, 'utf8'), 'mine\n');
+  assert.doesNotThrow(() => shutdownLogging());
+  const files = fs.readdirSync(logs);
+  assert.ok(files.length <= maxFiles + 1, `too many files: ${files}`);
+  assert.ok(files.includes('director.jsonl.1'), `no rotation: ${files}`);
+  const last = lines(dir);
+  assert.ok(last.length > 0 && last.every((e) => e.event === 't7b.after'), JSON.stringify(last.map((e) => e.event)));
+  assert.equal(last.at(-1).i, 59);
+  for (const f of files) assert.ok(fs.statSync(path.join(logs, f)).size <= 2000, `${f} is over maxSize`);
 });
 
 await check('T8 a property named message is renamed to x_message and does not replace the message', async () => {
@@ -101,6 +130,10 @@ await check('errFields keeps only type, message and stack, and message: false re
   assert.ok(f.stack && f.stack.includes(' at '), String(f.stack)); assert.ok(!f.stack.includes('UNIQUE-INSTR') && !f.stack.includes('second line'));
   assert.equal(errFields(new Error('m'.repeat(3000))).error!.length, 2000);
   assert.deepEqual(errFields('plain', { message: false }), { errorType: 'string' });
+  // A message line that looks like a stack frame is not a frame.
+  const frameLike = errFields(new Error('UNIQUE-FIRST\n    at night UNIQUE-SECOND'), { message: false });
+  assert.ok(frameLike.stack && frameLike.stack.includes(' at '), String(frameLike.stack));
+  assert.ok(!frameLike.stack.includes('UNIQUE'), frameLike.stack);
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

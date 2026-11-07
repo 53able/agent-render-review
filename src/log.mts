@@ -1,19 +1,50 @@
 // Structured diagnostic log: one JSON line per event in <dir>/logs/director.jsonl (docs/logging.md).
 // The only module that imports @logtape/*. It overrides the LogTape 2.4.2 defaults that would write to stdout,
-// lose the last events or leak Error properties; test/log.mts pins each of them.
+// lose the last events or leak Error properties; test/log.mts pins each of them. The file sink is our own (fileSink).
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import { compareLogLevel, configureSync, getJsonLinesFormatter, getLogger, isLogLevel, resetSync, withContext } from '@logtape/logtape';
 import type { LogLevel, Sink } from '@logtape/logtape';
-import { getRotatingFileSink } from '@logtape/file';
 
 export type { LogLevel };
 const SERVICE = 'render-director';
 /** Keys the flattened JSON line already has; a property with one of these names would overwrite it. */
 const RESERVED = new Set(['message', 'level', 'logger', '@timestamp']);
 const fmt = getJsonLinesFormatter({ properties: 'flatten' });
+/** Fields kept in the file only: stderr goes to server.log in ADE mode, which has no size limit. */
+const FILE_ONLY = ['vorkLogTail', 'stack'];
 let active = false;
+
+/**
+ * Appends each record to file and rotates it to file.1 … file.<maxFiles> (the names @logtape/file used) once the next
+ * record would take it past maxSize. It holds no file descriptor: @logtape/file 2.4.2 keeps writing to a closed fd when
+ * the file is deleted while it runs (docs/logging.md section 7). Never throws; the first failure goes to stderr once.
+ */
+function fileSink(file: string, maxSize: number, maxFiles: number): Sink {
+  let reported = false;
+  const size = () => { try { return fs.statSync(file).size; } catch { return 0; } };
+  return (r) => {
+    try {
+      const line = Buffer.from(fmt(r));
+      const now = size();
+      if (now > 0 && now + line.length > maxSize) {
+        for (let i = maxFiles - 1; i > 0; i--) { try { fs.renameSync(`${file}.${i}`, `${file}.${i + 1}`); } catch {} }
+        try { fs.renameSync(file, `${file}.1`); } catch {}
+      }
+      fs.appendFileSync(file, line);
+    } catch (e) {
+      if (reported) return;
+      reported = true;
+      try {
+        process.stderr.write(JSON.stringify({
+          '@timestamp': new Date().toISOString(), level: 'ERROR', logger: `${SERVICE}.log`, message: 'Could not write the log file',
+          event: 'log.write_failed', service: SERVICE, component: 'log', errorType: errFields(e).errorType, code: (e as NodeJS.ErrnoException)?.code ?? null,
+        }) + '\n');
+      } catch {}
+    }
+  };
+}
 
 export interface LoggingOptions {
   /** Director's state folder (.vork/ or runs/); events go to <dir>/logs/director.jsonl. */
@@ -38,9 +69,13 @@ export function setupLogging({ dir, level, stderrLevel = 'warning', maxSize = 5_
   // Own synchronous sinks: getStreamSink has an async dispose, which configureSync refuses (config.js:361-362),
   // and getConsoleSink writes info to stdout.
   const sinks: Record<string, Sink> = {
-    // bufferSize 0: the default 8KB buffer would lose the last events before exit (filesink.base.js:432-434).
-    file: getRotatingFileSink(path.join(logs, 'director.jsonl'), { bufferSize: 0, maxSize, maxFiles, formatter: fmt }),
-    stderr: (r) => { if (compareLogLevel(r.level, stderrLevel) >= 0) write(r); },
+    // Written at once, record by record: a buffer would lose the last events before exit.
+    file: fileSink(path.join(logs, 'director.jsonl'), maxSize, maxFiles),
+    stderr: (r) => {
+      if (compareLogLevel(r.level, stderrLevel) < 0) return;
+      const properties = { ...r.properties }; for (const k of FILE_ONLY) delete properties[k];
+      write({ ...r, properties });
+    },
     meta: write,
   };
   if (testSink) sinks.test = (r) => testSink(JSON.parse(fmt(r)));
@@ -58,11 +93,12 @@ export function setupLogging({ dir, level, stderrLevel = 'warning', maxSize = 5_
   if (lowest !== wanted) log('log').warn('config.invalid', 'Unknown log level, using info', { source: level === undefined ? 'RENDER_DIRECTOR_LOG_LEVEL' : 'setupLogging', fallback: 'info' });
 }
 
-/** Flushes and closes the file. Idempotent; logging afterwards does nothing. */
+/** Removes the logging setup. Idempotent; logging afterwards does nothing. */
 export function shutdownLogging(): void {
   if (!active) return;
   active = false;
-  resetSync();
+  // Callers run this on the way to process.exit; a failure here must not stop them.
+  try { resetSync(); } catch {}
 }
 
 type Emit = (event: string, msg: string, props?: Record<string, unknown>) => void;
@@ -112,7 +148,13 @@ export function errFields(e: unknown, { message = true }: { message?: boolean } 
   const out: ErrFields = { errorType: String(e.name) };
   if (message) out.error = String(e.message).slice(0, 2000);
   if (typeof e.stack === 'string') {
-    const stack = message ? e.stack : e.stack.split('\n').filter((l) => /^\s+at /.test(l)).join('\n');
+    let stack = e.stack;
+    if (!message) {
+      // The stack starts with `${name}: ${message}`, and the message can hold lines that look like frames ("    at x").
+      const head = e.message ? `${e.name}: ${e.message}` : String(e.name);
+      if (stack.startsWith(head)) stack = stack.slice(head.length);
+      stack = stack.split('\n').filter((l) => /^\s+at /.test(l)).join('\n');
+    }
     if (stack) out.stack = stack.slice(0, 4000);
   }
   return out;
