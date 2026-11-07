@@ -2,7 +2,11 @@
 
 アプリ内の表示名は「vork Director」です。
 
+本プロジェクトは独立した非公式の連携ツールです。Voyager / Nullframe が提供・承認する製品ではなく、同社との提携関係もありません。
+
 [vork](https://github.com/voyager-so/vork)（エージェント向けのヘッドレス3D/VFXエンジン）で作ったビジュアルを、人間がレビューして採用するためのローカルWebアプリです。
+
+vork 本体は同梱していません。別途インストールし、[vork のライセンス](https://github.com/voyager-so/vork/blob/09dbd97a8601dbbd5870dc5a2856aa59d7ea21dd/LICENSE)に従って利用してください。vork は独自ライセンスの source-available ソフトウェアであり、改変版の配布やホスト型レンダリングサービスの提供には事前の書面許可が必要です。本リポジトリの公開は、vork や依存パッケージのライセンスを変更するものではありません。
 
 モードは2つあります。
 
