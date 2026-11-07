@@ -993,10 +993,52 @@ await check('AC-01 nothing new was written under render-director/runs', async ()
   assert.equal(after, runsBefore);
 });
 
+await check('T11 mcp.mts writes only JSON-RPC to stdout from initialize to tools/list', async () => {
+  const { spawn } = await import('node:child_process');
+  const proc = spawn(process.execPath, [path.join(ROOT, 'mcp.mts'), '--project', PROJECT], { env: { ...process.env, PATH: PATH_WITH_GATE, RENDER_DIRECTOR_NO_OPEN: '1' }, stdio: ['pipe', 'pipe', 'ignore'] });
+  try {
+    let out = '';
+    proc.stdout.on('data', (d: Buffer) => { out += d.toString('utf8'); });
+    const reply = async (id: number) => {
+      for (let i = 0; i < 200; i++) { if (out.split('\n').some((l) => { try { return JSON.parse(l).id === id; } catch { return false; } })) return; await sleep(50); }
+      throw new Error(`no reply to request ${id}; stdout: ${out}`);
+    };
+    const send = (m: unknown) => proc.stdin.write(`${JSON.stringify(m)}\n`);
+    send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't11', version: '1.0.0' } } });
+    await reply(1);
+    send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+    await reply(2);
+    const lines = out.split('\n').filter((l) => l !== '');
+    assert.ok(lines.length >= 2, out);
+    for (const l of lines) assert.equal(JSON.parse(l).jsonrpc, '2.0', l);
+  } finally { proc.kill('SIGTERM'); }
+});
+
 // teardown
 const pid = JSON.parse(fs.readFileSync(path.join(PROJECT, '.vork', 'server.json'), 'utf8')).pid;
 await client.close();
-try { process.kill(pid, 'SIGTERM'); } catch {}
+const LOGS = path.join(PROJECT, '.vork', 'logs');
+const logLines = () => fs.readFileSync(path.join(LOGS, 'director.jsonl'), 'utf8').split('\n').filter((l) => l !== '');
+await check('T12 after SIGTERM the last line of director.jsonl is director.stop', async () => {
+  // mcp.mts starts Director detached, so closing the client leaves it running.
+  process.kill(pid, 'SIGTERM');
+  const gone = () => { try { process.kill(pid, 0); return false; } catch (e: Json) { return e.code === 'ESRCH'; } };
+  for (let i = 0; i < 100 && !gone(); i++) await sleep(100);
+  assert.ok(gone(), `Director (pid ${pid}) still runs 10 s after SIGTERM`);
+  const last = JSON.parse(logLines().at(-1)!);
+  assert.equal(last.event, 'director.stop'); assert.equal(last.signal, 'SIGTERM');
+});
+await check('T9a every line of director.jsonl is JSON and director.start is there', async () => {
+  const events = logLines().map((l) => JSON.parse(l));
+  assert.ok(events.some((e) => e.event === 'director.start' && e.mode === 'ade' && typeof e.port === 'number' && e.pid === pid), 'no director.start');
+  for (const e of events) { assert.equal(e.service, 'render-director'); assert.equal(typeof e.component, 'string'); assert.equal(typeof e.event, 'string'); }
+});
+await check('T9b server.log has no LogTape banner and no INFO structured line', async () => {
+  const log = fs.readFileSync(path.join(PROJECT, '.vork', 'server.log'), 'utf8');
+  assert.doesNotMatch(log, /LogTape loggers are configured/);
+  for (const l of log.split('\n')) { let e: Json; try { e = JSON.parse(l); } catch { continue; } assert.notEqual(e?.level, 'INFO', l); }
+});
 standalone.proc.kill('SIGTERM');
 await new Promise((r) => setTimeout(r, 300));
 fs.rmSync(tmp, { recursive: true, force: true });
