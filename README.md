@@ -81,7 +81,7 @@ Director は起動時に、ブラウザでレビュー用のタブを開きま�
 - エージェントの新しい提案は通知されます。「View」で開き、親の版とワイプで比べられます。見ている版が勝手に切り替わることはありません。
 - 物体をクリックして選び、コメントを「Send to agent」で送ります。エージェントが読んだかどうかが表示されます。
 - 「On page」で、開発中のページに候補を当てはめた状態を見られます。プロジェクトのファイルは変えません。
-- 採用依頼が来たら「Review…」で書き込み先と上書きの有無を確認して承認します。
+- 採用依頼が来たら「Review…」で書き込み先と上書きの有無を確認して承認します。採用の処理中は「adopting…」と表示され、却下やその版の破棄はできません。止めるにはジョブを取り消します（依頼は保留に戻ります）。
 
 ### 設定（`<project>/.vork/config.json`）
 
@@ -112,8 +112,9 @@ node server.mts             # http://127.0.0.1:4747 、状態は runs/
 
 ```sh
 npm run typecheck           # TypeScript 7 で型検査（サーバー側 .mts と public/app.js の JSDoc）
-npm test                    # 自己テスト（ポリシー、差分、書き込み先の検査）+ 統合試験（実MCPクライアント）
-npm run test:e2e            # ブラウザE2E（Chrome）。E2E_AGENT=1 で内蔵エージェントも試す
+npm test                    # test:unit + 統合試験（実MCPクライアント、vork が必要）
+npm run test:unit           # 自己テスト（ポリシー、差分、書き込み先の検査）。vork も Chrome も不要
+npm run test:e2e            # ブラウザE2E（Chrome）。E2E_AGENT=1 で内蔵エージェントも試す。E2E_REQUIRED=1 なら Chrome が無いと失敗にする。README の画像（docs/screenshot-*.png）は E2E_UPDATE_SCREENSHOTS=1 のときだけ書き換える
 npm run report -- <project> # 最初の提案から採用までの時間、フィードバック回数など
 ```
 

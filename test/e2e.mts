@@ -14,8 +14,14 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-if (!fs.existsSync(CHROME)) { console.log('SKIP e2e: Chrome not found (set CHROME_PATH)'); process.exit(0); }
+// E2E_REQUIRED=1 (CI, refactoring sign-off): a missing Chrome is a failure, not a skip.
+if (!fs.existsSync(CHROME)) {
+  if (process.env.E2E_REQUIRED === '1') { console.log('FAIL e2e: Chrome not found (set CHROME_PATH); E2E_REQUIRED=1'); process.exit(1); }
+  console.log('SKIP e2e: Chrome not found (set CHROME_PATH)'); process.exit(0);
+}
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vd-e2e-')));
+// The README images in docs/ are rewritten only with E2E_UPDATE_SCREENSHOTS=1; otherwise screenshots go to the temp folder.
+const SHOTS = process.env.E2E_UPDATE_SCREENSHOTS === '1' ? path.join(ROOT, 'docs') : tmp;
 interface SceneNode { name: string; energy?: number; materials?: { inputs: Record<string, number> }[] }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let pass = 0, failures = 0; const procs: ChildProcess[] = [];
@@ -166,7 +172,7 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     const shot = fs.readFileSync(path.join(PROJECT, '.vork', vid, 'page-draft.png'));
     assert.notDeepEqual(shot, origShot, 'page with candidate must differ from the original page');
     assert.deepEqual(projectMtimes(), before);
-    await page.screenshot({ path: path.join(ROOT, 'docs', 'screenshot-on-page.png') });
+    await page.screenshot({ path: path.join(SHOTS, 'screenshot-on-page.png') });
     await page.click('#pageBtn'); await sleep(500);
   });
 
@@ -195,7 +201,7 @@ const clickObject = async (page: Page, fx: number, fy: number) => { await page.w
     await page.waitForSelector('#adoptBox:not([hidden])', { timeout: 10000 });
     await page.click('#adoptList button'); await sleep(500);
     assert.match(await page.textContent('#adoptPlan') as string, /public\/vork\/hero\.png/);
-    await page.screenshot({ path: path.join(ROOT, 'docs', 'screenshot-adoption.png') });
+    await page.screenshot({ path: path.join(SHOTS, 'screenshot-adoption.png') });
     await page.click('#adoptDlg button[value=approve]');
     await sleep(500); await idle(page, 180000); await sleep(800);
     assert.ok(fs.existsSync(path.join(PROJECT, 'public', 'vork', 'hero.png')));

@@ -103,8 +103,14 @@ const arg = (name: string): string | undefined => { const i = argv.indexOf(name)
 /** A client error whose message is safe to return as a 400 response. */
 class BadRequest extends Error {}
 /** A request body over MAX_BODY bytes; answered with 413. */
-class PayloadTooLarge extends Error {}
+class PayloadTooLarge extends Error {
+  /** false: the declared length is past the drain limit, so the 413 goes out before the body is read. */
+  drain = true;
+}
 const MAX_BODY = 4e6;
+// Agent text is kept in state.json (rewritten on every save) and shown to the human, so it is bounded.
+const MAX_REASON = 4000, MAX_ASSUMPTIONS = 20, MAX_ASSUMPTION = 1000, MAX_PENDING_ADOPTIONS = 20;
+const MAX_INTERPRETATION = 4000, MAX_CLAIMED = 50, MAX_CLAIMED_NODE = 200, MAX_CLAIMED_TEXT = 1000;
 const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
 const isClaimedChange = (x: unknown): x is ClaimedChange => isPlainObject(x) && typeof x.node === 'string' && typeof x.what === 'string' && typeof x.why === 'string';
 
@@ -369,6 +375,9 @@ async function main() {
   const save = () => { fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state, null, 2)); fs.renameSync(STATE_FILE + '.tmp', STATE_FILE); };
   const audit = (event: string, data: Record<string, unknown> = {}) => { state.audit.push({ t: new Date().toISOString(), event, ...data }); save(); };
   const getV = (id: string | null | undefined): Version | undefined => state.versions.find((v) => v.id === id);
+  // A discarded version cannot be rendered at final quality, be the base of a proposal, or be adopted.
+  // Check it when a request arrives, when a ticket is used, and again after every await before state changes.
+  const liveV = (id: string | null | undefined): Version | undefined => { const v = getV(id); return v && v.status !== 'discarded' ? v : undefined; };
   const vdir = (id: string) => path.join(RUNS, id);
   const sceneOf = (id: string): Scene => JSON.parse(fs.readFileSync(path.join(vdir(id), 'scene.json'), 'utf8'));
   const hashScene = (id: string) => sha256(fs.readFileSync(path.join(vdir(id), 'scene.json'))).slice(0, 16);
@@ -469,6 +478,8 @@ async function main() {
       objects: meta.object_ids, exposure: meta.exposure,
       settings: { integrator: meta.settings.integrator, samples: meta.settings.samples, denoiser: meta.denoiser }, warnings,
     };
+    // A final render of a version discarded while it ran is not kept (#15).
+    if (profile === 'final' && !liveV(v.id)) return { ok: false, log: `${v.id} was discarded during the render; the final render was not kept` };
     if (!scene) { v.renders[profile] = info; save(); }
     return { ok: true, info };
   }
@@ -564,6 +575,7 @@ ${VORK_HELP}`;
         job.steps.at(-1)!.detail = String(why).split('\n').slice(-6).join('\n'); job.steps.at(-1)!.status = 'failed';
         prompt += `\n\nYOUR PREVIOUS PROPOSAL WAS REJECTED:\n${String(why).slice(-1500)}\nFix it and return the full scene again.`; continue;
       }
+      if (!liveV(baseId)) { step(job, `${baseId} was discarded while the agent worked; no proposal was made`, 'failed'); return { kind: 'base_discarded', cost: totalCost }; }
       const { v, draft } = await createProposal(job, { baseId, scene: last.scene, instruction, proposal: { ...last, scene: undefined, policy: check.policy, cost: totalCost, context: ctx, via: 'built-in' } });
       if (draft.cancelled) return;
       step(job, 'Proposal ready for review', 'done');
@@ -573,7 +585,16 @@ ${VORK_HELP}`;
 
   // ---------- approval tickets (final render, adoption) bound to an exact scene hash ----------
   const tickets = new Map<string, Ticket>();
-  const issueTicket = (data: TicketData) => { const id = crypto.randomUUID(); tickets.set(id, { ...data, expires: Date.now() + 10 * 60_000 }); return id; };
+  const issueTicket = (data: TicketData) => {
+    // A new adoption plan replaces the older ones for the same request, so two tickets cannot both adopt it.
+    if (data.kind === 'adopt') for (const [id, t] of tickets) if (t.kind === 'adopt' && t.requestId === data.requestId) tickets.delete(id);
+    const id = crypto.randomUUID(); tickets.set(id, { ...data, expires: Date.now() + 10 * 60_000 }); return id;
+  };
+  // Adoption requests whose adopt job is running. Kept in memory only: a job does not survive a restart,
+  // so after one the request is simply pending again. While a job runs, plan, reject and discard answer 409.
+  const adoptionJobs = new Map<string, Job>();
+  const adoptingVersion = (versionId: string) => [...adoptionJobs.keys()].some((rid) => state.adoptionRequests.find((a) => a.id === rid)?.version === versionId);
+  const ADOPTION_RUNNING = 'an adoption of this request is running; cancel its job first';
   const finalMatches = (v: Version, hash: string) => {
     const f = v.renders.final; if (!f || f.sceneHash !== hash || !fs.existsSync(f.file)) return false;
     return sha256(fs.readFileSync(f.file)) === f.sha256;
@@ -636,8 +657,10 @@ ${VORK_HELP}`;
   // The type argument is not checked at run time; each endpoint still validates the fields it reads.
   // Over MAX_BODY: settle with PayloadTooLarge (413) and keep draining the rest, so the client can read the response.
   // Draining stops at MAX_DRAIN: past that the connection is dropped instead of reading on until requestTimeout.
-  const MAX_DRAIN = 4 * MAX_BODY;
+  // A content-length declared past MAX_DRAIN is answered before reading; the rest is then discarded for at most DRAIN_MS.
+  const MAX_DRAIN = 4 * MAX_BODY, DRAIN_MS = 5000;
   const readBody = <T,>(req: http.IncomingMessage): Promise<T> => new Promise((ok, bad) => {
+    if (Number(req.headers['content-length']) > MAX_DRAIN) { const e = new PayloadTooLarge(); e.drain = false; return bad(e); }
     const chunks: Buffer[] = []; let size = 0; let settled = false;
     const fail = (e: Error) => { if (!settled) { settled = true; chunks.length = 0; bad(e); } };
     req.on('data', (d: Buffer) => {
@@ -693,18 +716,25 @@ ${VORK_HELP}`;
     }
     if (url.pathname === '/api/agent/propose' && req.method === 'POST') {
       const b = await readBody<{ base?: string; interpretation?: unknown; assumptions?: unknown; claimed_changes?: unknown; scene: Scene; responds_to?: unknown }>(req);
-      const baseId = b.base || state.head; const base = getV(baseId);
-      if (!base || base.status === 'discarded') return send(res, 400, { error: 'base must be an existing, not discarded version' });
+      const baseId = b.base || state.head;
+      if (!liveV(baseId)) return send(res, 400, { error: 'base must be an existing, not discarded version' });
       if (typeof b.interpretation !== 'string' || !b.interpretation.trim() || !Array.isArray(b.claimed_changes)) return send(res, 400, { error: 'interpretation and claimed_changes are required' });
       if (!b.claimed_changes.every(isClaimedChange)) return send(res, 400, { error: 'each claimed_changes item must be { node, what, why } with string values' });
+      // interpretation is stored three times (instruction, proposal, audit), so it is bounded like reason.
+      if (b.interpretation.length > MAX_INTERPRETATION) return send(res, 400, { error: `interpretation must be at most ${MAX_INTERPRETATION} characters` });
+      if (b.claimed_changes.length > MAX_CLAIMED || b.claimed_changes.some((c) => c.node.length > MAX_CLAIMED_NODE || c.what.length > MAX_CLAIMED_TEXT || c.why.length > MAX_CLAIMED_TEXT))
+        return send(res, 400, { error: `claimed_changes: at most ${MAX_CLAIMED} items; node at most ${MAX_CLAIMED_NODE}, what and why at most ${MAX_CLAIMED_TEXT} characters` });
       // Checked before validateScene so a bad field does not cost a vork render.
       if (b.assumptions != null && !(Array.isArray(b.assumptions) && b.assumptions.every((a) => typeof a === 'string'))) return send(res, 400, { error: 'assumptions must be an array of strings' });
+      if (Array.isArray(b.assumptions) && (b.assumptions.length > MAX_ASSUMPTIONS || b.assumptions.some((a: string) => a.length > MAX_ASSUMPTION))) return send(res, 400, { error: `assumptions: at most ${MAX_ASSUMPTIONS} items of at most ${MAX_ASSUMPTION} characters` });
       if (b.responds_to != null && !Number.isInteger(b.responds_to)) return send(res, 400, { error: 'responds_to must be an integer' });
       const assumptions: string[] = (b.assumptions as string[] | null | undefined) ?? [];
       const respondsTo = (b.responds_to as number | null | undefined) ?? null;
       const job = newJob('agent-propose', baseId!);
       const check = await validateScene(job, b.scene);
       if (!check.ok) { audit('agent_proposal_rejected', { kind: check.kind, base: baseId }); return send(res, 422, { error: check.kind === 'blocked' ? 'policy' : 'vork rejected the scene', blockers: check.policy?.blockers || [], log: check.log || null, version: null }); }
+      // The human may have discarded the base during the validation render.
+      if (!liveV(baseId)) return send(res, 409, { error: `base ${baseId} was discarded while the scene was being validated; no version was created`, version: null });
       const proposal: Proposal = { interpretation: b.interpretation, assumptions, claimed_changes: b.claimed_changes.map(({ node, what, why }) => ({ node, what, why })), policy: check.policy, context: respondsTo != null ? [`responds to feedback #${respondsTo}`] : [], via: 'mcp', respondsTo };
       const { v, draft } = await createProposal(job, { baseId, scene: b.scene, instruction: b.interpretation, proposal });
       return send(res, 200, { version: v.id, status: v.status, head: state.head, render: draft.ok ? renderSummary(draft.info) : null, renderError: draft.ok ? null : draft.log, diff: diffScenes(sceneOf(baseId!), b.scene), flags: check.policy.flags });
@@ -733,12 +763,18 @@ ${VORK_HELP}`;
       return send(res, 200, { timeout: false, events: evs });
     }
     if (url.pathname === '/api/agent/adoption-request' && req.method === 'POST') {
-      const b = await readBody<{ version: string; slug: unknown; reason?: unknown }>(req); const v = getV(b.version);
+      const b = await readBody<{ version: string; slug: unknown; reason?: unknown }>(req); const v = liveV(b.version);
       if (!PROJECT) return send(res, 409, { error: 'adoption needs Director started with --project' });
-      if (!v || v.status === 'discarded') return send(res, 400, { error: 'version must exist and not be discarded' });
+      if (!v) return send(res, 400, { error: 'version must exist and not be discarded' });
       if (b.reason != null && typeof b.reason !== 'string') return send(res, 400, { error: 'reason must be a string' });
+      if (typeof b.reason === 'string' && b.reason.length > MAX_REASON) return send(res, 400, { error: `reason must be at most ${MAX_REASON} characters` });
       let slug: string;
       try { ({ slug } = adoptionTargets(b.slug)); } catch (e: any) { return send(res, 400, { error: e.message }); }
+      const same = state.adoptionRequests.find((a) => a.status === 'pending' && a.version === v.id && a.slug === slug);
+      if (same) return send(res, 409, { error: `request ${same.id} for ${v.id} as ${slug} is already pending; call wait_for_feedback`, request: same.id });
+      // Requests for a discarded version can no longer be adopted, so they do not count.
+      if (state.adoptionRequests.filter((a) => a.status === 'pending' && liveV(a.version)).length >= MAX_PENDING_ADOPTIONS)
+        return send(res, 429, { error: `${MAX_PENDING_ADOPTIONS} adoption requests are already pending; wait for the human to decide` });
       const reqId = `a${String(state.adoptionRequests.length + 1).padStart(3, '0')}`;
       state.adoptionRequests.push({ id: reqId, version: v.id, slug, reason: b.reason ?? '', status: 'pending', t: new Date().toISOString() });
       audit('adoption_requested', { request: reqId, version: v.id, slug });
@@ -777,7 +813,7 @@ ${VORK_HELP}`;
         return send(res, 200, {
           mode: MODE, project: PROJECT, config: readConfig(), head: state.head, vork: VORK_VERSION, model: MODEL,
           versions: state.versions.map(versionView), audit: state.audit.slice(-60),
-          adoptionRequests: state.adoptionRequests, events: state.events.slice(-30), agentCursor: state.agentCursor,
+          adoptionRequests: state.adoptionRequests.map((a) => (adoptionJobs.has(a.id) ? { ...a, status: 'adopting', job: adoptionJobs.get(a.id)!.id } : a)), events: state.events.slice(-30), agentCursor: state.agentCursor,
         });
 
       if (req.method === 'GET' && url.pathname.startsWith('/api/jobs/')) {
@@ -785,7 +821,10 @@ ${VORK_HELP}`;
       }
       if (req.method === 'POST' && url.pathname.match(/^\/api\/jobs\/[^/]+\/cancel$/)) {
         const j = jobs.get(url.pathname.split('/')[3]); if (!j) return send(res, 404, { error: 'no job' });
-        if (j.status === 'running') { j.status = 'cancelled'; j.child?.kill('SIGTERM'); step(j, 'Cancelled by director', 'failed'); audit('cancelled', { job: j.kind, version: j.versionId }); }
+        if (j.status === 'running') {
+          j.status = 'cancelled'; j.child?.kill('SIGTERM'); step(j, 'Cancelled by director', 'failed'); audit('cancelled', { job: j.kind, version: j.versionId });
+          for (const [rid, aj] of adoptionJobs) if (aj === j) adoptionJobs.delete(rid); // the request is pending again
+        }
         return send(res, 200, publicJob(j));
       }
 
@@ -795,6 +834,7 @@ ${VORK_HELP}`;
         if (profile === 'final') {
           const t = takeTicket(ticket, 'final');
           if (!t || t.versionId !== versionId) return send(res, 403, { error: 'final render needs a fresh approval for this exact scene' });
+          if (!liveV(versionId)) return send(res, 409, { error: 'discarded versions cannot be rendered at final quality' });
           audit('final_approved', { version: versionId, hash: t.hash });
         }
         const job = newJob('render', versionId); step(job, `vork render ${PROFILES[profile]}`);
@@ -810,7 +850,7 @@ ${VORK_HELP}`;
         const { versionId } = await readBody<{ versionId: string }>(req); const v = getV(versionId); if (!v) return send(res, 400, { error: 'bad version' });
         const scene = sceneOf(versionId); const pol = policyCheck(scene);
         if (pol.blockers.length) return send(res, 409, { error: `scene violates policy: ${pol.blockers.join('; ')}` });
-        if (v.status === 'discarded') return send(res, 409, { error: 'discarded versions cannot be rendered at final quality' });
+        if (!liveV(versionId)) return send(res, 409, { error: 'discarded versions cannot be rendered at final quality' });
         const hash = hashScene(versionId); const ticket = issueTicket({ kind: 'final', versionId, hash });
         const d = v.renders.draft;
         return send(res, 200, {
@@ -825,6 +865,7 @@ ${VORK_HELP}`;
         if (MODE === 'ade') return send(res, 409, { error: 'ADE mode: proposals come from your ADE agent via MCP. Send feedback instead.' });
         const body = await readBody<{ baseId: string; instruction?: unknown; selection?: unknown; context?: unknown }>(req);
         if (!getV(body.baseId) || typeof body.instruction !== 'string' || !body.instruction.trim()) return send(res, 400, { error: 'need baseId and instruction' });
+        if (!liveV(body.baseId)) return send(res, 400, { error: 'discarded versions cannot be the base of a proposal' });
         // Same rule as /api/feedback: keep only string selections. Context flags are read as booleans.
         const selection = (Array.isArray(body.selection) ? body.selection : []).filter((x): x is string => typeof x === 'string').slice(0, 50);
         const ctx = isPlainObject(body.context) ? body.context : {};
@@ -848,6 +889,7 @@ ${VORK_HELP}`;
       if (req.method === 'POST' && url.pathname === '/api/decide') {
         const { versionId, decision, comment } = await readBody<{ versionId: string; decision: string; comment?: unknown }>(req); const v = getV(versionId);
         if (!v || v.status !== 'proposed' || !['accept', 'discard'].includes(decision)) return send(res, 400, { error: 'only proposed versions can be decided' });
+        if (decision === 'discard' && adoptingVersion(v.id)) return send(res, 409, { error: 'this version is being adopted; cancel the adoption job first' });
         v.status = decision === 'accept' ? 'accepted' : 'discarded'; if (decision === 'accept') state.head = v.id;
         audit(decision, { version: v.id });
         pushEvent({ type: 'decision', version: v.id, decision, head: state.head, comment: typeof comment === 'string' ? comment.slice(0, 4000) : null });
@@ -863,9 +905,10 @@ ${VORK_HELP}`;
 
       if (req.method === 'POST' && url.pathname === '/api/adopt/plan') {
         const { requestId, slug: slugOverride } = await readBody<{ requestId: string; slug?: unknown }>(req);
+        if (adoptionJobs.has(requestId)) return send(res, 409, { error: ADOPTION_RUNNING });
         const ar = state.adoptionRequests.find((a) => a.id === requestId && a.status === 'pending');
         if (!ar) return send(res, 400, { error: 'no pending adoption request with that id' });
-        const v = getV(ar.version); if (!v || v.status === 'discarded') return send(res, 409, { error: 'version is gone or discarded' });
+        const v = liveV(ar.version); if (!v) return send(res, 409, { error: 'version is gone or discarded' });
         let t;
         try { t = adoptionTargets(slugOverride || ar.slug); } catch (e: any) { return send(res, 400, { error: e.message }); }
         const pol = policyCheck(sceneOf(v.id)); if (pol.blockers.length) return send(res, 409, { error: pol.blockers.join('; ') });
@@ -883,6 +926,7 @@ ${VORK_HELP}`;
 
       if (req.method === 'POST' && url.pathname === '/api/adopt/reject') {
         const { requestId, comment } = await readBody<{ requestId: string; comment?: unknown }>(req);
+        if (adoptionJobs.has(requestId)) return send(res, 409, { error: ADOPTION_RUNNING });
         const ar = state.adoptionRequests.find((a) => a.id === requestId && a.status === 'pending');
         if (!ar) return send(res, 400, { error: 'no pending adoption request with that id' });
         ar.status = 'rejected'; audit('adoption_rejected', { request: ar.id, version: ar.version });
@@ -895,38 +939,44 @@ ${VORK_HELP}`;
         const t = takeTicket(ticket, 'adopt');
         if (!t) return send(res, 403, { error: 'adoption needs a fresh approval for this exact scene' });
         const ar = state.adoptionRequests.find((a) => a.id === t.requestId);
-        if (!ar || ar.status !== 'pending') return send(res, 409, { error: 'request is no longer pending' });
-        const v = getV(t.versionId)!;
+        if (!ar || ar.status !== 'pending' || adoptionJobs.has(ar.id)) return send(res, 409, { error: 'request is no longer pending' });
+        const v = liveV(t.versionId);
+        if (!v) return send(res, 409, { error: 'the version was discarded after approval; nothing was written' });
         const job = newJob('adopt', v.id);
+        adoptionJobs.set(ar.id, job);
         (async () => {
-          // Render exactly the approved scene text unless an untouched final of that scene already exists.
-          if (!finalMatches(v, t.hash)) {
-            step(job, 'vork render std/final (approved scene)');
-            const r = await renderVersion(job, v, 'final', { pinnedText: t.sceneText }); if (job.status === 'cancelled') return;
-            if (!r.ok) throw new Error(`final render failed: ${r.log?.slice(-400)}`);
-            audit('final_rendered', { version: v.id, seconds: r.info.seconds });
-          }
-          step(job, 'Writing into the project');
-          const targets = adoptionTargets(t.slug); // re-resolve right before writing
-          if (targets.assetRel !== t.assetRel) throw new Error(`asset path changed since approval (${t.assetRel} → ${targets.assetRel}); plan again`);
-          if (fs.existsSync(targets.asset) !== t.overwrites) throw new Error('the target file appeared or disappeared since approval; plan again');
-          const png = fs.readFileSync(v.renders.final!.file);
-          if (sha256(png) !== v.renders.final!.sha256) throw new Error('final.png changed after rendering; plan again');
-          fs.mkdirSync(path.dirname(targets.asset), { recursive: true }); fs.mkdirSync(path.dirname(targets.manifest), { recursive: true });
-          const overwrote = fs.existsSync(targets.asset);
-          fs.writeFileSync(targets.asset, png);
-          const pngSha = sha256(png);
-          const manifest = {
-            slug: t.slug, asset: targets.assetRel, sha256: pngSha, version: v.id, sceneHash: t.hash, vork: VORK_VERSION, profile: PROFILES.final,
-            resolution: [v.renders.final!.width, v.renders.final!.height], reason: ar.reason, interpretation: v.proposal?.interpretation ?? v.instruction,
-            adoptedAt: new Date().toISOString(), approvedVia: 'vork Director UI', scene: JSON.parse(t.sceneText),
-          };
-          fs.writeFileSync(targets.manifest, JSON.stringify(manifest, null, 2));
-          if (v.status === 'proposed') { v.status = 'accepted'; state.head = v.id; audit('accept', { version: v.id, via: 'adoption' }); }
-          ar.status = 'adopted'; save();
-          audit('adopted', { request: ar.id, version: v.id, hash: t.hash, asset: targets.assetRel, sha256: pngSha, overwrote });
-          pushEvent({ type: 'adopted', request: ar.id, version: v.id, slug: t.slug, asset: targets.assetRel, manifest: targets.manifestRel, sha256: pngSha });
-          step(job, 'Adopted', 'done'); job.status = 'done'; job.result = { asset: targets.assetRel, manifest: targets.manifestRel, sha256: pngSha, overwrote };
+          try {
+            // Render exactly the approved scene text unless an untouched final of that scene already exists.
+            if (!finalMatches(v, t.hash)) {
+              step(job, 'vork render std/final (approved scene)');
+              const r = await renderVersion(job, v, 'final', { pinnedText: t.sceneText }); if (job.status === 'cancelled') return;
+              if (!r.ok) throw new Error(`final render failed: ${r.log?.slice(-400)}`);
+              audit('final_rendered', { version: v.id, seconds: r.info.seconds });
+            }
+            step(job, 'Writing into the project');
+            // Check again right before writing: the request is still ours and pending, the version not discarded.
+            if (job.status !== 'running' || adoptionJobs.get(ar.id) !== job || ar.status !== 'pending' || !liveV(v.id)) throw new Error('the request or the version changed since approval; nothing was written');
+            const targets = adoptionTargets(t.slug); // re-resolve right before writing
+            if (targets.assetRel !== t.assetRel) throw new Error(`asset path changed since approval (${t.assetRel} → ${targets.assetRel}); plan again`);
+            if (fs.existsSync(targets.asset) !== t.overwrites) throw new Error('the target file appeared or disappeared since approval; plan again');
+            const png = fs.readFileSync(v.renders.final!.file);
+            if (sha256(png) !== v.renders.final!.sha256) throw new Error('final.png changed after rendering; plan again');
+            fs.mkdirSync(path.dirname(targets.asset), { recursive: true }); fs.mkdirSync(path.dirname(targets.manifest), { recursive: true });
+            const overwrote = fs.existsSync(targets.asset);
+            fs.writeFileSync(targets.asset, png);
+            const pngSha = sha256(png);
+            const manifest = {
+              slug: t.slug, asset: targets.assetRel, sha256: pngSha, version: v.id, sceneHash: t.hash, vork: VORK_VERSION, profile: PROFILES.final,
+              resolution: [v.renders.final!.width, v.renders.final!.height], reason: ar.reason, interpretation: v.proposal?.interpretation ?? v.instruction,
+              adoptedAt: new Date().toISOString(), approvedVia: 'vork Director UI', scene: JSON.parse(t.sceneText),
+            };
+            fs.writeFileSync(targets.manifest, JSON.stringify(manifest, null, 2));
+            if (v.status === 'proposed') { v.status = 'accepted'; state.head = v.id; audit('accept', { version: v.id, via: 'adoption' }); }
+            ar.status = 'adopted'; save();
+            audit('adopted', { request: ar.id, version: v.id, hash: t.hash, asset: targets.assetRel, sha256: pngSha, overwrote });
+            pushEvent({ type: 'adopted', request: ar.id, version: v.id, slug: t.slug, asset: targets.assetRel, manifest: targets.manifestRel, sha256: pngSha });
+            step(job, 'Adopted', 'done'); job.status = 'done'; job.result = { asset: targets.assetRel, manifest: targets.manifestRel, sha256: pngSha, overwrote };
+          } finally { if (adoptionJobs.get(ar.id) === job) adoptionJobs.delete(ar.id); }
         })().catch((e) => failJob(job, e));
         return send(res, 202, publicJob(job));
       }
@@ -989,14 +1039,32 @@ ${VORK_HELP}`;
       const rootReal = fs.realpathSync.native(root); const want = path.resolve(rootReal, '.' + path.sep + rel);
       let real: string;
       try { real = fs.realpathSync.native(want); } catch { return send(res, 404, 'not found', 'text/plain'); }
-      if (real !== want || !real.startsWith(rootReal + path.sep) || !fs.statSync(real).isFile())
-        return send(res, 404, 'not found', 'text/plain');
-      return send(res, 200, fs.readFileSync(real), MIME[path.extname(real)] || 'application/octet-stream');
+      if (real !== want || !real.startsWith(rootReal + path.sep)) return send(res, 404, 'not found', 'text/plain');
+      // Read from the descriptor that was checked, not the path again: O_NOFOLLOW refuses a symlink swapped in
+      // after the check. A render file must have one link only: a hard link to server.json passes every path check.
+      let fd: number;
+      // O_NONBLOCK: opening a FIFO would otherwise block the whole server until a writer appears; fstat below refuses it.
+      try { fd = fs.openSync(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); } catch { return send(res, 404, 'not found', 'text/plain'); }
+      try {
+        const st = fs.fstatSync(fd);
+        if (!st.isFile() || (root === RUNS && st.nlink !== 1)) return send(res, 404, 'not found', 'text/plain');
+        // O_NOFOLLOW covers the last component only: the opened file must still be the one at the checked path.
+        const at = fs.lstatSync(real);
+        if (at.dev !== st.dev || at.ino !== st.ino || fs.realpathSync.native(real) !== want) return send(res, 404, 'not found', 'text/plain');
+        return send(res, 200, fs.readFileSync(fd), MIME[path.extname(real)] || 'application/octet-stream');
+      } finally { fs.closeSync(fd); }
     } catch (e: any) {
       if (e instanceof BadRequest) return send(res, 400, { error: e.message });
       if (e instanceof PayloadTooLarge) {
-        // Reply once the rest of the body is drained: closing while the client still sends resets the connection.
         const reply = () => { if (!res.headersSent && !res.destroyed) send(res, 413, { error: `request body is larger than ${MAX_BODY / 1e6} MB` }); };
+        if (!e.drain) {
+          // Declared past the drain limit: reply now, then discard what still arrives for at most DRAIN_MS.
+          // Closing at once would reset the connection while the client still sends, and the client could lose the reply.
+          const cut = setTimeout(() => req.destroy(), DRAIN_MS);
+          req.once('close', () => clearTimeout(cut)); req.resume();
+          return reply();
+        }
+        // Otherwise reply once the rest of the body is drained: closing while the client still sends resets the connection.
         return req.readableEnded ? reply() : void req.once('end', reply);
       }
       if (res.destroyed) return; // client went away mid-body

@@ -8,7 +8,7 @@
 /** @typedef {{ claimed_changes: { node: string, what: string, why: string }[], interpretation: string, assumptions: string[], policy: { flags: { level: string, msg: string }[] }, context: string[], via?: string, cost?: number }} Proposal */
 /** @typedef {{ id: string, parent?: string | null, status: string, origin: string, instruction?: string, hash: string, renders: Record<string, Render | undefined>, pagePreviews?: Record<string, PagePreview>, scene: Scene, proposal: Proposal, diff: Diff[] }} Version */
 /** @typedef {{ seq: number, type: string, comment: string, selection: string[], decision: string, version: string, asset: string, node: string, field: string, request: string }} AgentEvent */
-/** @typedef {{ id: string, status: string, slug: string, version: string, reason: string }} AdoptionRequest */
+/** @typedef {{ id: string, status: string, slug: string, version: string, reason: string, job?: string }} AdoptionRequest */
 /** @typedef {{ t: string, event: string, version?: string, instruction?: string }} AuditEntry */
 /** @typedef {{ head: string, versions: Version[], vork: string, mode?: string, project?: string, model?: string, adoptionRequests: AdoptionRequest[], events: AgentEvent[], agentCursor: number, audit: AuditEntry[], config: { pageUrl?: string } }} Data */
 /** @typedef {{ kind: string, versionId: string, asset: string, proposal?: { clarifying_question?: string }, policy: { blockers: string[] }, log?: string }} JobResult */
@@ -105,10 +105,17 @@ function renderEvents() {
   }).join('');
 }
 function renderAdoptions() {
-  const pending = (S.data.adoptionRequests || []).filter((a) => a.status === 'pending');
+  // 'adopting': its adopt job is running; the server refuses plan and reject until the job ends or is cancelled.
+  const pending = (S.data.adoptionRequests || []).filter((a) => a.status === 'pending' || a.status === 'adopting');
   $('#adoptBox').hidden = !pending.length;
-  $('#adoptList').innerHTML = pending.map((a) => `<li><span><b>${esc(a.slug)}</b> from ${esc(a.version)}</span><button class="ghost" data-req="${esc(a.id)}">Review…</button><span class="why">${esc(a.reason)}</span></li>`).join('');
-  $('#adoptList').querySelectorAll('button').forEach((b) => (b.onclick = () => reviewAdoption(b.dataset.req)));
+  $('#adoptList').innerHTML = pending.map((a) => `<li><span><b>${esc(a.slug)}</b> from ${esc(a.version)}</span>${a.status === 'adopting' ? `<span class="hint">adopting…</span><button class="ghost" data-cancel="${esc(a.job)}">Cancel</button>` : `<button class="ghost" data-req="${esc(a.id)}">Review…</button>`}<span class="why">${esc(a.reason)}</span></li>`).join('');
+  $('#adoptList').querySelectorAll('button[data-req]').forEach((b) => (/** @type {HTMLButtonElement} */ (b).onclick = () => reviewAdoption(/** @type {HTMLButtonElement} */ (b).dataset.req)));
+  // Cancelling the adopt job makes the request pending again (also after a reload, when the job is no longer tracked here).
+  $('#adoptList').querySelectorAll('button[data-cancel]').forEach((b) => (/** @type {HTMLButtonElement} */ (b).onclick = async () => {
+    try { await api(`/api/jobs/${/** @type {HTMLButtonElement} */ (b).dataset.cancel}/cancel`, {}); say('Adoption cancelled; the request is pending again'); }
+    catch (e) { alertMsg(`Cannot cancel: ${/** @type {Error} */ (e).message}`); }
+    await load();
+  }));
 }
 /** @param {string | undefined} requestId */
 async function reviewAdoption(requestId) {
@@ -126,9 +133,13 @@ async function reviewAdoption(requestId) {
   $('#adoptPlan').innerHTML = rows.map(([k, x]) => `<dt>${k}</dt><dd style="white-space:pre-wrap">${esc(x)}</dd>`).join('');
   /** @type {HTMLDialogElement} */ const dlg = $('#adoptDlg'); dlg.returnValue = ''; dlg.showModal();
   dlg.onclose = async () => {
-    if (dlg.returnValue === 'reject') { await api('/api/adopt/reject', { requestId }); say(`Rejected ${requestId}`); return load(); }
+    if (dlg.returnValue === 'reject') {
+      try { await api('/api/adopt/reject', { requestId }); say(`Rejected ${requestId}`); }
+      catch (e) { alertMsg(`Cannot reject: ${/** @type {Error} */ (e).message}`); }
+      return load();
+    }
     if (dlg.returnValue !== 'approve') return say('Nothing written');
-    try { const job = await api('/api/adopt', { ticket: plan.ticket }); trackJob(job, async (j) => { await load(); say(j.status === 'done' ? `Wrote ${j.result.asset}` : `Adoption failed: ${j.error}`); }); }
+    try { const job = await api('/api/adopt', { ticket: plan.ticket }); trackJob(job, async (j) => { await load(); say(j.status === 'done' ? `Wrote ${j.result.asset}` : j.status === 'cancelled' ? 'Adoption cancelled; the request is pending again' : `Adoption failed: ${j.error}`); }); }
     catch (e) { alertMsg(`Adoption refused: ${/** @type {Error} */ (e).message}`); }
   };
 }
@@ -471,7 +482,8 @@ function renderReview() {
 /** @param {string} decision */
 async function decide(decision) {
   const id = S.viewId;
-  await api('/api/decide', { versionId: id, decision });
+  try { await api('/api/decide', { versionId: id, decision }); }
+  catch (e) { return alertMsg(`Cannot ${decision}: ${/** @type {Error} */ (e).message}`); }
   if (decision === 'discard') S.viewId = /** @type {string} */ (/** @type {Version} */ (V(id)).parent);
   /** @type {HTMLTextAreaElement} */ ($('#instruction')).value = '';
   await load(); say(decision === 'accept' ? `${id} is now HEAD` : `${id} discarded`);
