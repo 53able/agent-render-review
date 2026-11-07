@@ -54,6 +54,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .measure div { display: flex; gap: 6px; } .measure dt { color: var(--muted); } .measure dd { margin: 0; font-family: ui-monospace, monospace; }
 .measure .warn { color: var(--warn); }
 
+.ofilter { width: 100%; margin-bottom: 6px; background: #0f1216; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; }
 .olist { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
 .olist label { display: flex; gap: 6px; align-items: center; padding: 3px 6px; border-radius: 5px; border: 1px solid var(--line); }
 .olist label.sel { border-color: var(--accent); background: #10262a; }

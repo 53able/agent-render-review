@@ -16,7 +16,7 @@
 /** @typedef {{ versionId: string, versionStatus: string, acceptsProposal?: boolean, hash: string, reason: string, writes: string[], overwrites?: boolean, needsFinalRender?: boolean, expiresInSec: number, ticket: string }} AdoptPlan */
 /** @typedef {{ versionId: string, hash: string, profile: string, resolution: number[], output: string, overwrites?: boolean, reference: string, timeoutSec: number, expiresInSec: number, flags: { msg: string }[], ticket: string }} FinalPlan */
 /** @typedef {{ w: number, h: number, arr: Uint16Array, objects: Record<string, string> }} Ids */
-/** @typedef {{ data: Data, viewId: string, profile: string, selection: Set<string>, hover: string | null, compare: boolean, job: Job | null, ids: Ids | null, img: HTMLImageElement, imgB: HTMLImageElement | null, lastResult: Job | null, sig?: string, onPage?: boolean, editing?: boolean }} State */
+/** @typedef {{ data: Data, viewId: string, profile: string, selection: Set<string>, hover: string | null, compare: boolean, job: Job | null, ids: Ids | null, img: HTMLImageElement, imgB: HTMLImageElement | null, lastResult: Job | null, sig?: string, onPage?: boolean, editing?: boolean, objKey?: string }} State */
 /** @typedef {[string, string, string, any, ...number[]]} QuickRow */
 
 /**
@@ -277,6 +277,7 @@ cv.addEventListener('mousemove', (ev) => {
 cv.addEventListener('mouseleave', () => { S.hover = null; $('#tip').hidden = true; paintOverlay(); });
 cv.addEventListener('click', (ev) => { if (!cv.dataset.ready) return; const n = pick(ev); if (!n) { S.selection.clear(); } else toggleSel(n, ev.shiftKey || ev.metaKey); });
 $('#wipe').addEventListener('input', paint);
+$('#objectFilter').addEventListener('input', () => renderObjects());
 $('#compareToggle').addEventListener('change', (e) => { S.compare = /** @type {HTMLInputElement} */ (e.target).checked; drawViewport(); });
 /** @type {NodeListOf<HTMLButtonElement>} */ (document.querySelectorAll('.seg button')).forEach((b) => b.addEventListener('click', () => {
   S.profile = /** @type {string} */ (b.dataset.profile); document.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-checked', /** @type {string} */ (/** @type {unknown} */ (x === b)))); drawViewport();
@@ -305,15 +306,29 @@ function renderMeasure(r) {
 }
 
 // ---------- objects & direct manipulation ----------
+const OBJECT_CAP = 200;
+// Rebuilds the list only when the version or the filter changes; a selection change only updates the rows already shown.
 function renderObjects() {
-  const scene = viewV().scene; const list = $('#objectList'); list.innerHTML = '';
-  for (const n of scene.nodes.filter((n) => n.name)) {
-    const li = document.createElement('li'); const sel = S.selection.has(n.name);
-    li.innerHTML = `<label class="${sel ? 'sel' : ''}"><input type="checkbox" ${sel ? 'checked' : ''}> ${esc(n.name)} <span class="kind">${esc(n.type)}${n.type === 'light' ? ' ' + esc(n.shape) : ''}</span></label>`;
-    /** @type {HTMLInputElement} */ (li.querySelector('input')).onchange = () => toggleSel(n.name, true);
-    list.append(li);
-  }
+  const scene = viewV().scene; const list = $('#objectList');
+  const filter = /** @type {HTMLInputElement} */ ($('#objectFilter')).value.trim().toLowerCase();
   for (const s of [...S.selection]) if (!scene.nodes.some((n) => n.name === s)) S.selection.delete(s);
+  const key = `${S.viewId}\n${filter}`;
+  if (key !== S.objKey) {
+    S.objKey = key; list.innerHTML = '';
+    const matches = scene.nodes.filter((n) => n.name && n.name.toLowerCase().includes(filter));
+    for (const n of matches.slice(0, OBJECT_CAP)) {
+      const li = document.createElement('li'); li.dataset.name = n.name;
+      li.innerHTML = `<label><input type="checkbox"> ${esc(n.name)} <span class="kind">${esc(n.type)}${n.type === 'light' ? ' ' + esc(n.shape) : ''}</span></label>`;
+      /** @type {HTMLInputElement} */ (li.querySelector('input')).onchange = () => toggleSel(n.name, true);
+      list.append(li);
+    }
+    const more = $('#objectMore'); const rest = matches.length - OBJECT_CAP;
+    more.hidden = matches.length ? rest <= 0 : !filter; more.textContent = matches.length ? `${rest} more — type to filter` : 'No objects match';
+  }
+  for (const li of /** @type {HTMLCollectionOf<HTMLElement>} */ (list.children)) {
+    const sel = S.selection.has(/** @type {string} */ (li.dataset.name));
+    /** @type {HTMLElement} */ (li.querySelector('label')).classList.toggle('sel', sel); /** @type {HTMLInputElement} */ (li.querySelector('input')).checked = sel;
+  }
   $('#selCount').textContent = S.selection.size ? `(${[...S.selection].join(', ')})` : '(none)';
   renderQuick(scene);
 }
