@@ -32,7 +32,10 @@ function fileSink(file: string, maxSize: number, maxFiles: number): Sink {
         for (let i = maxFiles - 1; i > 0; i--) { try { fs.renameSync(`${file}.${i}`, `${file}.${i + 1}`); } catch {} }
         try { fs.renameSync(file, `${file}.1`); } catch {}
       }
-      fs.appendFileSync(file, line);
+      // O_NOFOLLOW: .vork/ is writable by the agent, so a symlink put in place of the log file must not redirect the
+      // writes to the file it points at (the same check /runs/ makes, src/http.mts).
+      const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
+      try { fs.writeSync(fd, line); } finally { fs.closeSync(fd); }
     } catch (e) {
       if (reported) return;
       reported = true;

@@ -80,6 +80,18 @@ await check('T7b deleting director.jsonl while logging neither throws nor writes
   for (const f of files) assert.ok(fs.statSync(path.join(logs, f)).size <= 2000, `${f} is over maxSize`);
 });
 
+await check('T7c a symlink put in place of director.jsonl is not followed', async () => {
+  const dir = newDir(); const logs = path.join(dir, 'logs');
+  setupLogging({ dir, level: 'info', stderrLevel: 'fatal' });
+  L.info('t7c.first', 'first');
+  const target = path.join(dir, 'outside.txt'); fs.writeFileSync(target, 'untouched\n');
+  fs.rmSync(path.join(logs, 'director.jsonl'));
+  fs.symlinkSync(target, path.join(logs, 'director.jsonl'));
+  assert.doesNotThrow(() => L.info('t7c.after', 'after', { pad: 'UNIQUE-T7C' }));
+  assert.doesNotThrow(() => shutdownLogging());
+  assert.equal(fs.readFileSync(target, 'utf8'), 'untouched\n');
+});
+
 await check('T8 a property named message is renamed to x_message and does not replace the message', async () => {
   const dir = newDir(); const got: Record<string, unknown>[] = [];
   setupLogging({ dir, testSink: (e) => got.push(e) });

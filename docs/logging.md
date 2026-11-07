@@ -108,7 +108,7 @@ LogTape は `configure()` しないと何も出力しません。設定したう
 | 9 | 不正なレベル文字列のまま設定すると、以降のログ呼び出しが `TypeError` を投げる | 環境変数の打ち間違いで Director が落ちる | `isLogLevel` で検査し、不正なら `info` に戻して `config.invalid` を書く | `level.js:66`（`compareLogLevel`） |
 | 10 | メッセージはテンプレートで、`{key}` がプロパティで置き換わる | 文に `{` があると意図しない値が入る | `msg` は固定文にし `{` を含めない。含んだ場合はラッパーが `{{` / `}}` にエスケープする | `logger.js:1189-1224` |
 
-ファイル形式は `getJsonLinesFormatter({ properties: 'flatten' })` です。ファイルへは `src/log.mts` の `fileSink` が書きます。1 レコードごとに `statSync` でいまの大きさを見て、次の行で `maxSize` を超えるなら `director.jsonl` → `.1` → `.2` → `.3` の順に名前を送ってから `appendFileSync` します。名前は `@logtape/file` と同じで、`logs/` のファイル数は最大 `maxFiles + 1` です。ファイルの記述子は持ちません。名前の変更は 1 つずつ `try` で包み、ファイルが消えていても（`ENOENT`）次の書き込みで新しい `director.jsonl` を作ります。書き込みの失敗は呼び出し元へ投げず、最初の 1 回だけ `log.write_failed` を stderr に書きます。
+ファイル形式は `getJsonLinesFormatter({ properties: 'flatten' })` です。ファイルへは `src/log.mts` の `fileSink` が書きます。1 レコードごとに `statSync` でいまの大きさを見て、次の行で `maxSize` を超えるなら `director.jsonl` → `.1` → `.2` → `.3` の順に名前を送ってから `appendFileSync` します。名前は `@logtape/file` と同じで、`logs/` のファイル数は最大 `maxFiles + 1` です。ファイルの記述子は持ちません。名前の変更は 1 つずつ `try` で包み、ファイルが消えていても（`ENOENT`）次の書き込みで新しい `director.jsonl` を作ります。書き込みは `O_NOFOLLOW` 付きで開きます。`director.jsonl` がシンボリックリンクに置き換えられていると `ELOOP` で失敗し、リンク先には書きません（`.vork/` はエージェントが書けるため。`/runs/` の配信と同じ検査）。書き込みの失敗は呼び出し元へ投げず、最初の 1 回だけ `log.write_failed` を stderr に書きます。
 
 1 レコードごとに `statSync` と `appendFileSync`（open / write / close）が走ります。`fsync` はしないので、OS ごと落ちたときは最後の数件を失いえます。Director のイベントは HTTP リクエストとジョブの単位で、毎秒数十件を超えない想定なので許容します。`GET` の 400 未満を debug に落としているのは、画像の取得で件数が増えるのを抑えるためでもあります。
 
@@ -155,6 +155,7 @@ LogTape は `configure()` しないと何も出力しません。設定したう
 | T6 | `setupLogging` した子プロセスの stdout が 0 バイトで、stderr には warning 以上だけが出る | `test/log.mts` | #77 |
 | T7 | `maxSize` を 10000 に縮めて 1000 件書くと、`logs/` のファイル数が `maxFiles + 1` 以下で、全行が JSON | `test/log.mts` | #77 |
 | T7b | 動作中に `director.jsonl` を消しても例外にならず、新しい `director.jsonl` に書き続け、ほかの fd に書かず、`shutdownLogging` も投げない | `test/log.mts` | #77 |
+| T7c | `director.jsonl` をシンボリックリンクに置き換えても、リンク先に書かない | `test/log.mts` | #77 |
 | T8 | `info('x', { message: 'y' })` で `message === 'x'`、`x_message === 'y'` | `test/log.mts` | #77 |
 | T8b | `level === 'WARN'`、不正なレベルで落ちない、存在しない dir に `logs/` を作る、shutdown 後の呼び出しで例外にならない | `test/log.mts` | #77 |
 | T9a〜T12 | 統合試験での `director.jsonl` の形、`server.log` の中身、MCP の stdout、SIGTERM 後の最終行 | `test/integration.mts` | #78 |
