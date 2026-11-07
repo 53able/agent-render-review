@@ -514,7 +514,7 @@ if (pairMatch) {
 try { await load(false); }
 catch (e) {
   /** @type {HTMLElement} */ (document.querySelector('main')).innerHTML = `<section class="unpaired" role="alert"><h2>This tab is not paired with Director</h2>
-    <p>Director opens a paired tab by itself when it starts. Ask your agent to call <code>open_review_tab</code>, or run <code>node server.mjs</code> in a terminal and open the one-time link it prints.</p>
+    <p>Director opens a paired tab by itself when it starts. Ask your agent to call <code>open_review_tab</code>, or run <code>node server.mts</code> in a terminal and open the one-time link it prints.</p>
     <p class="hint">${esc(/** @type {Error} */ (e).message)}</p></section>`;
   throw e;
 }
