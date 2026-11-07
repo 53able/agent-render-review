@@ -331,11 +331,19 @@ await check('#8 propose refuses unnamed and "#"-named nodes before rendering; ed
     assert.equal(r.status, 422, JSON.stringify(nodes)); assert.ok(r.json.blockers.some((b: string) => /name/.test(b)), JSON.stringify(r.json));
   }
   assert.equal((await state()).versions.length, versions);
+  // A version written before names were required may hold an unnamed light; an edit without "node" must not pick it.
   const accepted = (await state()).versions.find((v: Json) => v.status === 'accepted').id;
-  for (const node of [undefined, null, 1, ['vase'], '']) {
-    const r = await human('/api/edit', { baseId: accepted, node, field: 'energy', value: 10 });
-    assert.equal(r.status, 400, JSON.stringify(node));
-  }
+  const file = path.join(PROJECT, '.vork', accepted, 'scene.json'); const orig = fs.readFileSync(file, 'utf8');
+  const withUnnamed = JSON.parse(orig); withUnnamed.nodes.push({ type: 'light', energy: 5 });
+  fs.writeFileSync(file, JSON.stringify(withUnnamed));
+  try {
+    const before = (await state()).versions.length;
+    for (const node of [undefined, null, 1, ['vase'], '']) {
+      const r = await human('/api/edit', { baseId: accepted, node, field: 'energy', value: 10 });
+      assert.equal(r.status, 400, JSON.stringify(node));
+    }
+    assert.equal((await state()).versions.length, before);
+  } finally { fs.writeFileSync(file, orig); }
 });
 
 await check('#9 propose and adoption-request reject mistyped optional fields with 400, before rendering', async () => {
@@ -356,7 +364,9 @@ await check('#9 propose and adoption-request reject mistyped optional fields wit
 
 await check('#9 standalone /api/propose rejects a non-string instruction with 400', async () => {
   const { spawn } = await import('node:child_process');
-  const runs = path.join(tmp, 'standalone-runs'); const port = 47900 + Math.floor(Math.random() * 90);
+  const net = await import('node:net');
+  const port = await new Promise<number>((ok) => { const srv = net.createServer().listen(0, '127.0.0.1', () => { const p = (srv.address() as { port: number }).port; srv.close(() => ok(p)); }); });
+  const runs = path.join(tmp, 'standalone-runs');
   const p = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR, VORK_DIRECTOR_RUNS: runs }, stdio: 'ignore' });
   try {
     for (let i = 0; i < 100 && !fs.existsSync(path.join(runs, 'server.json')); i++) await new Promise((r) => setTimeout(r, 150));
