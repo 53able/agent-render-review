@@ -145,12 +145,15 @@ async function reviewAdoption(requestId) {
   };
 }
 const BASE_TITLE = document.title;
+/** The proposal the notice announces, while it is shown. @type {string | null} */
+let noticeFor = null;
+const closeNotice = () => { noticeFor = null; $('#notice').hidden = true; document.title = BASE_TITLE; };
 /** @param {string} id */
 function notify(id) {
-  // fixed on screen so it is seen while scrolled down; the tab title is marked until the notice is opened or dismissed
-  const n = $('#notice'); n.hidden = false; document.title = `(1) ${BASE_TITLE}`;
+  // fixed on screen so it is seen while scrolled down; the tab title is marked until the proposal is opened, decided or dismissed
+  const n = $('#notice'); n.hidden = false; document.title = `(1) ${BASE_TITLE}`; noticeFor = id;
   n.innerHTML = `New proposal <b>${esc(id)}</b> from your agent <button type="button" class="ghost">View</button><button type="button" class="ghost" aria-label="Dismiss">✕</button>`;
-  const close = () => { n.hidden = true; document.title = BASE_TITLE; };
+  const close = closeNotice;
   const [view, dismiss] = /** @type {NodeListOf<HTMLButtonElement>} */ (n.querySelectorAll('button'));
   view.onclick = async () => { close(); S.viewId = id; renderVersions(); renderObjects(); renderReview(); await drawViewport(); };
   dismiss.onclick = close;
@@ -158,7 +161,8 @@ function notify(id) {
 }
 // Agents act from outside the page: poll for new proposals, requests and reads.
 setInterval(async () => {
-  if (!S.data || S.job || document.visibilityState !== 'visible' || document.querySelector('dialog[open]')) return;
+  // Also while the tab is hidden: the "(1)" title mark is how a hidden tab shows a new proposal (browsers slow this timer down there).
+  if (!S.data || S.job || document.querySelector('dialog[open]')) return;
   /** @type {Data | null} */
   const d = await api('/api/state').catch(() => null);
   if (d && signature(d) !== S.sig) {
@@ -281,7 +285,7 @@ cv.addEventListener('mousemove', (ev) => {
   tip.hidden = !n; if (n) { const r = $('#viewport').getBoundingClientRect(); tip.style.left = `${ev.clientX - r.left}px`; tip.style.top = `${ev.clientY - r.top}px`; tip.textContent = n + (S.selection.has(n) ? ' · selected' : ' · click to select'); }
 });
 cv.addEventListener('mouseleave', () => { S.hover = null; $('#tip').hidden = true; paintOverlay(); });
-cv.addEventListener('click', (ev) => { if (!cv.dataset.ready) return; const n = pick(ev); if (!n) { S.selection.clear(); } else toggleSel(n, ev.shiftKey || ev.metaKey); });
+cv.addEventListener('click', (ev) => { if (!cv.dataset.ready) return; const n = pick(ev); if (!n) { S.selection.clear(); renderObjects(); paintOverlay(); say('Selection cleared'); } else toggleSel(n, ev.shiftKey || ev.metaKey); });
 $('#wipe').addEventListener('input', paint);
 $('#objectFilter').addEventListener('input', () => renderObjects());
 $('#compareToggle').addEventListener('change', (e) => { S.compare = /** @type {HTMLInputElement} */ (e.target).checked; drawViewport(); });
@@ -462,6 +466,8 @@ function fmt(v) {
 const isWildcard = (c) => c.length > 1 && c.endsWith('*');
 function renderReview() {
   const box = $('#review'); const v = viewV(); const r = S.lastResult;
+  // The notice is done once its proposal is on screen or no longer a proposal.
+  if (noticeFor === v.id || (noticeFor && V(noticeFor)?.status !== 'proposed')) closeNotice();
   // failure / question states from the last agent job (not tied to a version)
   if (r && r.result && ['question', 'blocked', 'invalid'].includes(r.result.kind) && r.versionId === S.viewId) {
     const p = r.result.proposal || {};
@@ -491,22 +497,27 @@ function renderReview() {
   const ghost = [...claimedNodes].filter((n) => (isWildcard(n) ? !wildCount.get(n) : !changedKeys.has(n) && !(n === 'scene' && v.diff.some((d) => d.node === '(scene)'))));
   // Large scenes produce thousands of rows: node additions/removals collapse into one row per (type, added|removed), the rest is capped.
   const typeOf = new Map([...(V(/** @type {string} */ (v.parent))?.scene.nodes || []), ...v.scene.nodes].map((n) => [n.name, n.type]));
-  /** @type {Map<string, Diff[]>} */
+  /** @type {Map<string, { type: string, kind: string, ds: Diff[] }>} */
   const groups = new Map(); /** @type {Diff[]} */ const rest = [];
   for (const d of v.diff) {
     if (d.path !== '(node)') { rest.push(d); continue; }
-    const k = `${typeOf.get(d.node) || 'node'} ${d.after === 'removed' ? 'removed' : 'added'}`;
-    const g = groups.get(k); if (g) g.push(d); else groups.set(k, [d]);
+    const type = String(typeOf.get(d.node) || 'node'), kind = d.after === 'removed' ? 'removed' : 'added';
+    const k = JSON.stringify([type, kind]); const g = groups.get(k); if (g) g.ds.push(d); else groups.set(k, { type, kind, ds: [d] });
   }
-  const groupList = [...groups];
+  const groupList = [...groups.values()];
   /** @param {Diff} d */
   const row = (d) => `<tr class="${isClaimed(d) ? '' : 'unclaimed'}"><td>${esc(d.node)}${d.path ? '.' + esc(d.path) : ''}</td><td>${fmt(d.before)}</td><td>${fmt(d.after)}</td></tr>`;
   /** @param {Diff[]} ds */
   const unclaimedNote = (ds) => { const u = ds.filter((d) => !isClaimed(d)).length; return u ? ` <span class="flag">· ⚠ ${u} not mentioned</span>` : ''; };
   const CAP = 200; const hidden = rest.slice(CAP);
-  const diffRows = groupList.map(([k, ds], i) => `<tr class="group"><td colspan="3"><details data-group="${i}"><summary>${ds.length} ${esc(k.split(' ')[0])} node${ds.length > 1 ? 's' : ''} ${k.split(' ')[1]} (${esc(ds[0].node)}${ds.length > 1 ? ` … ${esc(ds.at(-1)?.node)}` : ''})${unclaimedNote(ds)}</summary><table class="difftable"><tbody></tbody></table></details></td></tr>`).join('')
+  const diffRows = groupList.map(({ type, kind, ds }, i) => `<tr class="group"><td colspan="3"><details data-group="${i}"><summary>${ds.length} ${esc(type)} node${ds.length > 1 ? 's' : ''} ${esc(kind)} (${esc(ds[0].node)}${ds.length > 1 ? ` … ${esc(ds.at(-1)?.node)}` : ''})${unclaimedNote(ds)}</summary><table class="difftable"><tbody></tbody></table></details></td></tr>`).join('')
     + rest.slice(0, CAP).map(row).join('')
     + (hidden.length ? `<tr class="group"><td colspan="3"><button type="button" class="ghost" id="moreDiff">Show remaining ${hidden.length} rows</button>${unclaimedNote(hidden)}</td></tr>` : '');
+  // The poll re-renders this panel; keep what the human opened in the diff while it shows the same version.
+  const same = box.dataset.view === v.id;
+  const openGroups = same ? [...box.querySelectorAll('details[data-group]')].filter((el) => /** @type {HTMLDetailsElement} */ (el).open).map((el) => /** @type {HTMLElement} */ (el).dataset.group) : [];
+  const shownMore = same && box.dataset.more === '1';
+  box.dataset.view = v.id; box.dataset.more = shownMore ? '1' : '';
   box.hidden = false;
   box.style.borderColor = v.status === 'proposed' ? 'var(--warn)' : 'var(--line)';
   box.innerHTML = `
@@ -531,9 +542,11 @@ function renderReview() {
   // rows inside a group or past the cap are built only when the human opens them
   box.querySelectorAll('details[data-group]').forEach((el) => el.addEventListener('toggle', () => {
     const tb = /** @type {HTMLElement} */ (el.querySelector('tbody'));
-    if (/** @type {HTMLDetailsElement} */ (el).open && !tb.children.length) tb.innerHTML = groupList[Number(/** @type {HTMLElement} */ (el).dataset.group)][1].map(row).join('');
+    if (/** @type {HTMLDetailsElement} */ (el).open && !tb.children.length) tb.innerHTML = groupList[Number(/** @type {HTMLElement} */ (el).dataset.group)].ds.map(row).join('');
   }));
-  const more = box.querySelector('#moreDiff'); if (more) /** @type {HTMLButtonElement} */ (more).onclick = () => { /** @type {HTMLElement} */ (more.closest('tr')).outerHTML = hidden.map(row).join(''); };
+  const more = box.querySelector('#moreDiff'); if (more) /** @type {HTMLButtonElement} */ (more).onclick = () => { box.dataset.more = '1'; /** @type {HTMLElement} */ (more.closest('tr')).outerHTML = hidden.map(row).join(''); };
+  for (const g of openGroups) /** @type {HTMLDetailsElement | null} */ (box.querySelector(`details[data-group="${g}"]`))?.setAttribute('open', '');
+  if (shownMore && more) /** @type {HTMLButtonElement} */ (more).click();
   if (v.status !== 'proposed') return;
   $('#acceptBtn').onclick = () => decide('accept');
   $('#discardBtn').onclick = () => decide('discard');
