@@ -1015,8 +1015,30 @@ await check('T11 mcp.mts writes only JSON-RPC to stdout from initialize to tools
   } finally { proc.kill('SIGTERM'); }
 });
 
+await check('T10b with a failing browser opener, neither the agent token nor the pairing token is logged', async () => {
+  const { spawn } = await import('node:child_process'); const net = await import('node:net');
+  const port = await new Promise<number>((ok) => { const srv = net.createServer().listen(0, '127.0.0.1', () => { const p = (srv.address() as { port: number }).port; srv.close(() => ok(p)); }); });
+  const runs = path.join(tmp, 'open-failed-runs'); const pair = crypto.randomBytes(16).toString('hex');
+  const env: NodeJS.ProcessEnv = { ...process.env, RENDER_DIRECTOR_RUNS: runs, RENDER_DIRECTOR_PAIR_TOKEN: pair, RENDER_DIRECTOR_BROWSER: '["/nonexistent-opener"]' };
+  delete env.RENDER_DIRECTOR_NO_OPEN; delete env.RENDER_DIRECTOR_BROWSER_STDIN;
+  const proc = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = ''; proc.stdout.on('data', (d: Buffer) => { out += d; }); proc.stderr.on('data', (d: Buffer) => { out += d; });
+  const file = path.join(runs, 'logs', 'director.jsonl');
+  const read = () => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '');
+  try {
+    for (let i = 0; i < 100 && !read().includes('"browser.open_failed"'); i++) await sleep(100);
+    const failed = read().split('\n').filter((l) => l !== '').map((l) => JSON.parse(l)).find((e) => e.event === 'browser.open_failed');
+    assert.ok(failed, `no browser.open_failed in 10 s: ${read()}`);
+    assert.equal(failed.opener, '/nonexistent-opener'); assert.equal(failed.code, 'ENOENT');
+    const token = JSON.parse(fs.readFileSync(path.join(runs, 'server.json'), 'utf8')).agentToken;
+    for (const [name, text] of [['director.jsonl', read()], ['stdout and stderr', out]]) {
+      assert.ok(!text.includes(token), `agentToken in ${name}`); assert.ok(!text.includes(pair), `PAIR in ${name}`);
+    }
+  } finally { proc.kill('SIGTERM'); }
+});
+
 // teardown
-const pid = JSON.parse(fs.readFileSync(path.join(PROJECT, '.vork', 'server.json'), 'utf8')).pid;
+const { pid, agentToken: directorToken } = JSON.parse(fs.readFileSync(path.join(PROJECT, '.vork', 'server.json'), 'utf8'));
 await client.close();
 const LOGS = path.join(PROJECT, '.vork', 'logs');
 const logLines = () => fs.readFileSync(path.join(LOGS, 'director.jsonl'), 'utf8').split('\n').filter((l) => l !== '');
@@ -1038,6 +1060,21 @@ await check('T9b server.log has no LogTape banner and no INFO structured line', 
   const log = fs.readFileSync(path.join(PROJECT, '.vork', 'server.log'), 'utf8');
   assert.doesNotMatch(log, /LogTape loggers are configured/);
   for (const l of log.split('\n')) { let e: Json; try { e = JSON.parse(l); } catch { continue; } assert.notEqual(e?.level, 'INFO', l); }
+});
+await check('T9c every http.request has reqId, method, route, status and ms, and no reqId repeats', async () => {
+  const reqs = logLines().map((l) => JSON.parse(l)).filter((e) => e.event === 'http.request');
+  assert.ok(reqs.length > 0, 'no http.request');
+  for (const e of reqs) {
+    for (const k of ['reqId', 'method', 'route', 'status', 'ms']) assert.ok(k in e, `${k} missing: ${JSON.stringify(e)}`);
+    assert.match(e.reqId, /^[0-9a-f]{8}$/); assert.doesNotMatch(e.route, /\?|v\d{3}/, e.route);
+  }
+  assert.equal(new Set(reqs.map((e) => e.reqId)).size, reqs.length, 'a reqId repeats');
+});
+await check('T10 neither the agent token nor the first pairing token is in director.jsonl or server.log', async () => {
+  for (const f of [path.join(LOGS, 'director.jsonl'), path.join(PROJECT, '.vork', 'server.log')]) {
+    const text = fs.readFileSync(f, 'utf8');
+    assert.ok(!text.includes(directorToken), `agentToken in ${f}`); assert.ok(!text.includes(PAIR), `PAIR in ${f}`);
+  }
 });
 standalone.proc.kill('SIGTERM');
 await new Promise((r) => setTimeout(r, 300));
