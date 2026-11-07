@@ -16,9 +16,9 @@ interface Part { type: string; text: string; data: string; mimeType: string }
 interface ToolResult { content: Part[]; isError?: boolean }
 interface SceneNode { name: string; materials: { inputs: Record<string, unknown> }[] }
 
-process.env.VORK_DIRECTOR_IMPORT = '1';
+process.env.RENDER_DIRECTOR_IMPORT = '1';
 const { reportFromAudit } = await import('../server.mts');
-delete process.env.VORK_DIRECTOR_IMPORT; // must not leak into the Director that mcp.mts starts
+delete process.env.RENDER_DIRECTOR_IMPORT; // must not leak into the Director that mcp.mts starts
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vd-int-')));
@@ -52,7 +52,7 @@ const PATH_WITH_GATE = `${BIN}${path.delimiter}${process.env.PATH}`;
 
 const PAIR = crypto.randomBytes(16).toString('hex'); // test-only: lets the simulated human pair without a real browser opener
 const client = new Client({ name: 'integration-test', version: '1.0.0' });
-await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(ROOT, 'mcp.mts'), '--project', PROJECT], stderr: 'pipe', env: { ...process.env, PATH: PATH_WITH_GATE, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR } }));
+await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(ROOT, 'mcp.mts'), '--project', PROJECT], stderr: 'pipe', env: { ...process.env, PATH: PATH_WITH_GATE, RENDER_DIRECTOR_NO_OPEN: '1', RENDER_DIRECTOR_PAIR_TOKEN: PAIR } }));
 const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolResult> => client.callTool({ name, arguments: args }) as unknown as Promise<ToolResult>;
 const textOf = (r: ToolResult): Json => JSON.parse(r.content.find((c) => c.type === 'text')!.text);
 
@@ -227,7 +227,7 @@ await check('AC-07 approval pins the scene: editing scene.json after approval is
 
 await check('one Director per project: a second instance refuses to start', async () => {
   const { spawnSync } = await import('node:child_process');
-  const r = spawnSync(process.execPath, [path.join(ROOT, 'server.mts'), '--project', PROJECT], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1' }, encoding: 'utf8', timeout: 20000 });
+  const r = spawnSync(process.execPath, [path.join(ROOT, 'server.mts'), '--project', PROJECT], { env: { ...process.env, RENDER_DIRECTOR_NO_OPEN: '1' }, encoding: 'utf8', timeout: 20000 });
   assert.equal(r.status, 3, r.stderr + r.stdout); assert.match(r.stderr, /already running/);
 });
 
@@ -327,7 +327,7 @@ await check('#11 /runs/ does not follow a symlink out of .vork; a runs folder in
   for (const dir of ['public', ...(caseInsensitive ? ['PUBLIC', 'Public'] : [])]) {
     const inside = path.join(ROOT, dir, `runs-${process.pid}`);
     try {
-      const p = spawnSync(process.execPath, [path.join(ROOT, 'server.mts'), '--port', '0'], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_RUNS: inside }, encoding: 'utf8', timeout: 20000 });
+      const p = spawnSync(process.execPath, [path.join(ROOT, 'server.mts'), '--port', '0'], { env: { ...process.env, RENDER_DIRECTOR_NO_OPEN: '1', RENDER_DIRECTOR_RUNS: inside }, encoding: 'utf8', timeout: 20000 });
       assert.notEqual(p.status, 0, dir); assert.match(p.stderr, /inside/, dir);
       assert.ok(!fs.existsSync(inside), `nothing is created under ${dir}/`);
     } finally { fs.rmSync(inside, { recursive: true, force: true }); }
@@ -432,7 +432,7 @@ const standalone = await (async () => {
   const net = await import('node:net');
   const port = await new Promise<number>((ok) => { const srv = net.createServer().listen(0, '127.0.0.1', () => { const p = (srv.address() as { port: number }).port; srv.close(() => ok(p)); }); });
   const runs = path.join(tmp, 'standalone-runs');
-  const proc = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env: { ...process.env, PATH: `${FAKE_BIN}${path.delimiter}${PATH_WITH_GATE}`, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR, VORK_DIRECTOR_RUNS: runs }, stdio: 'ignore' });
+  const proc = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env: { ...process.env, PATH: `${FAKE_BIN}${path.delimiter}${PATH_WITH_GATE}`, RENDER_DIRECTOR_NO_OPEN: '1', RENDER_DIRECTOR_PAIR_TOKEN: PAIR, RENDER_DIRECTOR_RUNS: runs }, stdio: 'ignore' });
   process.on('exit', () => proc.kill('SIGTERM')); // also when a later step throws at top level
   for (let i = 0; i < 100 && !fs.existsSync(path.join(runs, 'server.json')); i++) await sleep(150);
   const url = `http://127.0.0.1:${port}`;
