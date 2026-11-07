@@ -645,6 +645,10 @@ await check('#26 /runs/ serves a render file only while its bytes are the ones D
     finally { fs.writeFileSync(file, bytes); }
     assert.equal(await get(), 200, name);
   }
+  // The UI loads the URL Director presents: it carries the recorded hash, so it changes exactly when the file does (#17).
+  const r = (await versionOf(proposed)).renders.draft;
+  assert.equal(r.image, `/runs/${proposed}/draft.png?${r.sha256.slice(0, 16)}`); assert.equal(r.ids, `/runs/${proposed}/draft.ids.bin?${r.idsSha256.slice(0, 16)}`);
+  assert.equal((await fetch(`${BASE}${r.image}`, { headers: { cookie: uiCookie } })).status, 200);
   // A file Director has no record of is not served, even under a valid name.
   assert.equal((await fetch(`${BASE}/runs/${proposed}/page-final.png`, { headers: { cookie: uiCookie } })).status, 404);
 });

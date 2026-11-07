@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { LIMITS, PROFILES, isProfile, isPlainObject, sha256, diffScenes } from './policy.mts';
-import type { Profile, Scene, RenderInfo, Version } from './policy.mts';
+import type { Profile, Scene, RenderInfo, Version, PagePreviewOk } from './policy.mts';
 import { Refusal } from './director.mts';
 import type { Director, Job } from './director.mts';
 import { pagePreview } from './preview.mts';
@@ -124,9 +124,21 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
     const h = ext === 'png' ? r.sha256 : r.idsSha256;
     return h ? [h] : [];
   };
+  // Presenter: the URLs the browser loads are made here from the version, the profile and the recorded hash, so a
+  // URL changes exactly when the file does (#17). state.json still stores image and ids for older readers; a record
+  // without a hash (from before #26) keeps its stored URL.
+  const stamp = (h: string | undefined) => h && h.slice(0, 16);
+  const presentRender = (id: string, r: RenderInfo): RenderInfo => ({
+    ...r,
+    image: r.sha256 ? `/runs/${id}/${r.profile}.png?${stamp(r.sha256)}` : r.image,
+    ids: r.idsSha256 ? `/runs/${id}/${r.profile}.ids.bin?${stamp(r.idsSha256)}` : r.ids,
+  });
+  const presentPreview = (p: PagePreviewOk): PagePreviewOk => (p.sha256 ? { ...p, image: `${p.image.split('?')[0]}?${stamp(p.sha256)}` } : p);
   const versionView = (v: Version) => {
     const base = v.parent ? sceneOf(v.parent) : null; const scene = sceneOf(v.id);
-    return { ...v, scene, diff: base ? diffScenes(base, scene) : [], hash: hashScene(v.id) };
+    const renders = Object.fromEntries(Object.entries(v.renders).map(([k, r]) => [k, r && presentRender(v.id, r)]));
+    const pagePreviews = v.pagePreviews && Object.fromEntries(Object.entries(v.pagePreviews).map(([k, p]) => [k, presentPreview(p)]));
+    return { ...v, renders, pagePreviews, scene, diff: base ? diffScenes(base, scene) : [], hash: hashScene(v.id) };
   };
   const renderSummary = (r: RenderInfo | undefined): RenderSummary | undefined => r && { profile: r.profile, seconds: r.seconds, width: r.width, height: r.height, file: r.file, exposure: r.exposure, objects: r.objects, warnings: r.warnings };
 
@@ -263,7 +275,7 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         if (!isProfile(profile)) return send(res, 400, { error: 'profile must be previs, draft or final' });
         const r = await pagePreview(director, v, profile);
         if (r.ok) director.recordPagePreview(v, profile, r);
-        return send(res, 200, r);
+        return send(res, 200, r.ok ? presentPreview(r) : r);
       }
 
       if (req.method === 'POST' && url.pathname === '/api/edit') {
