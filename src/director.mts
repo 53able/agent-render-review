@@ -264,13 +264,15 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   }
 
   /**
-   * Writes a new file next to target and renames it into place: an existing file's inode, and anything hard-linked to
-   * it, is never written. The temporary file is removed if anything fails.
+   * Writes each new file next to its target, then renames them into place: an existing file's inode, and anything
+   * hard-linked to it, is never written. Temporary files left by a failure are removed.
    */
-  function replaceFile(target: string, data: string | Buffer) {
-    const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-    try { fs.writeFileSync(tmp, data, { flag: 'wx' }); fs.renameSync(tmp, target); }
-    catch (e) { fs.rmSync(tmp, { force: true }); throw e; }
+  function replaceFiles(files: [target: string, data: string | Buffer][]) {
+    const tmps = files.map(([target]) => `${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+    try {
+      files.forEach(([, data], i) => fs.writeFileSync(tmps[i], data, { flag: 'wx' }));
+      files.forEach(([target], i) => fs.renameSync(tmps[i], target));
+    } finally { for (const t of tmps) fs.rmSync(t, { force: true }); }
   }
 
   // ---------- adoption: the agent asks, the human plans and approves, a job writes into the project ----------
@@ -380,14 +382,15 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
         fs.mkdirSync(path.dirname(targets.asset), { recursive: true }); fs.mkdirSync(path.dirname(targets.manifest), { recursive: true });
         const overwrote = fs.existsSync(targets.asset);
         if (fs.existsSync(targets.manifest) && !readPlainFile(targets.manifest)) throw new Error(`${targets.manifestRel} is no longer a plain file with a single link; nothing was written`);
-        replaceFile(targets.asset, png);
+
         const pngSha = sha256(png);
         const manifest = {
           slug: t.slug, asset: targets.assetRel, sha256: pngSha, version: v.id, sceneHash: t.hash, vork: renderer.version, profile: PROFILES.final,
           resolution: [v.renders.final!.width, v.renders.final!.height], reason: ar.reason, interpretation: v.proposal?.interpretation ?? v.instruction,
           adoptedAt: new Date().toISOString(), approvedVia: 'Render Director UI', scene: JSON.parse(t.sceneText),
         };
-        replaceFile(targets.manifest, JSON.stringify(manifest, null, 2));
+        // Both new files are written before either replaces anything, so a failed write leaves the project as it was.
+        replaceFiles([[targets.asset, png], [targets.manifest, JSON.stringify(manifest, null, 2)]]);
         if (v.status === 'proposed') { acceptVersion(state, v); audit('accept', { version: v.id, via: 'adoption' }); }
         settleRequest(ar, 'adopted'); save();
         audit('adopted', { request: ar.id, version: v.id, hash: t.hash, asset: targets.assetRel, sha256: pngSha, overwrote });

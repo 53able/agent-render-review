@@ -96,8 +96,6 @@ const isColor = (v) => Array.isArray(v) && v.length === 3 && v.every((n) => type
 let loadSeq = 0;
 /** @type {Promise<void> | null} the newest load(); an older one that lost the race waits for it before returning */
 let latestLoad = null;
-/** Versions this tab asked the built-in proposer for: they are opened, not announced as news. @type {Set<string>} */
-const ownVersions = new Set();
 /** @param {boolean} [keepView] */
 function load(keepView = true) {
   // Several callers load (the poll, finished jobs, decisions); only the newest answer is applied, and every caller
@@ -112,7 +110,8 @@ async function loadNow(seq, keepView) {
   const d = await api('/api/state'); if (seq !== loadSeq) return;
   // A new agent version is announced by whichever load sees it first, not only by the poll.
   const known = S.data && new Set(S.data.versions.map((v) => v.id));
-  const fresh = known ? d.versions.filter((/** @type {Version} */ v) => !known.has(v.id) && v.origin === 'agent' && !ownVersions.has(v.id)) : [];
+  // Only an ADE agent proposes from outside the page; in standalone mode a new version is the human's own request.
+  const fresh = known && d.mode === 'ade' ? d.versions.filter((/** @type {Version} */ v) => !known.has(v.id) && v.origin === 'agent') : [];
   S.data = d;
   if (!keepView || !V(S.viewId)) S.viewId = S.data.head;
   S.sig = signature(S.data);
@@ -557,7 +556,6 @@ $('#askForm').addEventListener('submit', async (e) => {
     clearFails('ask'); say(`Proposal requested from ${baseId}`);
     trackJob(job, async (j) => {
       S.lastResult = j;
-      if (j.result?.kind === 'proposal') ownVersions.add(j.result.versionId);
       await load();
       if (j.status === 'done' && j.result?.kind === 'proposal') await openVersion(j.result.versionId); else renderReview();
     });
