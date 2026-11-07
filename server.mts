@@ -8,7 +8,6 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import type { ChildProcess } from 'node:child_process';
 import { LIMITS, PROFILES, SLUG, isProfile, DEFAULT_CONFIG, MAX_REASON, MAX_ASSUMPTIONS, MAX_ASSUMPTION, MAX_PENDING_ADOPTIONS, MAX_INTERPRETATION, MAX_CLAIMED, MAX_CLAIMED_NODE, MAX_CLAIMED_TEXT,
   isPlainObject, isClaimedChange, sha256, policyCheck, diffScenes, resolveInside, reportFromAudit, applyDirectEdit, adoptionRels } from './src/policy.mts';
 import type { Profile, SceneNode, Scene, PolicyResult, AuditEvent, Config, Exposure, RenderInfo, AgentOutput, Proposal, VersionStatus, PagePreviewResult,
@@ -31,7 +30,7 @@ type ValidateResult =
 interface JobStep { label: string; status: 'running' | 'done' | 'failed'; detail: string | null | undefined; t: number }
 interface Job {
   id: string; kind: string; versionId: string; status: 'running' | 'done' | 'failed' | 'cancelled'; steps: JobStep[];
-  started: number; result: unknown; error: string | null; child: ChildProcess | null;
+  started: number; result: unknown; error: string | null; ac: AbortController;
 }
 interface RunResult { code: number | null; signal?: NodeJS.Signals | null; stdout: string; stderr: string; timedOut: boolean }
 type TicketData =
@@ -250,7 +249,7 @@ async function main() {
   const newJob = (kind: string, versionId: string, { listed = true } = {}) => {
     const now = Date.now();
     for (const [id, j] of jobs) if (j.status !== 'running' && j.started + (j.steps.at(-1)?.t ?? 0) < now - JOB_TTL) jobs.delete(id);
-    const job: Job = { id: crypto.randomUUID(), kind, versionId, status: 'running', steps: [], started: now, result: null, error: null, child: null };
+    const job: Job = { id: crypto.randomUUID(), kind, versionId, status: 'running', steps: [], started: now, result: null, error: null, ac: new AbortController() };
     if (listed) jobs.set(job.id, job);
     return job;
   };
@@ -261,16 +260,18 @@ async function main() {
   const failJob = (job: Job, e: Partial<Error> | null | undefined) => { if (job.status === 'cancelled') return; job.status = 'failed'; job.error = String(e?.message || e); step(job, 'Failed', 'failed', job.error); };
   const publicJob = (j: Job) => ({ id: j.id, kind: j.kind, versionId: j.versionId, status: j.status, steps: j.steps, elapsed: Date.now() - j.started, result: j.result, error: j.error });
 
-  function run(job: Job, cmd: string, args: string[], { timeout, input, cwd }: { timeout?: number; input?: string; cwd?: string } = {}): Promise<RunResult> {
-    if (job.status === 'cancelled') return Promise.resolve({ code: -1, signal: null, stdout: '', stderr: 'cancelled', timedOut: false });
+  // An aborted signal kills the process with SIGTERM (spawn's own handling). The promise settles when the process has
+  // exited, not at the abort, so a render lock is held until vork stops writing its output.
+  function run(cmd: string, args: string[], { timeout, input, cwd, signal }: { timeout?: number; input?: string; cwd?: string; signal: AbortSignal }): Promise<RunResult> {
+    if (signal.aborted) return Promise.resolve({ code: -1, signal: null, stdout: '', stderr: 'cancelled', timedOut: false });
     return new Promise((resolve) => {
-      const child = spawn(cmd, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-      job.child = child; let stdout = '', stderr = '', timedOut = false;
+      const child = spawn(cmd, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], signal });
+      let stdout = '', stderr = '', timedOut = false;
       const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, timeout);
       child.stdout.on('data', (d) => (stdout += d)); child.stderr.on('data', (d) => (stderr += d));
       if (input) child.stdin.end(input); else child.stdin.end();
-      child.on('close', (code, signal) => { clearTimeout(timer); job.child = null; resolve({ code, signal, stdout, stderr, timedOut }); });
-      child.on('error', (e) => { clearTimeout(timer); job.child = null; resolve({ code: -1, stdout, stderr: String(e), timedOut }); });
+      child.on('close', (code, sig) => { clearTimeout(timer); resolve({ code, signal: sig, stdout, stderr, timedOut }); });
+      child.on('error', (e) => { if (e.name === 'AbortError') return; clearTimeout(timer); resolve({ code: -1, stdout, stderr: String(e), timedOut }); });
     });
   }
 
@@ -316,7 +317,7 @@ async function main() {
     const out = path.join(dir, `${profile}.png`);
     const args = ['render', sceneFile, '--out', out, '--profile', PROFILES[profile], '--channels', 'color,object_index'];
     const t0 = Date.now();
-    const r = await run(job, 'vork', args, { timeout: LIMITS[profile], cwd: dir });
+    const r = await run('vork', args, { timeout: LIMITS[profile], cwd: dir, signal: job.ac.signal });
     const seconds = (Date.now() - t0) / 1000;
     if (job.status === 'cancelled') return { ok: false, cancelled: true };
     if (r.code !== 0) return { ok: false, code: r.code, timedOut: r.timedOut, log: (r.stderr + r.stdout).slice(-4000), seconds };
@@ -391,7 +392,7 @@ ${VORK_HELP}`;
   async function callAgent(job: Job, prompt: string): Promise<{ cancelled: true; out?: undefined; cost?: undefined } | { cancelled?: undefined; out: AgentOutput; cost: number | undefined; ms: number | undefined }> {
     const args = ['-p', '--model', MODEL, '--tools', '', '--strict-mcp-config', '--setting-sources', '', '--no-session-persistence',
       '--output-format', 'json', '--json-schema', JSON.stringify(PROPOSAL_SCHEMA), '--system-prompt', SYSTEM];
-    const r = await run(job, 'claude', args, { timeout: LIMITS.agent, input: prompt, cwd: RUNS });
+    const r = await run('claude', args, { timeout: LIMITS.agent, input: prompt, cwd: RUNS, signal: job.ac.signal });
     if (job.status === 'cancelled') return { cancelled: true };
     if (r.code !== 0) throw new Error(r.timedOut ? 'agent timed out' : `claude exited ${r.code}: ${(r.stderr || r.stdout).slice(-600)}`);
     const env = JSON.parse(r.stdout) as { structured_output?: AgentOutput; result?: unknown; total_cost_usd?: number; duration_ms?: number };
@@ -719,7 +720,7 @@ ${VORK_HELP}`;
       if (req.method === 'POST' && url.pathname.match(/^\/api\/jobs\/[^/]+\/cancel$/)) {
         const j = jobs.get(url.pathname.split('/')[3]); if (!j) return send(res, 404, { error: 'no job' });
         if (j.status === 'running') {
-          j.status = 'cancelled'; j.child?.kill('SIGTERM'); step(j, 'Cancelled by director', 'failed'); audit('cancelled', { job: j.kind, version: j.versionId });
+          j.status = 'cancelled'; j.ac.abort(); step(j, 'Cancelled by director', 'failed'); audit('cancelled', { job: j.kind, version: j.versionId });
           for (const [rid, aj] of adoptionJobs) if (aj === j) adoptionJobs.delete(rid); // the request is pending again
         }
         return send(res, 200, publicJob(j));
