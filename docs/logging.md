@@ -1,6 +1,6 @@
 # 構造化ログの設計
 
-Director の診断ログを、1 行 1 イベントの JSON Lines にする設計です。親 Issue は #75 で、実装の PR はこの文書を正とします。LogTape の挙動は 2.4.2 のソース（npm の配布物の `dist/`）で確かめました。
+Director の診断ログを、1 行 1 イベントの JSON Lines にする設計です。親 Issue は #75 で、実装の PR はこの文書を正とします。LogTape の挙動は 2.4.2 のソース（npm の配布物の `dist/`）で確かめました。ファイルへの書き込みは LogTape の file sink（`@logtape/file`）ではなく `src/log.mts` の自前の sink です（第 7 節）。
 
 ## 1. 背景
 
@@ -22,11 +22,11 @@ Director の診断ログを、1 行 1 イベントの JSON Lines にする設計
 | 出力先 | 中身 | 既定のレベル |
 |---|---|---|
 | `<runs>/logs/director.jsonl` | 全イベント。JSON Lines。5MB を超えると `director.jsonl.1` へ回し、`.3` まで残す（ファイルは最大 4 つ） | `info`（`RENDER_DIRECTOR_LOG_LEVEL` で変える） |
-| stderr | warning 以上のイベント。書式はファイルと同じ JSON Lines | `warning` |
+| stderr | warning 以上のイベント。書式はファイルと同じ JSON Lines。ただし `vorkLogTail` と `stack` は書かない（ファイルにだけ書く） | `warning` |
 | stdout | ログ設定からは 1 バイトも書かない | なし |
 
 - `<runs>` は ADE モードでは `<project>/.vork/`、単独モードでは `runs/` です。
-- ADE モードでは stderr が `.vork/server.log` に入ります。`server.log` に残るのは、warning 以上の構造化ログ、起動行（`console.log`）、ログ設定より前の致命的エラー（`console.error`）、Node のクラッシュ出力です。
+- ADE モードでは stderr が `.vork/server.log` に入ります。`server.log` に残るのは、warning 以上の構造化ログ（`vorkLogTail` と `stack` を除く。`server.log` には上限が無いため）、起動行（`console.log`）、ログ設定より前の致命的エラー（`console.error`）、Node のクラッシュ出力です。
 - `RENDER_DIRECTOR_LOG_LEVEL` は `trace / debug / info / warning / error / fatal` のどれかです。それ以外の値は `info` として扱い、`config.invalid` を 1 件書きます。
 - `mcp.mts` は変えません。MCP の stdout はプロトコルの通り道で、診断は今の `process.stderr.write` で足ります。
 
@@ -61,7 +61,7 @@ Director の診断ログを、1 行 1 イベントの JSON Lines にする設計
 | `director.stop` | info | `signal` | `main.mts` の `cleanup`（SIGINT / SIGTERM / SIGHUP） | #78 |
 | `director.fatal` | fatal | `origin` と `errFields` | `server.mts` の `main()` の catch、`uncaughtExceptionMonitor`、vork が見つからないとき | #78 |
 | `config.invalid` | warning | `file, errorType`（`config.json`）、`source, errorType`（環境変数） | `readConfig`、`RENDER_DIRECTOR_BROWSER` の解析、`RENDER_DIRECTOR_LOG_LEVEL` の検査 | #77, #78, #79 |
-| `http.request` | GET で 400 未満は debug、5xx は error、それ以外は info | `reqId, method, route, status, ms`。切断時は `aborted: true`。500 では `errFields` | `res` の `finish` と `close` のうち先に来たほうで 1 回だけ | #79 |
+| `http.request` | GET で 400 未満と 401 / 403 / 404 は debug、5xx は error、それ以外は info | `reqId, method, route, status, ms`。切断時は `aborted: true`。500 では `errFields` | `res` の `finish` と `close` のうち先に来たほうで 1 回だけ | #79 |
 | `browser.open_failed` | warning | `opener`（`opener[0]` だけ）, `code` | `openPairing` の spawn の `error` | #79 |
 | `audit` | info | `auditEvent` と許可リストの項目（第 6 節） | `audit()` の `state.json` への追記の後 | #80 |
 | `job.start` | info | `jobId, kind, versionId` | `src/director.mts` の `inJob`（`withJob` で包んだジョブ本体の入口）。背景ジョブは `runJob` が、`agentPropose` / `agentRender` は `newJob` の直後に通す。`newJob` では書かない（終わりの無い start を残さないため） | #81 |
@@ -69,7 +69,8 @@ Director の診断ログを、1 行 1 イベントの JSON Lines にする設計
 
 補足:
 
-- `route` は正規化した値です。`/runs/…` は `/runs/*`、`/api/jobs/<id>` は `/api/jobs/:id`、`/api/jobs/<id>/cancel` は `/api/jobs/:id/cancel`、既知の `/api/*` はそのまま、それ以外の `/api/*` は `/api/other`、静的ファイルは `/static` です。生のパスとクエリは書きません。
+- `route` は正規化した値です。`/runs/…` は `/runs/*`、`/api/jobs/<id>` は `/api/jobs/:id`、`/api/jobs/<id>/cancel` は `/api/jobs/:id/cancel`、既知の `/api/*` はそのまま、それ以外の `/api/*` は `/api/other`、静的ファイルは `/static`、`new URL` が解析できないリクエストターゲット（`//x:99999` など）は `/invalid`（応答は 400）です。生のパスとクエリは書きません。
+- GET の 401 / 403 / 404 を debug にするのは、Director の再起動後に開いたままのタブが古いセッションで `/api/state`（2.5 秒ごと）と `/api/jobs/:id`（2 秒ごと）を問い合わせ続け、info なら 1 タブで 1 日に数万行になり、ローテーションで本来のイベントを押し出すためです。
 - `job.end` の相関キーは job オブジェクトから明示的に書きます。`cancelJob` はキャンセル要求の context で動くので、ALS からは正しいキーが取れません。
 - `job.end.ms` は `clock` から計算します（#66）。
 - audit には `job_failed { jobId, kind, version, errorType?, exitCode?, timedOut? }` を足します。対象は `jobs` に載るジョブで、Refusal 以外の失敗に限ります。Refusal は `agent_proposal_rejected` や `agent_error` と重複し、UI の audit 一覧（直近 60 件）を押し流すためです。
@@ -92,7 +93,7 @@ LogTape への依存はこの 1 ファイルに閉じ込めます。他のモジ
 
 ### LogTape の既定動作を打ち消す設定
 
-LogTape は `configure()` しないと何も出力しません。設定したうえで、既定のままだと困る動作を次のように打ち消し、`test/log.mts` で固定します。行番号は `@logtape/logtape` と `@logtape/file` 2.4.2 の `dist/` のものです。
+LogTape は `configure()` しないと何も出力しません。設定したうえで、既定のままだと困る動作を次のように打ち消し、`test/log.mts` で固定します。行番号は `@logtape/logtape` 2.4.2 の `dist/` のもの、`filesink.*` は使うのをやめた `@logtape/file` 2.4.2 のものです。
 
 | # | 既定の動作 | 困ること | 設定 | 根拠 |
 |---|---|---|---|---|
@@ -100,21 +101,21 @@ LogTape は `configure()` しないと何も出力しません。設定したう
 | 2 | `getStreamSink` は非同期 dispose を持つ | `configureSync` に渡すと `ConfigError` になる | stderr sink は自前の同期関数 `(r) => process.stderr.write(fmt(r))` にする。dispose は持たせない | `sink.js:124`、`config.js:361-362` |
 | 3 | `getConsoleSink` は info を `console.info`（stdout）に出す | MCP の stdout と `server.log` を汚す | console sink は使わない | `sink.js:285,297` |
 | 4 | meta logger `['logtape','meta']` を設定しないと console sink が自動で付き、設定のたびに info の案内文を出す | stdout に `LogTape loggers are configured` が出る | meta logger を `lowestLevel: 'warning'` で stderr sink に必ず設定する | `config.js:378-380` |
-| 5 | file sink は 8KB たまるまで書かない | 終了直前のイベント（`director.stop`、`director.fatal`）が残らない | `getRotatingFileSink(..., { bufferSize: 0 })`。代わりに 1 レコードごとに `fsync` が走る | `filesink.base.js:357,432-434` |
+| 5 | file sink は 8KB たまるまで書かない | 終了直前のイベント（`director.stop`、`director.fatal`）が残らない | `@logtape/file` を使わず、自前の sink が 1 レコードごとに `appendFileSync` する（`fsync` はしない） | `filesink.base.js:357,432-434` |
 | 6 | context は設定しないと使えない（`withContext` が meta に警告を出して素通りする） | 相関キーが付かない | `contextLocalStorage: new AsyncLocalStorage()` | `context.js:22-24` |
-| 7 | file sink はディレクトリを作らない | 初回起動で `ENOENT` | `logs/` を先に `mkdirSync({ recursive: true })` する | `filesink.factory.node.js:12-14` |
+| 7 | file sink はディレクトリを作らない | 初回起動で `ENOENT` | `logs/` を先に `mkdirSync({ recursive: true })` する（自前の sink も作らない） | `filesink.factory.node.js:12-14` |
 | 8 | JSON Lines の `properties: 'flatten'` はプロパティを最上位に展開し、同名のキーを上書きする | `message` などのプロパティで本来の `message` が消える | ラッパーが `message / level / logger / @timestamp` を `x_<key>` に改名する | `formatter.js:553-560` |
 | 9 | 不正なレベル文字列のまま設定すると、以降のログ呼び出しが `TypeError` を投げる | 環境変数の打ち間違いで Director が落ちる | `isLogLevel` で検査し、不正なら `info` に戻して `config.invalid` を書く | `level.js:66`（`compareLogLevel`） |
 | 10 | メッセージはテンプレートで、`{key}` がプロパティで置き換わる | 文に `{` があると意図しない値が入る | `msg` は固定文にし `{` を含めない。含んだ場合はラッパーが `{{` / `}}` にエスケープする | `logger.js:1189-1224` |
 
-ファイル形式は `getJsonLinesFormatter({ properties: 'flatten' })` です。ローテーションは `director.jsonl` → `.1` → `.2` → `.3` の順に名前を送るので、`logs/` のファイル数は最大 `maxFiles + 1` です（`filesink.base.js:371,414`）。
+ファイル形式は `getJsonLinesFormatter({ properties: 'flatten' })` です。ファイルへは `src/log.mts` の `fileSink` が書きます。1 レコードごとに `statSync` でいまの大きさを見て、次の行で `maxSize` を超えるなら `director.jsonl` → `.1` → `.2` → `.3` の順に名前を送ってから `appendFileSync` します。名前は `@logtape/file` と同じで、`logs/` のファイル数は最大 `maxFiles + 1` です。ファイルの記述子は持ちません。名前の変更は 1 つずつ `try` で包み、ファイルが消えていても（`ENOENT`）次の書き込みで新しい `director.jsonl` を作ります。書き込みの失敗は呼び出し元へ投げず、最初の 1 回だけ `log.write_failed` を stderr に書きます。
 
-`bufferSize: 0` の代償は、1 イベントごとの `writeSync` と `fsync` です。Director のイベントは HTTP リクエストとジョブの単位で、毎秒数十件を超えない想定なので許容します。`GET` の 400 未満を debug に落としているのは、画像の取得で件数が増えるのを抑えるためでもあります。
+1 レコードごとに `statSync` と `appendFileSync`（open / write / close）が走ります。`fsync` はしないので、OS ごと落ちたときは最後の数件を失いえます。Director のイベントは HTTP リクエストとジョブの単位で、毎秒数十件を超えない想定なので許容します。`GET` の 400 未満を debug に落としているのは、画像の取得で件数が増えるのを抑えるためでもあります。
 
 ## 6. 漏洩防止の規則
 
 1. **生の Error を logger に渡さない。** 必ず `errFields(e)` を通す。LogTape の JSON 書式は Error の own key をすべて書き出すので（`formatter.js:295`）、spawn エラーの `spawnargs` に入った `#pair=<PAIR>` が漏れる（C8）。`errFields` が返すのは `errorType`（`e.name`）、`error`（message、2000 字まで）、`stack`（4000 字まで）だけ。
-2. **message にユーザー入力が入りうる Error は `errFields(e, { message: false })`。** built-in proposer のエラー（`proposer.mts` の `claude exited …`）には claude の出力の末尾 600 字が入り、指示文を含みうる。このとき `stack` も先頭の `Name: message` 行を除いた呼び出し位置の行だけにする。
+2. **message にユーザー入力が入りうる Error は `errFields(e, { message: false })`。** built-in proposer のエラー（`proposer.mts` の `claude exited …`）には claude の出力の末尾 600 字が入り、指示文を含みうる。このとき `stack` も先頭の `Name: message`（複数行でもその長さ分）を切り落としてから、呼び出し位置の行（`    at …`）だけにする。message の中の `    at …` に見える行は残さない。`JSON.parse` の `SyntaxError` は解析できなかった文字列を引用するので、起動時の `director.fatal`（`server.mts` の `main()` の catch と `uncaughtExceptionMonitor`）でも `SyntaxError` は `message: false` にする。
 3. **ユーザー入力は長さだけ書く。** 指示文は `instructionLen`。`comment` と自由入力の `reason` は書かない。
 4. **audit の転記は許可リスト。** 許可する項目は `version, request, jobId, job, via, flags, selection, seconds, errorType, exitCode, timedOut, head, mode, node, field, overwrote, slug, parent, base, hash`。`reason` は `'version discarded'` などのシステム定型文に限る。audit の `kind`（`blocked | invalid`）はログ側で `checkKind` に改名する（明示したプロパティがコンテキストの `kind`＝ジョブ種別を上書きするため）。`job_failed` の `kind` はジョブ種別なので改名しない。
 5. **秘匿値を書かない。** `agentToken`、ペアリング用トークンとリンク、Cookie は、どのイベントにも入れない。`RENDER_DIRECTOR_BROWSER` の解析エラーは値を含みうるので message を書かず `errorType` だけにする。`browser.open_failed` は `opener[0]` と `code` だけ。
@@ -122,7 +123,7 @@ LogTape は `configure()` しないと何も出力しません。設定したう
 
 ## 7. ADR: LogTape を `src/log.mts` に閉じ込めて使う
 
-- **Decision**: LogTape 2.4.2（`@logtape/logtape` と `@logtape/file`、`^` を付けずに固定）で診断イベントを `<runs>/logs/director.jsonl` に JSON Lines で書く。LogTape の import は `src/log.mts` だけに置き、既定動作のうち困るもの（第 5 節）を明示的に打ち消して試験で固定する。audit は `state.json` に置いたまま、相関キーだけを足し、許可リストの項目を診断ログへ転記する。
+- **Decision**: LogTape 2.4.2（`@logtape/logtape`、`^` を付けずに固定）で診断イベントを `<runs>/logs/director.jsonl` に JSON Lines で書く。ファイルの sink とローテーションは `src/log.mts` の自前の同期関数にする（下の「file sink を自前にした理由」）。LogTape の import は `src/log.mts` だけに置き、既定動作のうち困るもの（第 5 節）を明示的に打ち消して試験で固定する。audit は `state.json` に置いたまま、相関キーだけを足し、許可リストの項目を診断ログへ転記する。
 - **Drivers**:
   - 障害の原因を `reqId` / `jobId` で 1 本に辿れること（C3〜C6）
   - stdout を汚さないこと（C7、MCP のプロトコル）
@@ -134,12 +135,14 @@ LogTape は `configure()` しないと何も出力しません。設定したう
   - Pino: ローテーションに worker thread の transport が要り、終了時の flush が複雑になる
   - `@logtape/redaction`: フィールド名でしか照合せず、Error の中も見ない
   - audit を診断ログへ統合する: `reportFromAudit` と UI の audit 一覧が `state.json` を読んでいるので、今回は動かさない（#64）
-- **Why chosen**: LogTape は依存が無く、同期の file sink とローテーション、`AsyncLocalStorage` による context を持つ。既定動作の問題はすべて設定で打ち消せることをソースで確かめた。`src/log.mts` に閉じ込めておけば、後から乗り換えるコストは 1 ファイル分で済む。
+- **Why chosen**: LogTape は依存が無く、`AsyncLocalStorage` による context、レベル、JSON Lines の書式を持つ。既定動作の問題はすべて設定で打ち消せることをソースで確かめた。`src/log.mts` に閉じ込めておけば、後から乗り換えるコストは 1 ファイル分で済む。
 - **Consequences**:
-  - 1 イベントごとに `fsync` が走る（`bufferSize: 0`）
+  - 1 イベントごとに `statSync` と `appendFileSync` が走る。`fsync` はしない
+  - `@logtape/file` に依存しない。ローテーション（約 20 行）は自前で保守する
   - `level` は `WARN` と表記される（`WARNING` ではない）
   - 新しいイベントを足すときは、この文書の語彙と漏洩防止の規則に従う。生の Error、ユーザー入力、秘匿値を props に入れない
   - `server.log` には warning 以上の構造化ログが入る
+- **file sink を自前にした理由**: `@logtape/file` 2.4.2 の `getRotatingFileSink` は fd を開いたまま持つ。動作中に `director.jsonl` が消えると（`.vork/` はエージェントが書ける）、ローテーションで `closeSync(fd)` の後の `renameSync(path, …)` が `ENOENT` で失敗し、`fd` は閉じた番号のまま残る（`filesink.base.js:409-416`）。以後の書き込みは、その番号を再利用した別のファイルやソケットに入り、それを閉じてしまう。終了時の `resetSync()` は `EBADF` を投げ、SIGTERM の後片付けが `process.exit(0)` まで届かない。設計時の代替案（Option B: 自前の同期 sink）を file にだけ採り、fd を持たずに 1 レコードごとに追記する形にした。あわせて `shutdownLogging()` は例外を外へ出さない。`test/log.mts` の T7b がこの経路を固定する。
 - **Follow-ups**:
   - `server.log` に上限を設ける。`mcp.mts` が fd を子プロセスに渡しているので、子プロセスの側ではローテーションできない
   - audit を `audit.jsonl` に移す（#64）
@@ -151,9 +154,12 @@ LogTape は `configure()` しないと何も出力しません。設定したう
 |---|---|---|---|
 | T6 | `setupLogging` した子プロセスの stdout が 0 バイトで、stderr には warning 以上だけが出る | `test/log.mts` | #77 |
 | T7 | `maxSize` を 10000 に縮めて 1000 件書くと、`logs/` のファイル数が `maxFiles + 1` 以下で、全行が JSON | `test/log.mts` | #77 |
+| T7b | 動作中に `director.jsonl` を消しても例外にならず、新しい `director.jsonl` に書き続け、ほかの fd に書かず、`shutdownLogging` も投げない | `test/log.mts` | #77 |
 | T8 | `info('x', { message: 'y' })` で `message === 'x'`、`x_message === 'y'` | `test/log.mts` | #77 |
 | T8b | `level === 'WARN'`、不正なレベルで落ちない、存在しない dir に `logs/` を作る、shutdown 後の呼び出しで例外にならない | `test/log.mts` | #77 |
 | T9a〜T12 | 統合試験での `director.jsonl` の形、`server.log` の中身、MCP の stdout、SIGTERM 後の最終行 | `test/integration.mts` | #78 |
 | T9c, T10, T10b | `http.request` の必須フィールドと `reqId` の一意性、`agentToken` と PAIR が 0 件 | `test/integration.mts` | #79 |
+| T4b | 提案の `interpretation` が `director.jsonl` と `server.log` に 0 件 | `test/integration.mts` | #80 |
+| （名前なし） | `routeOf` の正規化、解析できないリクエストターゲットで 400 と `/invalid`、GET の 403 が debug、500 の `errorType` と秘匿値が無いこと | `test/http.mts` | #79 |
 | T3, T4, T5, T5b | 全イベントの `service` / `component`、指示文が出ないこと、`cancelled.jobId`、`checkKind` | `test/director.mts` | #80 |
 | T1, T2, T5c, T5d | `job.end` の失敗原因、キャンセルの相関キーと 1 回だけ書くこと、Refusal で `job_failed` を出さないこと。ほかに `agentRender` の記録と、リクエストから始まったジョブの `reqId` | `test/director.mts` | #81 |

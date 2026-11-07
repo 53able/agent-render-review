@@ -123,6 +123,8 @@ npm run report -- <project> # 最初の提案から採用までの時間、フ�
 
 同じ GPU で複数の vork が同時に描画すると `GPU device lost` で失敗することがあります。そのため Director は、vork で描画するたびにロックファイル（`os.tmpdir()` 内の、そのユーザーだけが書けるフォルダ `render-director-<uid>/vork.lock`）を取り、同じマシンのほかの Director の描画が終わるまで待ちます（待ち時間は描画の上限時間に含めません）。vork を使う試験（`npm test` の統合試験と `npm run test:e2e`）は、加えて開始時に `render-director-gpu-test.lock` を取り、試験を1本ずつ流します。Director を通さない vork の描画との同時実行は防げません。その失敗は画面に「GPU was busy … render again」と出るので、描画をやり直してください。
 
+診断ログ（`director.jsonl`）の設計と、それを固定する試験の一覧は [docs/logging.md](docs/logging.md) にあります。
+
 実験の手順は [docs/experiment.md](docs/experiment.md)、設計判断とリスクは [docs/ai-interface-design.md](docs/ai-interface-design.md) にあります。サンプルのページは [examples/landing](examples/landing) です。
 
 ## ログ
@@ -131,7 +133,7 @@ Director は診断ログを、1行1イベントの JSON Lines で書きます。
 
 - 場所: ADEモードでは `<project>/.vork/logs/director.jsonl`、単独モードでは `runs/logs/director.jsonl`（`RENDER_DIRECTOR_RUNS` を指定したときはその下の `logs/`）。5MBを超えると `director.jsonl.1` に回し、`.3` まで残します（ファイルは最大4つ）。
 - レベル: 環境変数 `RENDER_DIRECTOR_LOG_LEVEL`（`trace` `debug` `info` `warning` `error` `fatal`。既定は `info`）。不正な値は `info` として扱い、`config.invalid` を1件書きます。ファイルの `level` は大文字で、warning は `WARN` と表記されます。
-- ADEモードの `.vork/server.log` に残るのは、warning 以上の構造化ログ（同じ JSON Lines）、起動行、ログ設定より前の致命的エラー、Node のクラッシュ出力です。`server.log` はローテーションしません。
+- ADEモードの `.vork/server.log` に残るのは、warning 以上の構造化ログ（同じ JSON Lines。`vorkLogTail` と `stack` は `director.jsonl` にだけ書きます）、起動行、ログ設定より前の致命的エラー、Node のクラッシュ出力です。`server.log` はローテーションしません。
 
 主なフィールド:
 
