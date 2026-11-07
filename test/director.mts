@@ -9,7 +9,7 @@ import type { Proposer } from '../src/director.mts';
 import type { Renderer, RenderOutcome } from '../src/vork.mts';
 import type { Scene, Version } from '../src/policy.mts';
 import { sha256 } from '../src/policy.mts';
-import { setupLogging, shutdownLogging, withJob } from '../src/log.mts';
+import { setupLogging, shutdownLogging, withJob, withRequest } from '../src/log.mts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const starter = JSON.parse(fs.readFileSync(path.join(ROOT, 'scenes', 'starter.json'), 'utf8')) as Scene;
@@ -17,7 +17,7 @@ const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vd-director-'
 let pass = 0, failures = 0, n = 0;
 // Every diagnostic event of this file, for the audit forwarding checks (#80).
 const logged: Record<string, unknown>[] = [];
-setupLogging({ dir: path.join(tmp, 'log'), testSink: (e) => logged.push(e) });
+setupLogging({ dir: path.join(tmp, 'log'), stderrLevel: 'fatal', testSink: (e) => logged.push(e) }); // failed jobs log warnings; keep them off stderr
 async function check(name: string, fn: () => Promise<void>) {
   try { await fn(); pass++; console.log(`PASS ${name}`); }
   catch (e: any) { failures++; console.log(`FAIL ${name}\n     ${e.stack?.split('\n').slice(0, 3).join('\n     ')}`); }
@@ -488,11 +488,12 @@ await check('#80 final_rendered and adopted carry the jobId; free text is not co
 
 await check('#80 T5b a policy-blocked agent proposal logs checkKind; kind stays the job kind', async () => {
   const { d } = setup({ ade: true }); const from = logged.length;
-  const job = { id: 'job-t5b', kind: 'agent-propose', versionId: 'v001' };
-  await refused('unprocessable', () => withJob(job, () => d.agentPropose({ interpretation: 'x', claimed_changes: [], scene: { ...starter, programs: { p: {} } } })), /policy/);
+  await refused('unprocessable', () => d.agentPropose({ interpretation: 'x', claimed_changes: [], scene: { ...starter, programs: { p: {} } } }), /policy/);
   assert.equal(d.state.audit.at(-1)!.kind, 'blocked', 'state.json keeps kind');
-  const e = logged.slice(from).find((x) => x.auditEvent === 'agent_proposal_rejected')!;
-  assert.deepEqual([e.checkKind, e.kind, e.jobId, e.base], ['blocked', 'agent-propose', 'job-t5b', 'v001']);
+  const evs = logged.slice(from);
+  const start = evs.find((x) => x.event === 'job.start' && x.kind === 'agent-propose')!;
+  const e = evs.find((x) => x.auditEvent === 'agent_proposal_rejected')!;
+  assert.deepEqual([e.checkKind, e.kind, e.jobId, e.base], ['blocked', 'agent-propose', start.jobId, 'v001']);
 });
 
 await check('#80 T3 every logged event has service and component', async () => {
@@ -522,7 +523,10 @@ await check('#70 startRender: done, failed render, thrown error, cancelled', asy
   assert.deepEqual(ending(thrown), { status: 'failed', error: 'boom', steps: [['vork render std/draft', 'done', null], ['Failed', 'failed', 'boom']] });
   assert.equal(thrown.result, null);
   fake.renderer.render = orig;
-  assert.deepEqual(auditSince(d, from), [], 'a non-final render, done or failed, is not audited');
+  assert.deepEqual(auditSince(d, from), [
+    { event: 'job_failed', jobId: failed.id, kind: 'render', version: 'v001', exitCode: 1, timedOut: false },
+    { event: 'job_failed', jobId: thrown.id, kind: 'render', version: 'v001', errorType: 'Error' },
+  ], 'a non-final render is not audited when done; a failed one gets job_failed (#81)'); from = d.state.audit.length;
   const release = fake.hold(); const cancelled = d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }); await tick();
   assert.equal(d.cancelJob(cancelled.id), cancelled); release(); await tick(); await tick();
   assert.deepEqual(ending(cancelled), { status: 'cancelled', error: null, steps: [['vork render std/draft', 'done', null], ['Cancelled by director', 'failed', null]] });
@@ -560,7 +564,7 @@ await check('#70 directEdit: done, failed draft, failed previs (not reflected), 
   d.cancelJob(cancelled.job.id); release(); await tick(); await tick();
   assert.deepEqual(ending(cancelled.job), { status: 'cancelled', error: null, steps: [['vork render std/draft', 'done', null], ['Cancelled by director', 'failed', null]] });
   assert.equal(cancelled.job.result, null); assert.equal(cancelled.v.renders.draft, undefined);
-  assert.deepEqual(d.state.audit.slice(1).map((a) => a.event), ['direct_edit', 'direct_edit', 'direct_edit', 'direct_edit', 'direct_edit', 'cancelled']);
+  assert.deepEqual(d.state.audit.slice(1).map((a) => a.event), ['direct_edit', 'direct_edit', 'job_failed', 'direct_edit', 'direct_edit', 'job_failed', 'direct_edit', 'cancelled']);
   assert.deepEqual(auditSince(d, d.state.audit.length - 1), [{ event: 'cancelled', job: 'render', version: cancelled.v.id, jobId: cancelled.job.id }]);
 });
 
@@ -572,7 +576,8 @@ await check('#70 startAdoption: failed final render, cancelled, done', async () 
   const failed = await waitJob(d.startAdoption(d.planAdoption({ requestId }).ticket));
   assert.deepEqual(ending(failed), { status: 'failed', error: 'final render failed: bad', steps: [['vork render std/final (approved scene)', 'done', null], ['Failed', 'failed', 'final render failed: bad']] });
   assert.equal(failed.result, null); assert.equal(d.adoptionJobs.size, 0); assert.equal(d.state.adoptionRequests[0].status, 'pending');
-  assert.deepEqual(auditSince(d, from), [], 'a failed adoption is not audited');
+  assert.deepEqual(auditSince(d, from), [{ event: 'job_failed', jobId: failed.id, kind: 'adopt', version: v.id, errorType: 'Error' }], 'a failed adoption gets job_failed only (#81)');
+  from = d.state.audit.length;
   fake.fail(null);
   const release = fake.hold(); const cancelled = d.startAdoption(d.planAdoption({ requestId }).ticket); await tick();
   assert.equal(d.adoptionJobs.size, 1); d.cancelJob(cancelled.id); assert.equal(d.adoptionJobs.size, 0, 'the request is free again right away');
@@ -625,6 +630,81 @@ await check('#70 startPropose: proposal, question, blocked twice, empty answer, 
   assert.deepEqual(ending(cancelled), { status: 'cancelled', error: null, steps: [[DRAFTING, 'done', null], ['Cancelled by director', 'failed', null]] });
   assert.equal(cancelled.result, null);
   assert.deepEqual(auditSince(d, from), [{ event: 'cancelled', job: 'propose', version: 'v001', jobId: cancelled.id }]);
+});
+
+// #81: job.start and job.end. Other checks' jobs log too, so every assertion picks events by jobId.
+const jobEvents = (id: string, event: string) => logged.filter((e) => e.event === event && e.jobId === id);
+
+await check('#81 T1 a failed vork render ends with exitCode, timedOut and the last 2000 characters of its log; job_failed is audited', async () => {
+  let now = 5_000_000; const { d, fake } = setup({ clock: () => now }); const from = logged.length;
+  fake.fail(`${'a'.repeat(1000)}${'b'.repeat(2000)}`);
+  const release = fake.hold(); const job = d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }); await tick();
+  now += 1234; release(); await waitJob(job);
+  assert.equal(job.status, 'failed');
+  const [start] = jobEvents(job.id, 'job.start'); const ends = jobEvents(job.id, 'job.end');
+  assert.deepEqual([start.level, start.kind, start.versionId], ['INFO', 'render', 'v001']);
+  assert.equal(ends.length, 1); const [end] = ends;
+  assert.deepEqual([end.level, end.status, end.kind, end.versionId, end.exitCode, end.timedOut, end.ms], ['WARN', 'failed', 'render', 'v001', 1, false, 1234]);
+  assert.equal(end.vorkLogTail, 'b'.repeat(2000));
+  const failed = d.state.audit.filter((a) => a.event === 'job_failed' && a.jobId === job.id);
+  assert.deepEqual(failed.map(({ t, ...rest }) => rest), [{ event: 'job_failed', jobId: job.id, kind: 'render', version: 'v001', exitCode: 1, timedOut: false }]);
+  const forwarded = logged.slice(from).find((e) => e.auditEvent === 'job_failed' && e.jobId === job.id)!;
+  assert.deepEqual([forwarded.kind, forwarded.exitCode, 'checkKind' in forwarded], ['render', 1, false]);
+});
+
+await check('#81 T2 a renderer that throws ends the job with the stack; job_failed has errorType', async () => {
+  const { d, fake } = setup(); fake.renderer.render = async () => { throw new Error('renderer exploded'); };
+  const job = await waitJob(d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }));
+  const [end] = jobEvents(job.id, 'job.end');
+  assert.equal(typeof end.stack, 'string'); assert.ok((end.stack as string).length > 0);
+  assert.deepEqual([end.status, end.errorType, end.error], ['failed', 'Error', 'renderer exploded']);
+  const failed = d.state.audit.find((a) => a.event === 'job_failed' && a.jobId === job.id)!;
+  assert.equal(failed.errorType, 'Error');
+});
+
+await check('#81 T5c job.end of a cancelled job carries that job keys, not the context of the cancel request', async () => {
+  const { d, fake } = setup();
+  const release = fake.hold(); const job = withRequest('req-start', () => d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' })); await tick();
+  withRequest('req-cancel', () => withJob({ id: 'other-job', kind: 'propose', versionId: 'v999' }, () => d.cancelJob(job.id)));
+  release(); await tick(); await tick();
+  d.endJob(job, { status: 'done' }); assert.equal(job.status, 'cancelled', 'a job ends once');
+  const ends = jobEvents(job.id, 'job.end');
+  assert.equal(ends.length, 1, 'once, although the render settles after the cancel');
+  assert.deepEqual([ends[0].jobId, ends[0].kind, ends[0].versionId, ends[0].status, ends[0].level], [job.id, 'render', 'v001', 'cancelled', 'INFO']);
+  assert.equal(d.state.audit.some((a) => a.event === 'job_failed' && a.jobId === job.id), false);
+});
+
+await check('#81 T5d a policy-blocked agentPropose ends as failed without job_failed; its HTTP answer is unchanged', async () => {
+  const { d } = setup({ ade: true }); const from = logged.length; const audits = d.state.audit.length;
+  const e = await refused('unprocessable', () => d.agentPropose({ interpretation: 'x', claimed_changes: [], scene: { ...starter, programs: { p: {} } } }), /policy/);
+  assert.equal(e.extra.version, null);
+  const start = logged.slice(from).find((x) => x.event === 'job.start' && x.kind === 'agent-propose')!;
+  const [end] = jobEvents(start.jobId as string, 'job.end');
+  assert.deepEqual([end.status, end.kind, end.versionId], ['failed', 'agent-propose', 'v001']);
+  assert.deepEqual(d.state.audit.slice(audits).map((a) => a.event), ['agent_proposal_rejected'], 'no job_failed');
+  const ok = await agentProposal(d, [0.2, 0.2, 0.9]);
+  const okStart = logged.slice(from).filter((x) => x.event === 'job.start' && x.kind === 'agent-propose').at(-1)!;
+  assert.equal(jobEvents(okStart.jobId as string, 'job.end')[0].status, 'done'); assert.ok(ok.v.id);
+});
+
+await check('#81 agentRender records done, or a failed vork render as a refusal without job_failed', async () => {
+  const { d, fake } = setup({ ade: true }); const from = logged.length; const audits = d.state.audit.length;
+  await d.agentRender('v001', 'previs');
+  fake.fail('agent render bad');
+  const e = await refused('failed', () => d.agentRender('v001', 'draft'), /vork exited 1/);
+  assert.equal(e.extra.log, 'agent render bad');
+  const ends = logged.slice(from).filter((x) => x.event === 'job.end' && x.kind === 'agent-render');
+  assert.deepEqual(ends.map((x) => [x.status, x.exitCode, x.vorkLogTail]), [['done', undefined, undefined], ['failed', 1, 'agent render bad']]);
+  assert.deepEqual(d.state.audit.slice(audits), [], 'an agent render is not audited, also when it fails');
+});
+
+await check('#81 a job started inside a request carries its reqId on job.start and job.end', async () => {
+  const { d } = setup();
+  const job = withRequest('req-81', () => d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }));
+  await waitJob(job);
+  const [start] = jobEvents(job.id, 'job.start'); const [end] = jobEvents(job.id, 'job.end');
+  assert.deepEqual([start.reqId, start.kind, start.versionId], ['req-81', 'render', 'v001']);
+  assert.deepEqual([end.reqId, end.status], ['req-81', 'done']);
 });
 
 shutdownLogging();

@@ -123,8 +123,52 @@ npm run report -- <project> # 最初の提案から採用までの時間、フ�
 
 同じ GPU で複数の vork が同時に描画すると `GPU device lost` で失敗することがあります。そのため Director は、vork で描画するたびにロックファイル（`os.tmpdir()` 内の、そのユーザーだけが書けるフォルダ `render-director-<uid>/vork.lock`）を取り、同じマシンのほかの Director の描画が終わるまで待ちます（待ち時間は描画の上限時間に含めません）。vork を使う試験（`npm test` の統合試験と `npm run test:e2e`）は、加えて開始時に `render-director-gpu-test.lock` を取り、試験を1本ずつ流します。Director を通さない vork の描画との同時実行は防げません。その失敗は画面に「GPU was busy … render again」と出るので、描画をやり直してください。
 
+診断ログ（`director.jsonl`）の設計と、それを固定する試験の一覧は [docs/logging.md](docs/logging.md) にあります。
+
 実験の手順は [docs/experiment.md](docs/experiment.md)、設計判断とリスクは [docs/ai-interface-design.md](docs/ai-interface-design.md) にあります。サンプルのページは [examples/landing](examples/landing) です。
-構造化ログの設計（イベント、フィールド、漏洩防止の規則）は [docs/logging.md](docs/logging.md) にあります。
+
+## ログ
+
+Director は診断ログを、1行1イベントの JSON Lines で書きます。設計（イベントの一覧、フィールド、書かないものの規則）は [docs/logging.md](docs/logging.md) にあります。
+
+- 場所: ADEモードでは `<project>/.vork/logs/director.jsonl`、単独モードでは `runs/logs/director.jsonl`（`RENDER_DIRECTOR_RUNS` を指定したときはその下の `logs/`）。5MBを超えると `director.jsonl.1` に回し、`.3` まで残します（ファイルは最大4つ）。
+- レベル: 環境変数 `RENDER_DIRECTOR_LOG_LEVEL`（`trace` `debug` `info` `warning` `error` `fatal`。既定は `info`）。不正な値は `info` として扱い、`config.invalid` を1件書きます。ファイルの `level` は大文字で、warning は `WARN` と表記されます。
+- ADEモードの `.vork/server.log` に残るのは、warning 以上の構造化ログ（同じ JSON Lines。`vorkLogTail` と `stack` は `director.jsonl` にだけ書きます）、起動行、ログ設定より前の致命的エラー、Node のクラッシュ出力です。`server.log` はローテーションしません。
+
+主なフィールド:
+
+| フィールド | 内容 |
+|---|---|
+| `event` | イベント名。`director.start` `director.stop` `director.fatal` `http.request` `job.start` `job.end` `audit` `config.invalid` `browser.open_failed` |
+| `reqId` | 1件の HTTP リクエストの中で書かれたイベントと、そのリクエストから始まったジョブのイベントに付く8桁の16進数 |
+| `jobId` | 1つのジョブの中で書かれたイベントに付く。`kind`（ジョブの種類）と並ぶ |
+| `versionId` | ジョブが扱う版（`v001` など） |
+| `component` | イベントを書いたモジュール（`main` `http` `director`） |
+| `status` | `job.end` では `done` `failed` `cancelled`、`http.request` では HTTP のステータスコード |
+
+失敗したジョブの `job.end` には、vork の失敗なら `exitCode` `timedOut` `vorkLogTail`（vork の出力の末尾2000字）、例外なら `errorType` `error` `stack` が付きます。人間の画面の操作で始まったジョブ（内蔵エージェントの提案を除く）が失敗すると、audit（`state.json`）にも `job_failed` が残ります。audit の各イベントは、決まった項目だけを `event: "audit"`（`auditEvent` にイベント名）としてログにも写します。
+
+ログに書かないもの: ペアリング用トークンとリンク、エージェント用のトークン、Cookie、指示文（長さの `instructionLen` だけ）、コメントや採用理由などの自由入力。内蔵エージェントのエラーはメッセージを書かず、種類と呼び出し位置だけを書きます。
+
+調べ方の例（`jq` が必要。単独モードでは `runs/logs` で実行）:
+
+```sh
+cd <project>/.vork/logs
+# 失敗したジョブ。vork の終了コードと出力の末尾、または例外の種類とスタックが分かる
+jq 'select(.event=="job.end" and .status=="failed")' director.jsonl
+# 1件のリクエストと、そこから始まったジョブ。reqId は上の結果や http.request から拾う
+jq 'select(.reqId=="4c8f3464")' director.jsonl
+# 1つのジョブの開始から終了まで
+jq 'select(.jobId=="01921674-d216-4e0f-a3f0-9747ce5c2012")' director.jsonl
+# 回した古いファイルもまとめて調べる
+cat director.jsonl.3 director.jsonl.2 director.jsonl.1 director.jsonl 2>/dev/null | jq 'select(.level=="WARN" or .level=="ERROR" or .level=="FATAL")'
+```
+
+1つ目の例は、vork が終了コード3で失敗した描画ジョブで、次のような行を返します（`@timestamp` などは省略）。
+
+```json
+{"level":"WARN","message":"Job failed","reqId":"4c8f3464","jobId":"01921674-d216-4e0f-a3f0-9747ce5c2012","kind":"render","versionId":"v001","status":"failed","ms":14,"exitCode":3,"timedOut":false,"vorkLogTail":"error: ...\n","event":"job.end","component":"director"}
+```
 
 ## 安全境界
 
