@@ -342,6 +342,23 @@ await check('#9 standalone /api/propose rejects a non-string instruction with 40
   } finally { p.kill('SIGTERM'); }
 });
 
+await check('#12 a body over 4 MB gets 413, with or without content-length; the server keeps serving', async () => {
+  const big = JSON.stringify({ interpretation: 'x'.repeat(5e6), claimed_changes: [], scene: base });
+  const r = await raw('/api/agent/propose', big, { agent: true });
+  assert.equal(r.status, 413); assert.match(r.json.error, /larger than/);
+  const http = await import('node:http'); const u = new URL(BASE);
+  const chunked = await new Promise<{ status: number; body: string }>((ok, bad) => {
+    const req = http.request({ host: u.hostname, port: u.port, path: '/api/agent/propose', method: 'POST', headers: { host: u.host, 'content-type': 'application/json', authorization: `Bearer ${agentToken()}`, 'transfer-encoding': 'chunked' } }, (res) => {
+      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => ok({ status: res.statusCode!, body: b }));
+    });
+    req.on('error', bad);
+    for (let i = 0; i < 5; i++) req.write('x'.repeat(1e6));
+    req.end();
+  });
+  assert.equal(chunked.status, 413, chunked.body);
+  assert.equal((await raw('/api/agent/status', '', { agent: true, method: 'GET' })).status, 200);
+});
+
 await check('AC-10 report: fixture gives exact numbers; live project counts match', async () => {
   const fixture = [
     { t: '2026-01-01T10:00:00.000Z', event: 'init' }, { t: '2026-01-01T10:02:00.000Z', event: 'proposed' },

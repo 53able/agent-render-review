@@ -102,6 +102,9 @@ const arg = (name: string): string | undefined => { const i = argv.indexOf(name)
 
 /** A client error whose message is safe to return as a 400 response. */
 class BadRequest extends Error {}
+/** A request body over MAX_BODY bytes; answered with 413. */
+class PayloadTooLarge extends Error {}
+const MAX_BODY = 4e6;
 const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
 const isClaimedChange = (x: unknown): x is ClaimedChange => isPlainObject(x) && typeof x.node === 'string' && typeof x.what === 'string' && typeof x.why === 'string';
 
@@ -624,9 +627,17 @@ ${VORK_HELP}`;
     res.end(type === 'application/json' ? JSON.stringify(body) : body);
   };
   // The type argument is not checked at run time; each endpoint still validates the fields it reads.
+  // Over MAX_BODY: settle with PayloadTooLarge (413) and drain the rest, so the client can read the response.
   const readBody = <T,>(req: http.IncomingMessage): Promise<T> => new Promise((ok, bad) => {
-    let b = ''; req.on('data', (d) => { b += d; if (b.length > 4e6) req.destroy(); });
+    if (Number(req.headers['content-length']) > MAX_BODY) { req.resume(); return bad(new PayloadTooLarge()); }
+    const chunks: Buffer[] = []; let size = 0; let settled = false;
+    const fail = (e: Error) => { if (!settled) { settled = true; chunks.length = 0; bad(e); } };
+    req.on('data', (d: Buffer) => { if (settled) return; size += d.length; if (size > MAX_BODY) fail(new PayloadTooLarge()); else chunks.push(d); });
+    req.on('error', fail);
+    req.on('close', () => fail(new Error('request closed before the body was read')));
     req.on('end', () => {
+      if (settled) return; settled = true;
+      const b = Buffer.concat(chunks).toString('utf8');
       let parsed: unknown;
       try { parsed = b ? JSON.parse(b) : {}; } catch { return bad(new BadRequest('request body is not valid JSON')); }
       if (!isPlainObject(parsed)) return bad(new BadRequest('request body must be a JSON object'));
@@ -964,6 +975,8 @@ ${VORK_HELP}`;
       return send(res, 200, fs.readFileSync(real), MIME[path.extname(real)] || 'application/octet-stream');
     } catch (e: any) {
       if (e instanceof BadRequest) return send(res, 400, { error: e.message });
+      if (e instanceof PayloadTooLarge) return send(res, 413, { error: `request body is larger than ${MAX_BODY / 1e6} MB` }, 'application/json', { connection: 'close' });
+      if (res.destroyed) return; // client went away mid-body
       console.error(e); return send(res, 500, { error: 'internal error' });
     }
   });
