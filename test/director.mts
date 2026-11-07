@@ -306,6 +306,11 @@ await check('#58 an adoption plan shows what it overwrites; the write needs that
   fs.rmSync(asset); fs.linkSync(path.join(d.runs, 'state.json'), asset);
   await refused('conflict', () => d.planAdoption({ requestId }), /not a plain file with a single link/);
   fs.rmSync(asset);
+  // the manifest too
+  const manifest = path.join(project!, '.vork/adopted/hero.json'); fs.mkdirSync(path.dirname(manifest), { recursive: true });
+  fs.linkSync(path.join(d.runs, 'state.json'), manifest);
+  await refused('conflict', () => d.planAdoption({ requestId }), /hero\.json exists but is not a plain file/);
+  fs.rmSync(manifest);
   const fresh = d.planAdoption({ requestId }); assert.equal(fresh.overwrites, false); assert.equal(fresh.existing, null);
   // a hard link made after planning is caught before writing; the linked file keeps its bytes
   fs.writeFileSync(asset, 'old again');

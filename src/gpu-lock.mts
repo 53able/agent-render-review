@@ -64,8 +64,10 @@ let queue: Promise<unknown> = Promise.resolve();
  */
 export function withGpuLock<T>(fn: () => Promise<T>, { signal, file = VORK_LOCK, onWait }: { signal?: AbortSignal; file?: string; onWait?: (owner: number) => void } = {}): Promise<T | null> {
   // A cancelled caller stops waiting for the callers ahead of it in this process too.
-  const aborted = new Promise<void>((r) => { if (signal?.aborted) r(); else signal?.addEventListener('abort', () => r(), { once: true }); });
+  let onAbort = () => {};
+  const aborted = new Promise<void>((r) => { onAbort = () => r(); if (signal?.aborted) r(); else signal?.addEventListener('abort', onAbort, { once: true }); });
   const mine = Promise.race([queue.catch(() => {}), aborted]).then(async () => {
+    signal?.removeEventListener('abort', onAbort);
     if (signal?.aborted) return null;
     const release = await lockFile(file, { signal, onWait });
     if (!release) return null;

@@ -263,6 +263,16 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     } catch { return null; } finally { fs.closeSync(fd); }
   }
 
+  /**
+   * Writes a new file next to target and renames it into place: an existing file's inode, and anything hard-linked to
+   * it, is never written. The temporary file is removed if anything fails.
+   */
+  function replaceFile(target: string, data: string | Buffer) {
+    const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+    try { fs.writeFileSync(tmp, data, { flag: 'wx' }); fs.renameSync(tmp, target); }
+    catch (e) { fs.rmSync(tmp, { force: true }); throw e; }
+  }
+
   // ---------- adoption: the agent asks, the human plans and approves, a job writes into the project ----------
   function requestAdoption(b: { version: string; slug: unknown; reason?: unknown }) {
     const v = liveV(b.version);
@@ -300,6 +310,8 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
     // A file that cannot be read this way (a hard link, a FIFO, …) is neither shown nor replaced: the approval would
     // not be bound to its contents, and writing through a hard link changes the file it links to.
     if (overwrites && !old) throw new Refusal('conflict', `${t.assetRel} exists but is not a plain file with a single link; Director does not replace it`);
+    // The manifest is replaced too: the same rule applies to it.
+    if (fs.existsSync(t.manifest) && !readPlainFile(t.manifest)) throw new Refusal('conflict', `${t.manifestRel} exists but is not a plain file with a single link; Director does not replace it`);
     const existing = old ? { bytes: old.data.length, modified: old.mtime, viewable: true } : null;
     const reusable = finalMatches(v, hash); const { slug } = t;
     const ticket = issueTicket({ kind: 'adopt', versionId: v.id, hash, requestId, slug, sceneText, assetRel: t.assetRel, overwrites, existingSha256: old ? sha256(old.data) : null });
@@ -367,16 +379,15 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
         if (sha256(png) !== v.renders.final!.sha256) throw new Error('final.png changed after rendering; plan again');
         fs.mkdirSync(path.dirname(targets.asset), { recursive: true }); fs.mkdirSync(path.dirname(targets.manifest), { recursive: true });
         const overwrote = fs.existsSync(targets.asset);
-        // Write a new file and rename it into place: the old file's inode (and anything linked to it) is never written.
-        const tmp = `${targets.asset}.${process.pid}.tmp`;
-        fs.writeFileSync(tmp, png, { flag: 'wx' }); fs.renameSync(tmp, targets.asset);
+        if (fs.existsSync(targets.manifest) && !readPlainFile(targets.manifest)) throw new Error(`${targets.manifestRel} is no longer a plain file with a single link; nothing was written`);
+        replaceFile(targets.asset, png);
         const pngSha = sha256(png);
         const manifest = {
           slug: t.slug, asset: targets.assetRel, sha256: pngSha, version: v.id, sceneHash: t.hash, vork: renderer.version, profile: PROFILES.final,
           resolution: [v.renders.final!.width, v.renders.final!.height], reason: ar.reason, interpretation: v.proposal?.interpretation ?? v.instruction,
           adoptedAt: new Date().toISOString(), approvedVia: 'Render Director UI', scene: JSON.parse(t.sceneText),
         };
-        fs.writeFileSync(targets.manifest, JSON.stringify(manifest, null, 2));
+        replaceFile(targets.manifest, JSON.stringify(manifest, null, 2));
         if (v.status === 'proposed') { acceptVersion(state, v); audit('accept', { version: v.id, via: 'adoption' }); }
         settleRequest(ar, 'adopted'); save();
         audit('adopted', { request: ar.id, version: v.id, hash: t.hash, asset: targets.assetRel, sha256: pngSha, overwrote });

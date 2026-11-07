@@ -94,12 +94,25 @@ const hexToLin = (h) => [1, 3, 5].map((i) => +toL(parseInt(h.slice(i, i + 2), 16
 const isColor = (v) => Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === 'number' && n >= 0 && n <= 1.5);
 
 let loadSeq = 0;
-async function load(keepView = true) {
-  // Several callers load (the poll, finished jobs, decisions); only the newest answer is applied.
-  const seq = ++loadSeq; const d = await api('/api/state'); if (seq !== loadSeq) return;
+/** @type {Promise<void> | null} the newest load(); an older one that lost the race waits for it before returning */
+let latestLoad = null;
+/** Versions this tab asked the built-in proposer for: they are opened, not announced as news. @type {Set<string>} */
+const ownVersions = new Set();
+/** @param {boolean} [keepView] */
+function load(keepView = true) {
+  // Several callers load (the poll, finished jobs, decisions); only the newest answer is applied, and every caller
+  // returns after it is on screen.
+  const seq = ++loadSeq;
+  const run = loadNow(seq, keepView);
+  latestLoad = run;
+  return run.then(() => (seq === loadSeq ? undefined : latestLoad ?? undefined));
+}
+/** @param {number} seq @param {boolean} keepView */
+async function loadNow(seq, keepView) {
+  const d = await api('/api/state'); if (seq !== loadSeq) return;
   // A new agent version is announced by whichever load sees it first, not only by the poll.
   const known = S.data && new Set(S.data.versions.map((v) => v.id));
-  const fresh = known ? d.versions.filter((/** @type {Version} */ v) => !known.has(v.id) && v.origin === 'agent') : [];
+  const fresh = known ? d.versions.filter((/** @type {Version} */ v) => !known.has(v.id) && v.origin === 'agent' && !ownVersions.has(v.id)) : [];
   S.data = d;
   if (!keepView || !V(S.viewId)) S.viewId = S.data.head;
   S.sig = signature(S.data);
@@ -544,6 +557,7 @@ $('#askForm').addEventListener('submit', async (e) => {
     clearFails('ask'); say(`Proposal requested from ${baseId}`);
     trackJob(job, async (j) => {
       S.lastResult = j;
+      if (j.result?.kind === 'proposal') ownVersions.add(j.result.versionId);
       await load();
       if (j.status === 'done' && j.result?.kind === 'proposal') await openVersion(j.result.versionId); else renderReview();
     });
