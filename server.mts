@@ -1023,9 +1023,16 @@ ${VORK_HELP}`;
       const rootReal = fs.realpathSync.native(root); const want = path.resolve(rootReal, '.' + path.sep + rel);
       let real: string;
       try { real = fs.realpathSync.native(want); } catch { return send(res, 404, 'not found', 'text/plain'); }
-      if (real !== want || !real.startsWith(rootReal + path.sep) || !fs.statSync(real).isFile())
-        return send(res, 404, 'not found', 'text/plain');
-      return send(res, 200, fs.readFileSync(real), MIME[path.extname(real)] || 'application/octet-stream');
+      if (real !== want || !real.startsWith(rootReal + path.sep)) return send(res, 404, 'not found', 'text/plain');
+      // Read from the descriptor that was checked, not the path again: O_NOFOLLOW refuses a symlink swapped in
+      // after the check. A render file must have one link only: a hard link to server.json passes every path check.
+      let fd: number;
+      try { fd = fs.openSync(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); } catch { return send(res, 404, 'not found', 'text/plain'); }
+      try {
+        const st = fs.fstatSync(fd);
+        if (!st.isFile() || (root === RUNS && st.nlink !== 1)) return send(res, 404, 'not found', 'text/plain');
+        return send(res, 200, fs.readFileSync(fd), MIME[path.extname(real)] || 'application/octet-stream');
+      } finally { fs.closeSync(fd); }
     } catch (e: any) {
       if (e instanceof BadRequest) return send(res, 400, { error: e.message });
       if (e instanceof PayloadTooLarge) {
