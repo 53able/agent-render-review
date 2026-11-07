@@ -152,7 +152,7 @@ server.registerTool('wait_for_feedback', {
 
 server.registerTool('request_adoption', {
   annotations: { readOnlyHint: false, destructiveHint: false },
-  description: 'Ask the human to adopt a version into the project as <assetDir>/<slug>.png (default public/vork/). This only queues a request; the human approves or rejects it in Director. Learn the result with wait_for_feedback (event "adopted" carries the asset path to use in code). A second request for the same version and slug while one is pending is refused with the pending request id; at most 20 requests can be pending.',
+  description: 'Ask the human to adopt a version into the project as <assetDir>/<slug>.png (default public/vork/). This only queues a request; the human approves or rejects it in Director. Learn the result with wait_for_feedback (event "adopted" carries the asset path to use in code). A second request for the same version and slug while one is pending is refused with the pending request id; at most 20 requests can be pending. If the human discards the version, its pending requests are rejected (adoption_rejected with comment "version discarded").',
   inputSchema: { version: z.string().regex(/^v\d{3}$/), slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), reason: z.string().min(1).max(4000).describe('Why this candidate fits the page') },
 }, async (args) => {
   const r = await call('POST', '/api/agent/adoption-request', args);

@@ -616,6 +616,16 @@ ${VORK_HELP}`;
   const adoptionJobs = new Map<string, Job>();
   const adoptingVersion = (versionId: string) => [...adoptionJobs.keys()].some((rid) => state.adoptionRequests.find((a) => a.id === rid)?.version === versionId);
   const ADOPTION_RUNNING = 'an adoption of this request is running; cancel its job first';
+  // A pending request for a discarded version can never be adopted: reject it so the agent learns the outcome (#27).
+  // A version with a running adopt job cannot be discarded, so no job is affected.
+  const rejectRequestsOfDiscarded = () => {
+    for (const ar of state.adoptionRequests) {
+      if (ar.status !== 'pending' || liveV(ar.version) || adoptionJobs.has(ar.id)) continue;
+      ar.status = 'rejected'; audit('adoption_rejected', { request: ar.id, version: ar.version, reason: 'version discarded' });
+      pushEvent({ type: 'adoption_rejected', request: ar.id, version: ar.version, comment: 'version discarded' });
+    }
+  };
+  rejectRequestsOfDiscarded(); // requests left pending by a Director from before #27
   const finalMatches = (v: Version, hash: string) => {
     const f = v.renders.final; if (!f || f.sceneHash !== hash || !fs.existsSync(f.file)) return false;
     return sha256(fs.readFileSync(f.file)) === f.sha256;
@@ -922,6 +932,7 @@ ${VORK_HELP}`;
         v.status = decision === 'accept' ? 'accepted' : 'discarded'; if (decision === 'accept') state.head = v.id;
         audit(decision, { version: v.id });
         pushEvent({ type: 'decision', version: v.id, decision, head: state.head, comment: typeof comment === 'string' ? comment.slice(0, 4000) : null });
+        if (decision === 'discard') rejectRequestsOfDiscarded();
         return send(res, 200, { ok: true, head: state.head });
       }
 
@@ -967,10 +978,11 @@ ${VORK_HELP}`;
         const { ticket } = await readBody<{ ticket: string }>(req);
         const t = takeTicket(ticket, 'adopt');
         if (!t) return send(res, 403, { error: 'adoption needs a fresh approval for this exact scene' });
-        const ar = state.adoptionRequests.find((a) => a.id === t.requestId);
-        if (!ar || ar.status !== 'pending' || adoptionJobs.has(ar.id)) return send(res, 409, { error: 'request is no longer pending' });
+        // Version first: discarding it also rejects the request (#27), and this reason says why.
         const v = liveV(t.versionId);
         if (!v) return send(res, 409, { error: 'the version was discarded after approval; nothing was written' });
+        const ar = state.adoptionRequests.find((a) => a.id === t.requestId);
+        if (!ar || ar.status !== 'pending' || adoptionJobs.has(ar.id)) return send(res, 409, { error: 'request is no longer pending' });
         const job = newJob('adopt', v.id);
         adoptionJobs.set(ar.id, job);
         (async () => {

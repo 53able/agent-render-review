@@ -689,7 +689,7 @@ await check('#14 a version discarded after the adoption plan is not written, als
     const r = await human('/api/adopt', { ticket: plan.json.ticket });
     assert.equal(r.status, 409, `${slug}: ${JSON.stringify(r.json)}`); assert.match(r.json.error, /discarded/);
     assert.equal(fs.existsSync(path.join(PROJECT, `public/vork/${slug}.png`)), false, slug);
-    assert.equal((await requestOf(requestId)).status, 'pending', slug);
+    assert.equal((await requestOf(requestId)).status, 'rejected', `${slug}: discarding the version rejects its request (#27)`);
   }
 });
 
@@ -780,6 +780,17 @@ await check('#16 cancelling a job kills its render process and the render is not
     assert.equal((await human(`/api/jobs/${job.id}`)).json.status, 'cancelled');
     assert.equal(JSON.stringify((await versionOf('v001')).renders), before);
   } finally { releaseRenders(); }
+});
+
+await check('#27 discarding a version rejects its pending adoption requests and tells the agent', async () => {
+  const id = await newProposal();
+  const req = await raw('/api/agent/adoption-request', JSON.stringify({ version: id, slug: 'gone', reason: 'x' }), { agent: true });
+  assert.equal(req.status, 200, JSON.stringify(req.json));
+  await raw('/api/agent/feedback?wait=0', '', { agent: true, method: 'GET' }); // drain
+  assert.equal((await human('/api/decide', { versionId: id, decision: 'discard' })).status, 200);
+  assert.equal((await state()).adoptionRequests.find((a: Json) => a.id === req.json.request).status, 'rejected');
+  const evs = (await raw('/api/agent/feedback?wait=0', '', { agent: true, method: 'GET' })).json.events;
+  assert.ok(evs.some((e: Json) => e.type === 'adoption_rejected' && e.request === req.json.request && e.comment === 'version discarded'), JSON.stringify(evs));
 });
 
 await check('#28 concurrent agent renders of one version and profile run vork once and share the result', async () => {
