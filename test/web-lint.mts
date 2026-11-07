@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WEB_EXTENSIONS } from '../src/build-id.mts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WEB = path.join(ROOT, 'web'), SRC = path.join(WEB, 'src'), UI = path.join(SRC, 'components', 'ui');
@@ -41,9 +40,6 @@ check('AC-8: no web fonts (@font-face, fonts.googleapis, @fontsource) in web/ or
 check('AC-14: no HTML strings (innerHTML and relatives) in web/src', () => {
   const re = /dangerouslySetInnerHTML|innerHTML|outerHTML|insertAdjacentHTML/;
   assert.deepEqual(walk(SRC).filter((f) => re.test(read(f))).map(rel), []);
-});
-check(`AC-8: web/ holds only build-ID input types (${WEB_EXTENSIONS.join(' ')}; dotfiles excepted)`, () => {
-  assert.deepEqual(walk(WEB, true).filter((f) => !WEB_EXTENSIONS.includes(path.extname(f))).map(rel), []);
 });
 check('AC-8: vite is locked at 6.0.9 or later (server.cors and allowedHosts defaults)', () => {
   const v: string | undefined = JSON.parse(read(path.join(ROOT, 'package-lock.json'))).packages?.['node_modules/vite']?.version;

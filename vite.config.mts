@@ -27,8 +27,12 @@ export default defineConfig({
   resolve: {
     alias: { '@': fileURLToPath(new URL('./web/src', import.meta.url)) },
   },
+  // Serve only web/ and node_modules/ (not the repository root: runs/, .vork/ and server.json are there), and send no
+  // CORS headers, so another site open in the browser cannot read the dev server's files.
   server: {
     host: '127.0.0.1',
+    cors: false,
+    fs: { strict: true, allow: [fileURLToPath(new URL('./web', import.meta.url)), fileURLToPath(new URL('./node_modules', import.meta.url))] },
     proxy: { '/api': toDirector, '/runs': toDirector },
   },
   build: {

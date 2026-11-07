@@ -39,22 +39,40 @@ async function director() {
   log('starting Director for', PROJECT);
   fs.mkdirSync(path.dirname(SERVER_FILE), { recursive: true });
   const LOG = path.join(PROJECT, '.vork', 'server.log');
-  const out = fs.openSync(LOG, 'a');
+  // Not through a symlink put in place of the log: the child's output would be appended to the file it points to.
+  const out = fs.openSync(LOG, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
   const child = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--project', PROJECT], { detached: true, stdio: ['ignore', out, out] });
   fs.closeSync(out);
-  let exitCode: number | null = null;
-  child.on('exit', (code) => { exitCode = code; });
+  const ended: { code: number | null; signal: NodeJS.Signals | null }[] = [];
+  child.on('exit', (code, signal) => { ended.push({ code, signal }); });
   child.unref();
-  const logTail = () => { try { return fs.readFileSync(LOG, 'utf8').trimEnd().split('\n').slice(-20).join('\n'); } catch { return ''; } };
   for (let t = 0; t < 60; t++) {
     await new Promise((r) => setTimeout(r, 250));
-    // 2: Director refused to start (missing or stale build, runs folder inside dist). 3: another session's Director
-    // holds the lock, which is normal: keep waiting for its server.json. Anything else: wait, then report the log.
-    if (exitCode === 2) throw new Error(`Director refused to start (exit 2). ${LOG} ends with:\n${logTail()}`);
+    // 3: another session's Director holds the lock, which is normal: keep waiting for its server.json. Any other end
+    // (2: missing or stale build, runs folder inside dist; 1: vork missing or a crash) means no Director is coming.
+    const end = ended[0];
+    if (end && end.code !== 3) throw new Error(`Director exited at startup (${end.code !== null ? `exit ${end.code}` : end.signal}). ${LOG} ends with:\n${logTail(LOG)}`);
     const s = readServerFile(); // our child, or another session's Director that won the lock
     if (s && s.project === PROJECT && (await ping(s))) return (conn = s);
   }
-  throw new Error(`Director did not start; see ${LOG}. It ends with:\n${logTail()}`);
+  throw new Error(`Director did not start; see ${LOG}. It ends with:\n${logTail(LOG)}`);
+}
+
+/**
+ * The last 20 lines of the last 8 KB of server.log, for an error message. The file is opened without following a
+ * symlink and read only when it is a plain file with one link, so a link put in place of the log cannot make this
+ * process read (and hand the agent) another file.
+ */
+function logTail(file: string): string {
+  let fd: number;
+  try { fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); } catch { return ''; }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.nlink !== 1) return '';
+    const len = Math.min(st.size, 8192); const buf = Buffer.alloc(len);
+    const n = fs.readSync(fd, buf, 0, len, st.size - len);
+    return buf.subarray(0, n).toString('utf8').trimEnd().split('\n').slice(-20).join('\n');
+  } catch { return ''; } finally { fs.closeSync(fd); }
 }
 
 async function call(method: string, route: string, body?: unknown) {

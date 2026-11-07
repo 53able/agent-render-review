@@ -150,6 +150,46 @@ await check('mcp.mts: a child that exits 2 (runs folder inside dist/) fails at o
   } finally { fs.rmSync(project, { recursive: true, force: true }); }
 });
 
+await check('mcp.mts: a child that exits with another code (1: vork missing) fails at once with the server.log tail', async () => {
+  realDist();
+  const noVork = path.join(tmp, 'bin-novork'); fs.mkdirSync(noVork, { recursive: true });
+  fs.writeFileSync(path.join(noVork, 'vork'), '#!/bin/sh\nexit 1\n', { mode: 0o755 }); // vorkInstalled() reads it as missing
+  const project = path.join(tmp, 'proj-exit1'); fs.mkdirSync(project);
+  const { result, ms } = await mcpCall(project, { ...ENV, PATH: `${noVork}${path.delimiter}${ENV.PATH}` });
+  assert.equal(result.isError, true, textOf(result));
+  assert.match(textOf(result), /exit 1/); assert.match(textOf(result), /vork not found/);
+  assert.ok(ms < 5000, `took ${ms} ms (not the 15 s wait)`);
+});
+
+await check('mcp.mts does not read or write another file through server.log (symlink or hard link)', async () => {
+  realDist();
+  const secret = path.join(tmp, 'secret.txt'); const SECRET = 'do-not-leak-this-line';
+  const noVork = path.join(tmp, 'bin-novork'); // the child exits 1 at once, so the error carries the log tail
+  const env = { ...ENV, PATH: `${noVork}${path.delimiter}${ENV.PATH}` };
+  // A symlink: the log is not opened through it, so the child is not started and nothing is appended to the target.
+  fs.writeFileSync(secret, SECRET + '\n');
+  const p1 = path.join(tmp, 'proj-symlog'); fs.mkdirSync(path.join(p1, '.vork'), { recursive: true });
+  fs.symlinkSync(secret, path.join(p1, '.vork', 'server.log'));
+  const r1 = (await mcpCall(p1, env)).result;
+  assert.equal(r1.isError, true, textOf(r1)); assert.doesNotMatch(textOf(r1), new RegExp(SECRET));
+  assert.equal(fs.readFileSync(secret, 'utf8'), SECRET + '\n', 'the symlink target is untouched');
+  // A hard link (two links to one file): the tail is not read back into the error.
+  const p2 = path.join(tmp, 'proj-hardlog'); fs.mkdirSync(path.join(p2, '.vork'), { recursive: true });
+  fs.linkSync(secret, path.join(p2, '.vork', 'server.log'));
+  const r2 = (await mcpCall(p2, env)).result;
+  assert.equal(r2.isError, true, textOf(r2)); assert.match(textOf(r2), /exit 1/);
+  assert.doesNotMatch(textOf(r2), new RegExp(SECRET));
+});
+
+await check('the runs folder check ignores letter case on macOS and Windows (dist/ missing, DEV)', async () => {
+  if (process.platform !== 'darwin' && process.platform !== 'win32') { console.log('     (skipped: case-sensitive platform)'); return; }
+  fs.rmSync(DIST, { recursive: true, force: true });
+  const runs = path.join(T, 'DIST', 'runs');
+  const r = await director(['--port', String(await freePort())], { ...ENV, RENDER_DIRECTOR_RUNS: runs, RENDER_DIRECTOR_DEV: '1' }, runs);
+  try { assert.equal(r.code, 2, r.stderr); assert.match(r.stderr, /is inside .*served without a session/); }
+  finally { await stop(r.proc); fs.rmSync(path.join(T, 'DIST'), { recursive: true, force: true }); }
+});
+
 await check('mcp.mts: a child that exits 3 (another Director holds the lock) is not a failure', async () => {
   realDist();
   const project = path.join(tmp, 'proj-lock'); fs.mkdirSync(project);

@@ -18,16 +18,23 @@ write('web/src/App.tsx', 'export const A = 1;\n');
 write('web/src/index.css', '@import "tailwindcss";\n');
 const base = computeBuildId(tmp);
 
-check('inputs are the whitelisted web/ files and the fixed files, sorted', () => {
+check('inputs are the web/ files and the fixed files, sorted', () => {
   assert.deepEqual(buildIdInputs(tmp), [...FIXED_INPUTS, 'web/index.html', 'web/src/App.tsx', 'web/src/index.css'].sort());
 });
 check('ID is 64 hex chars and stable', () => {
   assert.match(base, /^[0-9a-f]{64}$/);
   assert.equal(computeBuildId(tmp), base);
 });
-check('dotfiles, dot folders and other extensions do not change the ID', () => {
+check('dotfiles, dot folders and files outside web/ do not change the ID', () => {
   write('web/.DS_Store', 'x'); write('web/src/.DS_Store', 'x'); write('web/src/.App.tsx.swp', 'x');
-  write('web/.cache/x.ts', 'x'); write('web/src/notes.md', 'x'); write('README.md', 'x');
+  write('web/.cache/x.ts', 'x'); write('README.md', 'x');
+  assert.equal(computeBuildId(tmp), base);
+});
+check('a file under web/ of any other type is an input (an asset Vite bundles, e.g. .png or .woff2)', () => {
+  write('web/src/logo.png', 'x');
+  assert.ok(buildIdInputs(tmp).includes('web/src/logo.png'));
+  assert.notEqual(computeBuildId(tmp), base);
+  fs.rmSync(path.join(tmp, 'web/src/logo.png'));
   assert.equal(computeBuildId(tmp), base);
 });
 check('editing a .tsx changes the ID', () => {

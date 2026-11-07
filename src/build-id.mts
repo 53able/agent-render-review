@@ -4,13 +4,16 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-/** Files under web/ with these extensions are inputs. Names starting with a dot (files or folders) are skipped. */
-export const WEB_EXTENSIONS = ['.ts', '.tsx', '.css', '.html', '.svg'];
 /** Inputs outside web/, relative to the repository root. */
 export const FIXED_INPUTS = ['vite.config.mts', 'tsconfig.web.json', 'components.json', 'scripts/build.mts', 'src/build-id.mts', 'package-lock.json'];
 export const META_NAME = 'rd-build';
 
-/** The input files as sorted POSIX paths relative to root. */
+/**
+ * The input files as sorted POSIX paths relative to root: every file under web/ (whatever its extension, so an asset
+ * Vite bundles cannot be left out), except names starting with a dot (files or folders: .DS_Store, editor swap files),
+ * and FIXED_INPUTS. package-lock.json is one of them, so any dependency change, even one the UI does not use, makes
+ * dist/ stale until `npm install` (which runs the build) or `npm run build`.
+ */
 export function buildIdInputs(root: string): string[] {
   const out: string[] = [];
   const walk = (rel: string) => {
@@ -18,7 +21,7 @@ export function buildIdInputs(root: string): string[] {
       if (ent.name.startsWith('.')) continue;
       const child = rel + '/' + ent.name;
       if (ent.isDirectory()) walk(child);
-      else if (ent.isFile() && WEB_EXTENSIONS.includes(path.extname(ent.name))) out.push(child);
+      else if (ent.isFile()) out.push(child);
     }
   };
   walk('web');

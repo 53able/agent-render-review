@@ -34,9 +34,15 @@ export async function main(argv: string[]) {
     if (problem) { console.error(`refusing to start: ${problem}`); process.exit(2); }
   }
   // realish, not realpathSync: PUBLIC may not exist (DEV, or between the two renames of a rebuild).
-  const runsReal = realish(RUNS), publicReal = realish(PUBLIC);
-  if (runsReal === publicReal || runsReal.startsWith(publicReal + path.sep)) { console.error(`refusing to start: the runs folder ${RUNS} is inside ${PUBLIC}, which is served without a session`); process.exit(2); }
+  // The part of a path realish cannot resolve keeps the letter case it was given, so on the usually case-insensitive
+  // file systems of macOS and Windows the comparison ignores case. After mkdir RUNS exists and is checked again on its
+  // real path, which also catches a folder swapped for a symlink in between.
+  const fold = (p: string) => (process.platform === 'darwin' || process.platform === 'win32' ? p.toLowerCase() : p);
+  const insidePublic = (runsReal: string) => { const r = fold(runsReal), pub = fold(realish(PUBLIC)); return r === pub || r.startsWith(pub + path.sep); };
+  const refuseRuns = () => { console.error(`refusing to start: the runs folder ${RUNS} is inside ${PUBLIC}, which is served without a session`); process.exit(2); };
+  if (insidePublic(realish(RUNS))) refuseRuns();
   fs.mkdirSync(RUNS, { recursive: true });
+  if (insidePublic(fs.realpathSync.native(RUNS))) refuseRuns();
   const LOCK = path.join(RUNS, 'lock');
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { return e.code === 'EPERM'; } };
   for (;;) {
