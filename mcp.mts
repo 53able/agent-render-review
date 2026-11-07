@@ -106,7 +106,7 @@ server.registerTool('get_scene', {
 server.registerTool('propose_scene', {
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   description: [
-    'Propose a complete revised vork scene (version 2). Director checks it against a policy (relative .glb/image files only, no custom shader programs, resolution <= 1920x1080, unique node names),',
+    'Propose a complete revised vork scene (version 2). Director checks it against a policy (relative .glb/image files only, no custom shader programs, resolution <= 1920x1080, a unique non-empty name on every node, not starting with "#"),',
     'validates it with a previs render, stores it as a PROPOSED version (HEAD does not move) and renders a draft. The draft image is returned so you can inspect it.',
     'claimed_changes must list every edit; the human sees them next to the real diff. Then ask the human to review and call wait_for_feedback.',
   ].join(' '),

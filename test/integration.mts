@@ -295,6 +295,21 @@ await check('#6 static serving cannot reach server.json or state.json outside pu
   assert.equal((await get('/app.js')).status, 200, 'normal static files still served');
 });
 
+await check('#8 propose refuses unnamed and "#"-named nodes before rendering; edit needs a string node', async () => {
+  const versions = (await state()).versions.length;
+  const extra = [[{ name: `#${base.nodes.length + 1}`, type: 'light', energy: 5000 }, { type: 'mesh', geometry: { std: 'box' } }], [{ type: 'light', energy: 5 }], [{ name: 7, type: 'light', energy: 5 }]];
+  for (const nodes of extra) {
+    const r = await raw('/api/agent/propose', JSON.stringify({ interpretation: 'x', claimed_changes: [], scene: { ...base, nodes: [...base.nodes, ...nodes] } }), { agent: true });
+    assert.equal(r.status, 422, JSON.stringify(nodes)); assert.ok(r.json.blockers.some((b: string) => /name/.test(b)), JSON.stringify(r.json));
+  }
+  assert.equal((await state()).versions.length, versions);
+  const accepted = (await state()).versions.find((v: Json) => v.status === 'accepted').id;
+  for (const node of [undefined, null, 1, ['vase'], '']) {
+    const r = await human('/api/edit', { baseId: accepted, node, field: 'energy', value: 10 });
+    assert.equal(r.status, 400, JSON.stringify(node));
+  }
+});
+
 await check('AC-10 report: fixture gives exact numbers; live project counts match', async () => {
   const fixture = [
     { t: '2026-01-01T10:00:00.000Z', event: 'init' }, { t: '2026-01-01T10:02:00.000Z', event: 'proposed' },

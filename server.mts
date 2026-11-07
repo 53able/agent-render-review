@@ -136,7 +136,14 @@ export function policyCheck(scene: Scene | null | undefined): PolicyResult {
   };
   walk(scene, 'scene');
   if (scene.programs && Object.keys(scene.programs).length) blockers.push('custom programs are not allowed in this prototype');
-  const names = scene.nodes.map((n) => n.name).filter(Boolean);
+  // The diff a human reviews pairs nodes by name, so every node needs its own name. '#' is reserved for diff keys.
+  const names: string[] = [];
+  scene.nodes.forEach((n, i) => {
+    const name = isPlainObject(n) ? n.name : undefined;
+    if (typeof name !== 'string' || !name) blockers.push(`scene.nodes[${i}]: every node needs a non-empty string "name"`);
+    else if (name.startsWith('#')) blockers.push(`scene.nodes[${i}].name ${JSON.stringify(name)}: names starting with "#" are reserved`);
+    else names.push(name);
+  });
   const dup = names.filter((n, i) => names.indexOf(n) !== i);
   if (dup.length) blockers.push(`duplicate node names: ${[...new Set(dup)].join(', ')}`);
   return { blockers, flags };
@@ -145,26 +152,36 @@ export function policyCheck(scene: Scene | null | undefined): PolicyResult {
 // Diff computed from data, not from the model's description.
 export function diffScenes(a: Scene, b: Scene): DiffEntry[] {
   const out: DiffEntry[] = [];
-  const byName = (s: Scene) => Object.fromEntries((s.nodes || []).map((n, i) => [n.name || `#${i}`, n]));
+  // A Map keyed by name: no inherited keys, and a key that is already taken never hides a node.
+  const byName = (s: Scene) => {
+    const m = new Map<string, unknown>();
+    (Array.isArray(s.nodes) ? s.nodes : []).forEach((n, i) => {
+      const name = isPlainObject(n) ? n.name : undefined;
+      let key = typeof name === 'string' && name ? name : `#${i}`;
+      while (m.has(key)) key += `#${i}`;
+      m.set(key, n);
+    });
+    return m;
+  };
   const A = byName(a), B = byName(b);
+  const own = (o: Record<string, unknown>, k: string) => (Object.hasOwn(o, k) ? o[k] : undefined);
   const rec = (x: unknown, y: unknown, p: string, node: string): void => {
     if (JSON.stringify(x) === JSON.stringify(y)) return;
-    const isObj = (v: any): v is Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v);
     const numArr = (v: unknown) => Array.isArray(v) && v.every((n) => typeof n === 'number');
-    if (isObj(x) && isObj(y)) {
-      for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) rec(x[k], y[k], p ? `${p}.${k}` : k, node);
+    if (isPlainObject(x) && isPlainObject(y)) {
+      for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) rec(own(x, k), own(y, k), p ? `${p}.${k}` : k, node);
     } else if (Array.isArray(x) && Array.isArray(y) && !numArr(x) && x.length === y.length) {
       x.forEach((_, i) => rec(x[i], y[i], `${p}[${i}]`, node));
     } else out.push({ node, path: p, before: x, after: y });
   };
-  for (const n of new Set([...Object.keys(A), ...Object.keys(B)])) {
-    if (!A[n]) out.push({ node: n, path: '(node)', before: undefined, after: 'added' });
-    else if (!B[n]) out.push({ node: n, path: '(node)', before: 'present', after: 'removed' });
-    else rec(A[n], B[n], '', n);
+  for (const n of new Set([...A.keys(), ...B.keys()])) {
+    if (!A.has(n)) out.push({ node: n, path: '(node)', before: undefined, after: 'added' });
+    else if (!B.has(n)) out.push({ node: n, path: '(node)', before: 'present', after: 'removed' });
+    else rec(A.get(n), B.get(n), '', n);
   }
   for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
     if (k === 'nodes') continue;
-    rec(a[k], b[k], k, '(scene)');
+    rec(own(a, k), own(b, k), k, '(scene)');
   }
   return out;
 }
@@ -239,6 +256,10 @@ if (argv[0] === '--selftest') {
     ['compositor resolution blocked', { ...base, render: { ...base.render, compositor: [{ material: 'm', resolution: [8000, 8000] }] } }, (r) => r.blockers.some((b) => b.includes('compositor'))],
     ['gltf blocked', { ...base, nodes: [...base.nodes, { type: 'asset', name: 'x', file: 'm.gltf' }] }, (r) => r.blockers.length === 1],
     ['image file object in inputs blocked', { ...base, nodes: [...base.nodes, { type: 'mesh', name: 'q', geometry: { std: 'box' }, materials: [{ inputs: { base_color: { image: { file: '/etc/passwd' } } } }] }] }, (r) => r.blockers.length === 1],
+    ['unnamed node blocked', { ...base, nodes: [...base.nodes, { type: 'mesh', geometry: { std: 'box' } }] }, (r) => r.blockers.some((b) => b.includes('name'))],
+    ['non-string name blocked', { ...base, nodes: [...base.nodes, { type: 'mesh', name: 1, geometry: { std: 'box' } } as unknown as SceneNode] }, (r) => r.blockers.some((b) => b.includes('name'))],
+    ['reserved # name blocked', { ...base, nodes: [...base.nodes, { type: 'light', name: '#10', energy: 5 }] }, (r) => r.blockers.some((b) => b.includes('reserved'))],
+    ['null node blocked without throwing', { ...base, nodes: [...base.nodes, null as unknown as SceneNode] }, (r) => r.blockers.some((b) => b.includes('name'))],
     ['duplicate names blocked', { ...base, nodes: [...base.nodes, { type: 'mesh', name: 'vase', geometry: { std: 'box' } }] }, (r) => r.blockers.some((b) => b.includes('duplicate'))],
     ['wrong version blocked', { ...base, version: 1 }, (r) => r.blockers.length === 1],
   ];
@@ -248,6 +269,15 @@ if (argv[0] === '--selftest') {
   const d = diffScenes(base, mod);
   const dpass = d.length === 2 && d.some((x) => x.node === 'vase' && x.path === 'materials[0].inputs.base_color') && d.some((x) => x.node === '(scene)' && x.path === 'render.background');
   fail += !dpass as unknown as number; console.log(`${dpass ? 'PASS' : 'FAIL'} diff finds exactly the two edits`, dpass ? '' : JSON.stringify(d));
+  // #8: a '#<index>' name must not hide an unnamed node; inherited keys are added, not changed
+  const added = (extra: SceneNode[]) => diffScenes(base, { ...base, nodes: [...base.nodes, ...extra] });
+  const collide = added([{ type: 'light', name: `#${base.nodes.length + 1}`, energy: 5000 }, { type: 'mesh', geometry: { std: 'box' } }]);
+  const inherited = ['constructor', 'toString', '__proto__', 'hasOwnProperty'].map((name) => added([{ type: 'light', name, energy: 5 }]));
+  const extraCases: [string, boolean, unknown][] = [
+    ['diff: a "#<index>" name does not hide an unnamed node', collide.length === 2 && collide.every((x) => x.path === '(node)' && x.after === 'added'), collide],
+    ['diff: inherited key names show as added nodes', inherited.every((x) => x.length === 1 && x[0].path === '(node)' && x[0].after === 'added'), inherited],
+  ];
+  for (const [name, pass, got] of extraCases) { fail += !pass as unknown as number; console.log(`${pass ? 'PASS' : 'FAIL'} ${name}`, pass ? '' : JSON.stringify(got)); }
   // write-back containment
   const tmp = fs.mkdtempSync(path.join(fs.realpathSync(process.env.TMPDIR || '/tmp'), 'vd-self-'));
   fs.mkdirSync(path.join(tmp, 'proj', 'public'), { recursive: true }); fs.mkdirSync(path.join(tmp, 'outside'));
@@ -475,7 +505,7 @@ async function main() {
   const SYSTEM = `You are the scene assistant inside "vork Director". A human director looks at renders and asks for changes.
 You edit vork scene JSON (API v2). You do NOT render; the app renders and the director judges the image.
 Rules:
-- Return the COMPLETE revised scene in "scene". Keep every node "name" stable; give new nodes unique names.
+- Return the COMPLETE revised scene in "scene". Keep every node "name" stable; give every new node a unique, non-empty name that does not start with "#".
 - Change only what the request needs. If objects are SELECTED, scope changes to them unless the request clearly says otherwise.
 - Never reference files, URLs or downloads. Do not add custom programs/shader code unless explicitly asked.
 - Unknown fields are errors in vork; use only fields documented below. Keep resolution unchanged unless asked.
@@ -885,6 +915,7 @@ ${VORK_HELP}`;
         if (!baseV || baseV.status !== 'accepted') return send(res, 400, { error: 'direct edits start from an accepted version' });
         const spec = typeof field === 'string' && Object.hasOwn(allowed, field) ? allowed[field] : undefined;
         if (!spec || !spec[1](value)) return send(res, 400, { error: 'unsupported edit or value out of range' });
+        if (typeof node !== 'string' || !node) return send(res, 400, { error: 'node must be a node name' });
         const scene = sceneOf(baseId); const n = scene.nodes.find((x) => x.name === node);
         if (!n) return send(res, 400, { error: 'no such node' });
         if (spec[0] === 'light') { if (n.type !== 'light') return send(res, 400, { error: 'not a light' }); n[field] = value; }
