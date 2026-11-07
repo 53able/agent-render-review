@@ -295,6 +295,12 @@ await check('#6 static serving cannot reach server.json or state.json outside pu
   assert.equal((await get('/app.js')).status, 200, 'normal static files still served');
 });
 
+await check('#10 a static .json file is served as its contents, not as a serialized Buffer', async () => {
+  const r = await fetch(`${BASE}/tsconfig.json`);
+  assert.equal(r.status, 200); assert.match(r.headers.get('content-type')!, /application\/json/);
+  assert.equal(await r.text(), fs.readFileSync(path.join(ROOT, 'public', 'tsconfig.json'), 'utf8'));
+});
+
 await check('#8 propose refuses unnamed and "#"-named nodes before rendering; edit needs a string node', async () => {
   const versions = (await state()).versions.length;
   const extra = [[{ name: `#${base.nodes.length + 1}`, type: 'light', energy: 5000 }, { type: 'mesh', geometry: { std: 'box' } }], [{ type: 'light', energy: 5 }], [{ name: 7, type: 'light', energy: 5 }]];

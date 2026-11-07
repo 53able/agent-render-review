@@ -624,10 +624,11 @@ ${VORK_HELP}`;
 
   const send = (res: http.ServerResponse, code: number, body: unknown, type = 'application/json', headers: Record<string, string> = {}) => {
     res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...headers });
-    res.end(type === 'application/json' ? JSON.stringify(body) : body);
+    // File contents (a Buffer) are sent as they are, also for .json files.
+    res.end(type === 'application/json' && !Buffer.isBuffer(body) ? JSON.stringify(body) : body);
   };
   // The type argument is not checked at run time; each endpoint still validates the fields it reads.
-  // Over MAX_BODY: settle with PayloadTooLarge (413) and drain the rest, so the client can read the response.
+  // Over MAX_BODY: settle with PayloadTooLarge (413) and keep draining the rest, so the client can read the response.
   const readBody = <T,>(req: http.IncomingMessage): Promise<T> => new Promise((ok, bad) => {
     if (Number(req.headers['content-length']) > MAX_BODY) { req.resume(); return bad(new PayloadTooLarge()); }
     const chunks: Buffer[] = []; let size = 0; let settled = false;
