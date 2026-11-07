@@ -143,11 +143,16 @@ async function reviewAdoption(requestId) {
     catch (e) { alertMsg(`Adoption refused: ${/** @type {Error} */ (e).message}`); }
   };
 }
+const BASE_TITLE = document.title;
 /** @param {string} id */
 function notify(id) {
-  const n = $('#notice'); n.hidden = false;
-  n.innerHTML = `New proposal <b>${esc(id)}</b> from your agent <button type="button" class="ghost">View</button>`;
-  /** @type {HTMLButtonElement} */ (n.querySelector('button')).onclick = async () => { n.hidden = true; S.viewId = id; renderVersions(); renderObjects(); renderReview(); await drawViewport(); };
+  // fixed on screen so it is seen while scrolled down; the tab title is marked until the notice is opened or dismissed
+  const n = $('#notice'); n.hidden = false; document.title = `(1) ${BASE_TITLE}`;
+  n.innerHTML = `New proposal <b>${esc(id)}</b> from your agent <button type="button" class="ghost">View</button><button type="button" class="ghost" aria-label="Dismiss">✕</button>`;
+  const close = () => { n.hidden = true; document.title = BASE_TITLE; };
+  const [view, dismiss] = /** @type {NodeListOf<HTMLButtonElement>} */ (n.querySelectorAll('button'));
+  view.onclick = async () => { close(); S.viewId = id; renderVersions(); renderObjects(); renderReview(); await drawViewport(); };
+  dismiss.onclick = close;
   say(`New proposal ${id} from your agent. Press View to open it.`);
 }
 // Agents act from outside the page: poll for new proposals, requests and reads.
