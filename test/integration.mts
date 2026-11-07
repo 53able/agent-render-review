@@ -826,6 +826,24 @@ await check('#28 concurrent agent renders of one version and profile run vork on
   } finally { releaseRenders(); }
 });
 
+await check('#39 RENDER_DIRECTOR_BROWSER opens the pairing link with the given command', async () => {
+  const { spawn } = await import('node:child_process'); const net = await import('node:net');
+  const port = await new Promise<number>((ok) => { const srv = net.createServer().listen(0, '127.0.0.1', () => { const p = (srv.address() as { port: number }).port; srv.close(() => ok(p)); }); });
+  const got = path.join(tmp, 'browser-args'); const opener = path.join(BIN, 'fake-browser');
+  fs.writeFileSync(opener, `#!/bin/sh\nprintf '%s\\n' "$@" > '${got}'\n`, { mode: 0o755 });
+  const env: NodeJS.ProcessEnv = { ...process.env, RENDER_DIRECTOR_RUNS: path.join(tmp, 'browser-runs'), RENDER_DIRECTOR_BROWSER: JSON.stringify([opener, '--profile', 'review']) };
+  delete env.RENDER_DIRECTOR_NO_OPEN; delete env.RENDER_DIRECTOR_PAIR_TOKEN;
+  const proc = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !fs.existsSync(got); i++) await sleep(150);
+    const args = fs.readFileSync(got, 'utf8').trim().split('\n');
+    assert.deepEqual(args.slice(0, 2), ['--profile', 'review']);
+    const m = new RegExp(`^http://127\\.0\\.0\\.1:${port}/#pair=([0-9a-f]+)$`).exec(args[2]); assert.ok(m, args[2]);
+    const pr = await fetch(`http://127.0.0.1:${port}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: m[1] }) });
+    assert.equal(pr.status, 200);
+  } finally { proc.kill('SIGTERM'); }
+});
+
 await check('AC-01 nothing new was written under render-director/runs', async () => {
   const after = fs.existsSync(path.join(ROOT, 'runs')) ? JSON.stringify(fs.readdirSync(path.join(ROOT, 'runs'))) : '[]';
   assert.equal(after, runsBefore);

@@ -725,8 +725,19 @@ ${VORK_HELP}`;
     const link = `http://127.0.0.1:${PORT}/#pair=${PAIR}`;
     if (process.stdout.isTTY) console.log(`Open Director (one-time link): ${link}`);
     if (process.env.RENDER_DIRECTOR_NO_OPEN === '1') return false;
-    const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open';
-    try { spawn(opener, [link], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref(); return true; } catch { return false; }
+    // RENDER_DIRECTOR_BROWSER: the command that receives the link as its last argument, either one executable or a JSON
+    // array of strings (e.g. ["open","-a","Firefox"]). Only an environment variable: .vork/config.json is writable by
+    // the agent, and a command set there could hand the link to it (#39).
+    let opener = [process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open'];
+    const custom = process.env.RENDER_DIRECTOR_BROWSER;
+    if (custom) {
+      try {
+        const cmd: unknown = custom.trimStart().startsWith('[') ? JSON.parse(custom) : [custom];
+        if (!Array.isArray(cmd) || !cmd.length || !cmd.every((x) => typeof x === 'string' && x)) throw new Error('must be a non-empty array of strings');
+        opener = cmd;
+      } catch (e: any) { console.error(`ignoring RENDER_DIRECTOR_BROWSER: ${e.message}`); }
+    }
+    try { spawn(opener[0], [...opener.slice(1), link], { detached: true, stdio: 'ignore' }).on('error', (e) => console.error(`could not open the review tab with ${opener[0]}: ${e.message}`)).unref(); return true; } catch { return false; }
   }
   const cookie = (req: http.IncomingMessage, name: string): string | undefined => (req.headers.cookie || '').split(';').map((s) => s.trim().split('=')).find(([k]) => k === name)?.[1];
   const tokenEq = (a: unknown, b: string): boolean => typeof a === 'string' && a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
