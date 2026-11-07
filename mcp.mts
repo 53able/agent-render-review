@@ -4,6 +4,7 @@
 // The agent has no tool to accept, discard, approve a final render or approve an adoption.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { TextContent, ImageContent } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { spawn, execFile } from 'node:child_process';
 import fs from 'node:fs';
@@ -15,10 +16,11 @@ const argv = process.argv.slice(2);
 const i = argv.indexOf('--project');
 const PROJECT = fs.realpathSync(path.resolve(i >= 0 ? argv[i + 1] : process.cwd()));
 const SERVER_FILE = path.join(PROJECT, '.vork', 'server.json');
-const log = (...a) => process.stderr.write(`[vork-mcp] ${a.join(' ')}\n`); // stdout is the MCP channel
+const log = (...a: unknown[]) => process.stderr.write(`[vork-mcp] ${a.join(' ')}\n`); // stdout is the MCP channel
 
-let conn = null;
-async function ping(c) {
+interface Conn { url: string; agentToken: string; project?: string }
+let conn: Conn | null = null;
+async function ping(c: Conn) {
   try { const r = await fetch(`${c.url}/api/agent/status`, { headers: { authorization: `Bearer ${c.agentToken}` }, signal: AbortSignal.timeout(2000) }); return r.ok; }
   catch { return false; }
 }
@@ -42,20 +44,21 @@ async function director() {
   throw new Error(`Director did not start; see ${path.join(PROJECT, '.vork', 'server.log')}`);
 }
 
-async function call(method, route, body) {
+async function call(method: string, route: string, body?: unknown) {
   const c = await director();
   const r = await fetch(`${c.url}${route}`, {
     method, headers: { authorization: `Bearer ${c.agentToken}`, ...(body ? { 'content-type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(300_000),
   });
-  const json = await r.json().catch(() => ({}));
+  const json: any = await r.json().catch(() => ({}));
   return { status: r.status, ok: r.ok, json, url: c.url };
 }
 
-const text = (t) => ({ type: 'text', text: typeof t === 'string' ? t : JSON.stringify(t, null, 2) });
-const image = (file) => ({ type: 'image', data: fs.readFileSync(file).toString('base64'), mimeType: 'image/png' });
-const fail = (msg, extra) => ({ isError: true, content: [text(extra ? `${msg}\n${JSON.stringify(extra, null, 2)}` : msg)] });
-const renderText = (r) => r && {
+const text = (t: unknown): TextContent => ({ type: 'text', text: typeof t === 'string' ? t : JSON.stringify(t, null, 2) });
+const image = (file: string): ImageContent => ({ type: 'image', data: fs.readFileSync(file).toString('base64'), mimeType: 'image/png' });
+const fail = (msg: string, extra?: unknown) => ({ isError: true, content: [text(extra ? `${msg}\n${JSON.stringify(extra, null, 2)}` : msg)] });
+interface RenderInfo { profile: string; seconds: number; width: number; height: number; exposure: { mean: number; clipped: number; near_black: number }; objects: string[]; warnings: string[]; file?: string }
+const renderText = (r: RenderInfo | null | undefined) => r && {
   profile: r.profile, seconds: r.seconds, size: `${r.width}x${r.height}`,
   exposure: { mean: +r.exposure.mean.toFixed(3), clipped_pct: +(r.exposure.clipped * 100).toFixed(2), near_black_pct: +(r.exposure.near_black * 100).toFixed(2) },
   object_ids: r.objects, warnings: r.warnings,
@@ -87,7 +90,7 @@ server.registerTool('vork_help', {
   inputSchema: { topic: z.string().regex(/^[a-z-]+$/).optional(), field: z.string().regex(/^[A-Za-z0-9_.\[\]]+$/).optional() },
 }, async ({ topic, field }) => {
   const args = field ? ['help', 'field', field] : topic ? ['help', topic] : ['help'];
-  const out = await new Promise((ok) => execFile('vork', args, { maxBuffer: 4e6 }, (e, so, se) => ok(e ? `${so}${se}` : so)));
+  const out = await new Promise<string>((ok) => execFile('vork', args, { maxBuffer: 4e6 }, (e, so, se) => ok(e ? `${so}${se}` : so)));
   return { content: [text(out)] };
 });
 
@@ -118,7 +121,7 @@ server.registerTool('propose_scene', {
 }, async (args) => {
   const r = await call('POST', '/api/agent/propose', args);
   if (!r.ok) return fail(`Proposal rejected (${r.json.error || r.status}). No version was created.`, { blockers: r.json.blockers, vork_log_tail: r.json.log?.slice(-1500) });
-  const content = [text({ version: r.json.version, status: r.json.status, head: r.json.head, diff: r.json.diff, flags: r.json.flags, render: renderText(r.json.render), render_error: r.json.renderError, review_url: r.url })];
+  const content: (TextContent | ImageContent)[] = [text({ version: r.json.version, status: r.json.status, head: r.json.head, diff: r.json.diff, flags: r.json.flags, render: renderText(r.json.render), render_error: r.json.renderError, review_url: r.url })];
   if (r.json.render?.file) content.push(image(r.json.render.file));
   return { content };
 });
