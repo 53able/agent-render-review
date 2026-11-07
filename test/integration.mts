@@ -740,7 +740,7 @@ await check('#16 cancelling a job kills its render process and the render is not
   } finally { releaseRenders(); }
 });
 
-await check('AC-01 nothing new was written under vork-director/runs', async () => {
+await check('AC-01 nothing new was written under render-director/runs', async () => {
   const after = fs.existsSync(path.join(ROOT, 'runs')) ? JSON.stringify(fs.readdirSync(path.join(ROOT, 'runs'))) : '[]';
   assert.equal(after, runsBefore);
 });

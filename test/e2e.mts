@@ -34,8 +34,8 @@ async function startDirector(args: string[], env: Record<string, string> = {}) {
   const p = spawn(process.execPath, [path.join(ROOT, 'server.mts'), ...args], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
   procs.push(p); let out = '';
   p.stdout.on('data', (d) => (out += d)); p.stderr.on('data', (d) => (out += d));
-  for (let i = 0; i < 80 && !/vork Director on (http:\/\/\S+)/.test(out); i++) await sleep(150);
-  const m = out.match(/vork Director on (http:\/\/\S+)/); if (!m) throw new Error(`Director did not start:\n${out}`);
+  for (let i = 0; i < 80 && !/Render Director on (http:\/\/\S+)/.test(out); i++) await sleep(150);
+  const m = out.match(/Render Director on (http:\/\/\S+)/); if (!m) throw new Error(`Director did not start:\n${out}`);
   return m[1];
 }
 const browser = await chromium.launch({ executablePath: CHROME, headless: true });

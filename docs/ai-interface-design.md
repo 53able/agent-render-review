@@ -1,4 +1,4 @@
-# AIインターフェース設計／レビュー: vork Director
+# AIインターフェース設計／レビュー: Render Director
 
 ## 1. 結論
 
