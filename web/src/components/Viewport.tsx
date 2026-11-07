@@ -114,7 +114,7 @@ export function Viewport() {
     // The object under the pointer belongs to what was drawn: another version, profile or the page drops it and its tip
     // (the pointer may not move again before the next click).
     { const s = get(); const view = `${viewV(s).id}:${s.profile}:${s.onPage}`;
-      if (view !== g.current.view) { g.current.view = view; g.current.hover = null; if (tipRef.current) tipRef.current.hidden = true; } }
+      if (view !== g.current.view) { g.current.view = view; g.current.hover = null; g.current.ids = null; if (tipRef.current) tipRef.current.hidden = true; } }
     if (get().onPage) return drawPage(seq);
     const cv = cvRef.current!, ov = ovRef.current!;
     const s = get(); const v = viewV(s); const r = v.renders[s.profile];

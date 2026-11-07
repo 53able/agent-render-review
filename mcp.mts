@@ -45,7 +45,7 @@ async function director() {
   // Checked with lstat before open, as src/log.mts does, and again on the open file in case the name was swapped.
   const replaced = () => {
     try { fs.unlinkSync(LOG); } catch { try { fs.rmdirSync(LOG); } catch {} }
-    let gone = false; try { fs.lstatSync(LOG); } catch { gone = true; }
+    let gone = false; try { fs.lstatSync(LOG); } catch (e) { gone = (e as NodeJS.ErrnoException).code === 'ENOENT'; }
     return !gone
       ? new Error(`Director was not started: ${LOG} is not a plain file with one link and could not be removed. Remove it, then call the tool again.`)
       : new Error(`Director was not started: ${LOG} was not a plain file with one link, so it was removed. Call the tool again.`);

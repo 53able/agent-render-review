@@ -825,7 +825,9 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     assert.equal(await isHidden(page, '#tip'), true);
     await page.mouse.move(0, 0);
   });
-  const draftImage = async (id: string) => new URL(((await versionsOf(page)).find((v) => v.id === id)!.renders.draft as { image: string }).image, url).href;
+  const draftImage = async (id: string) => { // the version appears before its draft render finishes
+    for (let i = 0; i < 200; i++) { const d = (await versionsOf(page)).find((v) => v.id === id)?.renders.draft as { image: string } | undefined; if (d?.image) return new URL(d.image, url).href; await sleep(150); }
+    throw new Error(`no draft render for ${id}`); };
   await check('a draw that a newer draw replaced does not report its failure', async () => {
     assert.ok(editFailed && editMoved, 'needs the two versions made above');
     const slow = await draftImage(editFailed); const match = (u: URL) => u.href === slow;
