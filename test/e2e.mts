@@ -198,6 +198,55 @@ const canvasPoint = async (page: Page, spot: { fx: number; fy: number }) => { co
     } finally { page.off('request', count); }
   });
   await check('AC-12 standalone: the always-present elements are in the DOM', () => assertAlwaysPresent(page));
+  // UI plan AC-11: what is inside the viewport is judged as a render, so its colours must not follow the page theme.
+  await check('UI AC-11 standalone: viewport colours are the same in the light and the dark theme', async () => {
+    const styles = () => page.evaluate(() => {
+      const of = (sel: string, props: string[]) => {
+        const el = document.querySelector(sel); if (!el) throw new Error(`${sel} is missing`);
+        const cs = getComputedStyle(el); return props.map((p) => `${sel} ${p}: ${cs.getPropertyValue(p)}`);
+      };
+      return [
+        ...of('#viewport', ['background-color']), ...of('#canvas', ['background-color']),
+        ...of('#tip', ['color', 'background-color', 'border-top-color']), ...of('#empty', ['color', 'background-color']),
+        ...of('#wipe [data-slot=slider-track]', ['background-color']), ...of('#wipe [data-slot=slider-range]', ['background-color']),
+        ...of('#wipe [role=slider]', ['background-color', 'border-top-color']),
+      ];
+    });
+    try {
+      await page.emulateMedia({ colorScheme: 'light' });
+      await page.waitForFunction(() => !document.documentElement.classList.contains('dark'), null, { timeout: 3000 });
+      const light = await styles();
+      await page.emulateMedia({ colorScheme: 'dark' });
+      await page.waitForFunction(() => document.documentElement.classList.contains('dark'), null, { timeout: 3000 });
+      const dark = await styles();
+      assert.deepEqual(dark, light);
+      assert.ok(light.includes('#viewport background-color: rgb(0, 0, 0)'), light.join('\n'));
+    } finally { await page.emulateMedia({ colorScheme: 'light' }); }
+  });
+  await check('standalone: the compare wipe thumb has an accessible name', async () => {
+    assert.equal(await page.getAttribute('#wipe [role=slider]', 'aria-label'), 'Compare wipe position');
+  });
+  // UI plan AC-9: the theme follows prefers-color-scheme, is right before first paint and changes without a reload.
+  await check('UI AC-9: the dark class follows the colour scheme from DOMContentLoaded on and changes without a reload', async () => {
+    const themed = await newPage();
+    try {
+      await themed.addInitScript(() => {
+        document.addEventListener('DOMContentLoaded', () => { (window as any).__darkAtDCL = document.documentElement.classList.contains('dark'); });
+      });
+      for (const scheme of ['dark', 'light'] as const) {
+        await themed.emulateMedia({ colorScheme: scheme });
+        await themed.goto(url); // unpaired is enough: the theme does not depend on the session
+        assert.equal(await themed.evaluate(() => (window as any).__darkAtDCL), scheme === 'dark', `dark class at DOMContentLoaded (${scheme})`);
+      }
+      await themed.evaluate(() => { (window as any).__sameDocument = true; });
+      await themed.emulateMedia({ colorScheme: 'dark' });
+      await themed.waitForFunction(() => document.documentElement.classList.contains('dark'), null, { timeout: 3000 });
+      await themed.emulateMedia({ colorScheme: 'light' });
+      await themed.waitForFunction(() => !document.documentElement.classList.contains('dark'), null, { timeout: 3000 });
+      assert.equal(await themed.evaluate(() => (window as any).__sameDocument), true, 'no reload');
+      assert.deepEqual(themed.errors, []);
+    } finally { await themed.close(); }
+  });
   if (process.env.E2E_AGENT === '1') {
     await check('AC-11 standalone: built-in agent proposal can be discarded', async () => {
       await page.fill('#instruction', 'rimライトを強めて輪郭を際立たせる'); await page.click('#askBtn'); await sleep(800);

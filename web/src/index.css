@@ -1,0 +1,185 @@
+@import "tailwindcss" source("..");
+@import "tw-animate-css";
+
+/*
+ * Variants the generated components in components/ui/ rely on. Copied from
+ * shadcn's `shadcn/tailwind.css` instead of importing it, so the shadcn CLI
+ * (and its dependency tree) is not needed at build time.
+ */
+@custom-variant dark (&:is(.dark *));
+
+@custom-variant data-open {
+  &:where([data-state="open"]),
+  &:where([data-open]:not([data-open="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-closed {
+  &:where([data-state="closed"]),
+  &:where([data-closed]:not([data-closed="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-checked {
+  &:where([data-state="checked"]),
+  &:where([data-checked]:not([data-checked="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-unchecked {
+  &:where([data-state="unchecked"]),
+  &:where([data-unchecked]:not([data-unchecked="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-selected {
+  &:where([data-selected="true"]) {
+    @slot;
+  }
+}
+
+@custom-variant data-disabled {
+  &:where([data-disabled="true"]),
+  &:where([data-disabled]:not([data-disabled="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-active {
+  &:where([data-state="active"]),
+  &:where([data-active]:not([data-active="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-horizontal {
+  &:where([data-orientation="horizontal"]) {
+    @slot;
+  }
+}
+
+@custom-variant data-vertical {
+  &:where([data-orientation="vertical"]) {
+    @slot;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-agent: var(--agent);
+  --color-human: var(--human);
+  --color-warn: var(--warn);
+  --color-ok: var(--ok);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+/*
+ * Theme tokens, in hex so test/contrast.mts can check them. .dark carries the original dark palette
+ * (public/style.css:1-6); :root (light) is chosen to pass the contrast table of the plan (AC-10).
+ * The viewport (#000 background, #tip, #empty, #wipe, canvas) does not use these; see lib/canvas-colors.ts.
+ */
+:root {
+  --radius: 0.5rem;
+  --background: #ffffff;
+  --foreground: #14171c;
+  --card: #f6f7f9;
+  --card-foreground: #14171c;
+  --popover: #ffffff;
+  --popover-foreground: #14171c;
+  --primary: #0b6b78;
+  --primary-foreground: #ffffff;
+  --secondary: #eceef1;
+  --secondary-foreground: #14171c;
+  --muted: #eceef1;
+  --muted-foreground: #59616d;
+  --accent: #eceef1;
+  --accent-foreground: #14171c;
+  --destructive: #c4262e;
+  --border: #dde1e6;
+  --input: #868e99;
+  --ring: #0b7f8c;
+  --agent: #6a46d1;
+  --human: #1f62a8;
+  --warn: #8a5800;
+  --ok: #1c7a43;
+  color-scheme: light;
+}
+
+.dark {
+  --background: #0d0f12;
+  --foreground: #e6e8eb;
+  --card: #14171c;
+  --card-foreground: #e6e8eb;
+  --popover: #14171c;
+  --popover-foreground: #e6e8eb;
+  --primary: #3ee6f0;
+  --primary-foreground: #04272a;
+  --secondary: #1f252d;
+  --secondary-foreground: #e6e8eb;
+  --muted: #1b1f26;
+  --muted-foreground: #8b939e;
+  --accent: #1f252d;
+  --accent-foreground: #e6e8eb;
+  --destructive: #ff6b6b;
+  --border: #262b33;
+  --input: #5d6672;
+  --ring: #3ee6f0;
+  --agent: #b39bff;
+  --human: #7cc4ff;
+  --warn: #f2b84b;
+  --ok: #5fd38d;
+  color-scheme: dark;
+}
+
+/* System fonts only (Tailwind's default font-sans stack); no web fonts. */
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  /* Section headings as in public/style.css:10 */
+  h2 {
+    margin: 0 0 8px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+}
+
+@layer components {
+  .hint {
+    margin: 6px 0;
+    font-size: 11.5px;
+    color: var(--muted-foreground);
+  }
+}
