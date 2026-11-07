@@ -9,11 +9,15 @@ import type { Proposer } from '../src/director.mts';
 import type { Renderer, RenderOutcome } from '../src/vork.mts';
 import type { Scene, Version } from '../src/policy.mts';
 import { sha256 } from '../src/policy.mts';
+import { setupLogging, shutdownLogging, withJob } from '../src/log.mts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const starter = JSON.parse(fs.readFileSync(path.join(ROOT, 'scenes', 'starter.json'), 'utf8')) as Scene;
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vd-director-')));
 let pass = 0, failures = 0, n = 0;
+// Every diagnostic event of this file, for the audit forwarding checks (#80).
+const logged: Record<string, unknown>[] = [];
+setupLogging({ dir: path.join(tmp, 'log'), testSink: (e) => logged.push(e) });
 async function check(name: string, fn: () => Promise<void>) {
   try { await fn(); pass++; console.log(`PASS ${name}`); }
   catch (e: any) { failures++; console.log(`FAIL ${name}\n     ${e.stack?.split('\n').slice(0, 3).join('\n     ')}`); }
@@ -429,6 +433,75 @@ await check('#17 policy.mts and director.mts do not load node:http, node:child_p
   assert.ok(importsOf(path.join(ROOT, 'src', 'preview.mts')).includes('playwright-core'));
 });
 
+await check('#80 T4 an instruction reaches the log only as its length, also through a proposer error', async () => {
+  const SECRET = 'UNIQUE-INSTR-7f3a'; let fail = false;
+  const proposer: Proposer = async () => {
+    if (fail) throw new Error(`claude exited 1: ...${SECRET}`);
+    return { out: { interpretation: 'blue', assumptions: [], clarifying_question: null, claimed_changes: [], scene: withColor([0, 0, 0.8]) }, cost: 0, ms: 1 };
+  };
+  const { d } = setup({ proposer }); const from = logged.length;
+  const ok = await waitJob(d.startPropose({ baseId: 'v001', instruction: SECRET }));
+  assert.equal(ok.status, 'done', JSON.stringify(ok));
+  fail = true;
+  const bad = await waitJob(d.startPropose({ baseId: 'v001', instruction: SECRET }));
+  assert.equal(bad.status, 'failed');
+  const evs = logged.slice(from);
+  assert.ok(d.state.audit.some((a) => a.instruction === SECRET), 'state.json keeps the instruction');
+  for (const e of evs) assert.ok(!JSON.stringify(e).includes(SECRET), `leaked in ${JSON.stringify(e)}`);
+  const proposed = evs.find((e) => e.auditEvent === 'proposed')!;
+  assert.equal(proposed.instructionLen, SECRET.length); assert.equal('instruction' in proposed, false);
+  const err = evs.find((e) => e.auditEvent === 'agent_error')!;
+  assert.deepEqual([err.jobId, err.errorType, 'error' in err], [bad.id, 'Error', false]);
+  const audited = d.state.audit.find((a) => a.event === 'agent_error')!;
+  assert.deepEqual([audited.jobId, audited.errorType], [bad.id, 'Error']);
+});
+
+await check('#80 T5 a cancelled job keeps job = kind in the audit and adds jobId', async () => {
+  const { d, fake } = setup(); const from = logged.length;
+  const release = fake.hold(); const job = d.startRender({ versionId: 'v001', profile: 'draft', ticket: '' }); await tick();
+  d.cancelJob(job.id); release(); await tick();
+  const a = d.state.audit.find((x) => x.event === 'cancelled')!;
+  assert.deepEqual([a.job, a.jobId, a.version], ['render', job.id, 'v001']);
+  const e = logged.slice(from).find((x) => x.auditEvent === 'cancelled')!;
+  assert.deepEqual([e.event, e.job, e.jobId], ['audit', 'render', job.id]);
+});
+
+await check('#80 final_rendered and adopted carry the jobId; free text is not copied to the log', async () => {
+  const { d } = setup({ ade: true }); const from = logged.length;
+  const render = await waitJob(d.startRender({ versionId: 'v001', profile: 'final', ticket: d.planFinal('v001').ticket }));
+  assert.equal(d.state.audit.find((a) => a.event === 'final_rendered')!.jobId, render.id);
+  const { v } = await agentProposal(d, [0.4, 0.8, 0.4]);
+  const requestId = d.requestAdoption({ version: v.id, slug: 'hero', reason: 'FREE-REASON-1' });
+  const job = await waitJob(d.startAdoption(d.planAdoption({ requestId }).ticket));
+  assert.equal(job.status, 'done', JSON.stringify(job));
+  assert.deepEqual(d.state.audit.filter((a) => ['final_rendered', 'adopted'].includes(a.event)).map((a) => a.jobId), [render.id, job.id, job.id]);
+  const other = await agentProposal(d, [0.1, 0.8, 0.4]);
+  d.rejectAdoption({ requestId: d.requestAdoption({ version: other.v.id, slug: 'b' }), comment: 'FREE-COMMENT-1' });
+  d.requestAdoption({ version: other.v.id, slug: 'c' }); d.decide({ versionId: other.v.id, decision: 'discard', comment: 'FREE-COMMENT-2' });
+  const evs = logged.slice(from);
+  for (const e of evs) assert.doesNotMatch(JSON.stringify(e), /FREE-/);
+  const adopted = evs.find((e) => e.auditEvent === 'adopted')!;
+  assert.deepEqual(Object.keys(adopted).filter((k) => ['asset', 'sha256'].includes(k)), [], 'only allowlisted fields');
+  assert.equal(adopted.jobId, job.id);
+  assert.deepEqual(evs.filter((e) => e.auditEvent === 'adoption_rejected').map((e) => e.reason), [undefined, 'version discarded']);
+});
+
+await check('#80 T5b a policy-blocked agent proposal logs checkKind; kind stays the job kind', async () => {
+  const { d } = setup({ ade: true }); const from = logged.length;
+  const job = { id: 'job-t5b', kind: 'agent-propose', versionId: 'v001' };
+  await refused('unprocessable', () => withJob(job, () => d.agentPropose({ interpretation: 'x', claimed_changes: [], scene: { ...starter, programs: { p: {} } } })), /policy/);
+  assert.equal(d.state.audit.at(-1)!.kind, 'blocked', 'state.json keeps kind');
+  const e = logged.slice(from).find((x) => x.auditEvent === 'agent_proposal_rejected')!;
+  assert.deepEqual([e.checkKind, e.kind, e.jobId, e.base], ['blocked', 'agent-propose', 'job-t5b', 'v001']);
+});
+
+await check('#80 T3 every logged event has service and component', async () => {
+  assert.ok(logged.length > 0);
+  assert.ok(logged.some((e) => e.event === 'audit'));
+  for (const e of logged) { assert.equal(e.service, 'render-director', JSON.stringify(e)); assert.equal(typeof e.component, 'string', JSON.stringify(e)); }
+});
+
+shutdownLogging();
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);
