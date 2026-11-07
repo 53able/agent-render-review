@@ -74,11 +74,27 @@ await check('a state.json from an older Director is filled with defaults on load
   assert.equal(d.state.head, null); assert.deepEqual([d.state.audit, d.state.events, d.state.adoptionRequests, d.state.agentCursor], [[], [], [], 0]);
 });
 
+await check('#42 loading an older state.json drops stored URLs and paths and keeps the source of a page preview', async () => {
+  const runs = path.join(tmp, 'old42'); fs.mkdirSync(path.join(runs, 'v001'), { recursive: true });
+  fs.writeFileSync(path.join(runs, 'v001', 'scene.json'), JSON.stringify(starter));
+  const draft = { profile: 'draft', seconds: 1, width: 2, height: 1, image: '/runs/v001/draft.png?1', ids: '/runs/v001/draft.ids.bin?1', file: '/elsewhere/v001/draft.png', sha256: 'a', idsSha256: 'b', sceneHash: null, objects: [], exposure: { mean: 0, clipped: 0, near_black: 0 }, settings: { integrator: null, samples: 1, denoiser: null }, warnings: [] };
+  const pagePreviews = { final: { ok: true, matched: 1, image: '/runs/v001/page-draft.png?9', warning: null, sha256: 'c' }, previs: { ok: true, matched: 1, image: 'nonsense', warning: null, sha256: 'd' } };
+  fs.writeFileSync(path.join(runs, 'state.json'), JSON.stringify({ versions: [{ id: 'v001', parent: null, origin: 'starter', instruction: null, proposal: null, status: 'accepted', created: 'x', renders: { draft }, pagePreviews }] }));
+  const d = createDirector({ runs, project: null, renderer: fakeRenderer().renderer, starter });
+  const v = d.getV('v001')!;
+  assert.deepEqual(Object.keys(v.renders.draft!).filter((k) => ['image', 'ids', 'file'].includes(k)), []);
+  assert.deepEqual(v.pagePreviews, { final: { ok: true, matched: 1, warning: null, sha256: 'c', source: 'draft' } }, 'a preview whose source cannot be read is dropped');
+  assert.equal(d.renderFile('v001', 'draft'), path.join(runs, 'v001', 'draft.png'));
+});
+
 await check('a render is stored with hashes of the file and the object ids', async () => {
   const { d } = setup(); const v = d.getV('v001')!;
   const r = await d.renderVersion(d.newJob('render', v.id), v, 'draft');
   assert.ok(r.ok); const info = v.renders.draft!;
-  assert.match(info.image, /^\/runs\/v001\/draft\.png\?\d+$/); assert.equal(info.sceneHash, d.hashScene('v001'));
+  assert.equal(info.sceneHash, d.hashScene('v001')); assert.equal(info.sha256, sha256(fs.readFileSync(d.renderFile('v001', 'draft'))));
+  // #42: state.json keeps neither a URL nor a path, so a moved project still finds its renders
+  const saved = JSON.parse(fs.readFileSync(path.join(d.runs, 'state.json'), 'utf8')).versions[0].renders.draft;
+  for (const k of ['image', 'ids', 'file']) assert.ok(!(k in saved), `${k} is not stored`);
   assert.equal(fs.readFileSync(path.join(d.vdir('v001'), 'draft.ids.bin')).length, 4);
 });
 
@@ -122,17 +138,17 @@ await check('#15 a final render of a version discarded while it runs is not kept
 await check('#15 #26 a render that is not kept leaves the recorded files of the version as they were', async () => {
   const { d, fake } = setup(); const v = d.getV('v001')!;
   assert.ok((await d.renderVersion(d.newJob('render', v.id), v, 'final')).ok);
-  const kept = fs.readFileSync(v.renders.final!.file); assert.equal(sha256(kept), v.renders.final!.sha256);
+  const kept = fs.readFileSync(d.renderFile(v.id, 'final')); assert.equal(sha256(kept), v.renders.final!.sha256);
   await tick(); // a request made before the finished render is unregistered would share its result (#28)
   const release = fake.hold();
   const p = d.renderVersion(d.newJob('render', v.id), v, 'final');
   await tick(); v.status = 'discarded'; release();
   assert.equal((await p).ok, false);
-  assert.deepEqual(fs.readFileSync(v.renders.final!.file), kept, 'the file still has the recorded bytes');
+  assert.deepEqual(fs.readFileSync(d.renderFile(v.id, 'final')), kept, 'the file still has the recorded bytes');
   assert.deepEqual(fs.readdirSync(d.vdir('v001')).filter((f) => f.startsWith('.render-')), [], 'no render folder is left behind');
   fake.fail('boom'); v.status = 'accepted'; await tick();
   assert.equal((await d.renderVersion(d.newJob('render', v.id), v, 'final')).ok, false);
-  assert.deepEqual(fs.readFileSync(v.renders.final!.file), kept, 'a failed render changes nothing either');
+  assert.deepEqual(fs.readFileSync(d.renderFile(v.id, 'final')), kept, 'a failed render changes nothing either');
 });
 
 await check('#30 rendersQueued resolves only after the renders of the version queued so far', async () => {

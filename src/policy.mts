@@ -26,9 +26,13 @@ export interface Config { assetDir: string; pageUrl: string | null; assetUrlPatt
 export interface Exposure { mean: number; clipped: number; near_black: number }
 /** An object of the scene as vork numbers it in the object index channel. */
 export interface RenderObject { pass_index: number; name: string }
+/**
+ * A render as state.json keeps it. The file is <version folder>/<profile>.png and the URLs are made by the presenter
+ * (http.mts), so the record holds neither a path nor a URL and survives moving the project (#42).
+ */
 export interface RenderInfo {
-  profile: Profile; seconds: number; width: number; height: number; image: string; ids: string;
-  file: string; sha256: string; idsSha256?: string; sceneHash: string | null; objects: RenderObject[]; exposure: Exposure;
+  profile: Profile; seconds: number; width: number; height: number;
+  sha256: string; idsSha256?: string; sceneHash: string | null; objects: RenderObject[]; exposure: Exposure;
   settings: { integrator: unknown; samples: number; denoiser: unknown }; warnings: string[];
 }
 export interface ClaimedChange { node: string; what: string; why: string }
@@ -39,7 +43,8 @@ export interface Proposal {
   via: 'built-in' | 'mcp'; cost?: number; clarifying_question?: string | null; scene?: undefined; respondsTo?: unknown;
 }
 export type VersionStatus = 'proposed' | 'accepted' | 'discarded';
-export interface PagePreviewOk { ok: true; matched: number; image: string; warning: string | null; sha256?: string }
+/** A page preview as state.json keeps it: the screenshot is <version folder>/page-<source>.png, source being the render it used. */
+export interface PagePreviewOk { ok: true; matched: number; warning: string | null; sha256?: string; source: Profile }
 export type PagePreviewResult = { ok: false; reason: string } | PagePreviewOk;
 export interface Version {
   id: string; parent: string | null; origin: 'starter' | 'agent' | 'human'; instruction: string | null; proposal: Proposal | null;
@@ -231,9 +236,23 @@ export function settleRequest(ar: AdoptionRequest, status: 'rejected' | 'adopted
 /** Pending requests whose version is discarded (or gone), except those busy() says are being adopted. */
 export const requestsOfDiscarded = (state: DirectorState, busy: (requestId: string) => boolean): AdoptionRequest[] =>
   state.adoptionRequests.filter((ar) => ar.status === 'pending' && !isLive(state.versions.find((v) => v.id === ar.version)) && !busy(ar.id));
-/** Fills in what a state.json from an older Director lacks. */
+/**
+ * Fills in what a state.json from an older Director lacks, and drops what it kept that Director no longer stores:
+ * the URLs and the absolute path of a render, and the URL of a page preview (its source render is read from it) (#42).
+ */
 export function normalizeState(raw: Partial<DirectorState>): DirectorState {
   const state = raw as DirectorState;
   state.versions ||= []; state.head ??= null; state.audit ||= []; state.events ||= []; state.agentCursor ||= 0; state.adoptionRequests ||= [];
+  for (const v of state.versions) {
+    for (const r of Object.values(v.renders || {})) if (r) for (const k of ['image', 'ids', 'file']) delete (r as unknown as Record<string, unknown>)[k];
+    if (!v.pagePreviews) continue;
+    for (const [k, p] of Object.entries(v.pagePreviews)) {
+      const old = p as PagePreviewOk & { image?: unknown };
+      const from = typeof old.image === 'string' ? /\/page-(previs|draft|final)\.png(\?|$)/.exec(old.image)?.[1] : undefined;
+      old.source ||= from as Profile;
+      delete old.image;
+      if (!isProfile(old.source)) delete v.pagePreviews[k];
+    }
+  }
   return state;
 }

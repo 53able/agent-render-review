@@ -82,6 +82,8 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   // Check it when a request arrives, when a ticket is used, and again after every await before state changes.
   const liveV = (id: string | null | undefined): Version | undefined => { const v = getV(id); return isLive(v) ? v : undefined; };
   const vdir = (id: string) => path.join(RUNS, id);
+  /** Where a stored render of a version is; state.json does not keep the path (#42). */
+  const renderFile = (id: string, profile: Profile) => path.join(vdir(id), `${profile}.png`);
   const sceneOf = (id: string): Scene => JSON.parse(fs.readFileSync(path.join(vdir(id), 'scene.json'), 'utf8'));
   const hashScene = (id: string) => sha256(fs.readFileSync(path.join(vdir(id), 'scene.json'))).slice(0, 16);
 
@@ -162,11 +164,9 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
       const r = await renderer.render({ scene: scene || JSON.parse(sceneText!), dir: out, profile, signal: job.ac.signal });
       if (job.status === 'cancelled') return { ok: false, cancelled: true };
       if (!r.ok) return { ok: false, code: r.code, timedOut: r.timedOut, log: r.log, seconds: r.seconds };
-      const file = path.join(dir, `${profile}.png`);
-      const stamp = clock();
+      const file = renderFile(v.id, profile);
       const info: RenderInfo = {
-        profile, seconds: r.seconds, width: r.width, height: r.height, image: `/runs/${v.id}/${profile}.png?${stamp}`, ids: `/runs/${v.id}/${profile}.ids.bin?${stamp}`,
-        file: scene ? r.file : file, sha256: sha256(fs.readFileSync(r.file)), idsSha256: sha256(r.ids),
+        profile, seconds: r.seconds, width: r.width, height: r.height, sha256: sha256(fs.readFileSync(r.file)), idsSha256: sha256(r.ids),
         sceneHash: sceneText ? sha256(sceneText).slice(0, 16) : null,
         objects: r.objects, exposure: r.exposure, settings: r.settings, warnings: r.warnings,
       };
@@ -233,8 +233,8 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   };
   rejectRequestsOfDiscarded(); // requests left pending by a Director from before #27
   const finalMatches = (v: Version, hash: string) => {
-    const f = v.renders.final; if (!f || f.sceneHash !== hash || !fs.existsSync(f.file)) return false;
-    return sha256(fs.readFileSync(f.file)) === f.sha256;
+    const f = v.renders.final; const file = renderFile(v.id, 'final'); if (!f || f.sceneHash !== hash || !fs.existsSync(file)) return false;
+    return sha256(fs.readFileSync(file)) === f.sha256;
   };
   const takeTicket = <K extends Ticket['kind']>(id: string, kind: K): Extract<Ticket, { kind: K }> | null => {
     const t = tickets.get(id);
@@ -322,7 +322,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
         const targets = adoptionTargets(t.slug); // re-resolve right before writing
         if (targets.assetRel !== t.assetRel) throw new Error(`asset path changed since approval (${t.assetRel} → ${targets.assetRel}); plan again`);
         if (fs.existsSync(targets.asset) !== t.overwrites) throw new Error('the target file appeared or disappeared since approval; plan again');
-        const png = fs.readFileSync(v.renders.final!.file);
+        const png = fs.readFileSync(renderFile(v.id, 'final'));
         if (sha256(png) !== v.renders.final!.sha256) throw new Error('final.png changed after rendering; plan again');
         fs.mkdirSync(path.dirname(targets.asset), { recursive: true }); fs.mkdirSync(path.dirname(targets.manifest), { recursive: true });
         const overwrote = fs.existsSync(targets.asset);
@@ -541,7 +541,7 @@ export function createDirector({ runs: RUNS, project: PROJECT, renderer, starter
   }
 
   return {
-    mode: MODE, project: PROJECT, runs: RUNS, renderer, state, readConfig, save, audit, getV, liveV, vdir, sceneOf, hashScene, waiters, pushEvent, addVersion,
+    mode: MODE, project: PROJECT, runs: RUNS, renderer, state, readConfig, save, audit, getV, liveV, vdir, renderFile, sceneOf, hashScene, waiters, pushEvent, addVersion,
     jobs, tickets, newJob, step, failJob, renderLocks, renderVersion, validateScene, createProposal,
     adoptionJobs, requestAdoption, planAdoption, rejectAdoption, startAdoption, agentPropose, checkCanPropose, startPropose,
     cancelJob, agentRender, startRender, planFinal, feedback, decide, checkout, directEdit, rendersQueued, recordPagePreview, waitForEvents, takeEvents,

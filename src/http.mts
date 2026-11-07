@@ -116,7 +116,7 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
     const [, , page, profile, ext] = m as unknown as [string, string, string | undefined, Profile, string];
     if (page) {
       if (ext !== 'png') return null;
-      const shots = Object.values(v.pagePreviews || {}).filter((p) => p.image.split('?')[0] === `/runs/${v.id}/page-${profile}.png`);
+      const shots = Object.values(v.pagePreviews || {}).filter((p) => p.source === profile);
       if (!shots.length) return null;
       return shots.some((p) => !p.sha256) ? [] : shots.map((p) => p.sha256!);
     }
@@ -125,22 +125,20 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
     return h ? [h] : [];
   };
   // Presenter: the URLs the browser loads are made here from the version, the profile and the recorded hash, so a
-  // URL changes exactly when the file does (#17). state.json still stores image and ids for older readers; a record
-  // without a hash (from before #26) keeps its stored URL.
-  const stamp = (h: string | undefined) => h && h.slice(0, 16);
-  const presentRender = (id: string, r: RenderInfo): RenderInfo => ({
-    ...r,
-    image: r.sha256 ? `/runs/${id}/${r.profile}.png?${stamp(r.sha256)}` : r.image,
-    ids: r.idsSha256 ? `/runs/${id}/${r.profile}.ids.bin?${stamp(r.idsSha256)}` : r.ids,
+  // URL changes exactly when the file does (#17). state.json keeps no URL (#42).
+  const stamp = (h: string | undefined) => (h ? `?${h.slice(0, 16)}` : '');
+  const presentRender = (id: string, r: RenderInfo) => ({
+    ...r, image: `/runs/${id}/${r.profile}.png${stamp(r.sha256)}`, ids: `/runs/${id}/${r.profile}.ids.bin${stamp(r.idsSha256)}`,
   });
-  const presentPreview = (p: PagePreviewOk): PagePreviewOk => (p.sha256 ? { ...p, image: `${p.image.split('?')[0]}?${stamp(p.sha256)}` } : p);
+  const presentPreview = (id: string, p: PagePreviewOk) => ({ ...p, image: `/runs/${id}/page-${p.source}.png${stamp(p.sha256)}` });
   const versionView = (v: Version) => {
     const base = v.parent ? sceneOf(v.parent) : null; const scene = sceneOf(v.id);
     const renders = Object.fromEntries(Object.entries(v.renders).map(([k, r]) => [k, r && presentRender(v.id, r)]));
-    const pagePreviews = v.pagePreviews && Object.fromEntries(Object.entries(v.pagePreviews).map(([k, p]) => [k, presentPreview(p)]));
+    const pagePreviews = v.pagePreviews && Object.fromEntries(Object.entries(v.pagePreviews).map(([k, p]) => [k, presentPreview(v.id, p)]));
     return { ...v, renders, pagePreviews, scene, diff: base ? diffScenes(base, scene) : [], hash: hashScene(v.id) };
   };
-  const renderSummary = (r: RenderInfo | undefined): RenderSummary | undefined => r && { profile: r.profile, seconds: r.seconds, width: r.width, height: r.height, file: r.file, exposure: r.exposure, objects: r.objects, warnings: r.warnings };
+  // file: the absolute path is made here for mcp.mts, which reads the image from it; state.json keeps no path (#42).
+  const renderSummary = (id: string, r: RenderInfo | undefined): RenderSummary | undefined => r && { profile: r.profile, seconds: r.seconds, width: r.width, height: r.height, file: director.renderFile(id, r.profile), exposure: r.exposure, objects: r.objects, warnings: r.warnings };
 
   async function handleAgent(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
     if (url.pathname === '/api/agent/status' && req.method === 'GET') {
@@ -159,11 +157,11 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
     if (url.pathname === '/api/agent/propose' && req.method === 'POST') {
       const b = await readBody<{ base?: string; interpretation?: unknown; assumptions?: unknown; claimed_changes?: unknown; scene: Scene; responds_to?: unknown }>(req);
       const { v, draft, baseId, flags } = await director.agentPropose(b);
-      return send(res, 200, { version: v.id, status: v.status, head: state.head, render: draft.ok ? renderSummary(draft.info) : null, renderError: draft.ok ? null : draft.log, diff: diffScenes(sceneOf(baseId), b.scene), flags } satisfies AgentProposeResponse);
+      return send(res, 200, { version: v.id, status: v.status, head: state.head, render: draft.ok ? renderSummary(v.id, draft.info) : null, renderError: draft.ok ? null : draft.log, diff: diffScenes(sceneOf(baseId), b.scene), flags } satisfies AgentProposeResponse);
     }
     if (url.pathname === '/api/agent/render' && req.method === 'GET') {
       const { v, render } = await director.agentRender(url.searchParams.get('version'), url.searchParams.get('profile') || 'draft');
-      return send(res, 200, { version: v.id, status: v.status, render: renderSummary(render) } satisfies AgentRenderResponse);
+      return send(res, 200, { version: v.id, status: v.status, render: renderSummary(v.id, render) } satisfies AgentRenderResponse);
     }
     if (url.pathname === '/api/agent/feedback' && req.method === 'GET') {
       const wait = Math.min(Math.max(Number(url.searchParams.get('wait') || 60), 0), 120); const t0 = Date.now();
@@ -275,7 +273,7 @@ export function createHttp({ director, root: ROOT, publicDir: PUBLIC, vorkVersio
         if (!isProfile(profile)) return send(res, 400, { error: 'profile must be previs, draft or final' });
         const r = await pagePreview(director, v, profile);
         if (r.ok) director.recordPagePreview(v, profile, r);
-        return send(res, 200, r.ok ? presentPreview(r) : r);
+        return send(res, 200, r.ok ? presentPreview(v.id, r) : r);
       }
 
       if (req.method === 'POST' && url.pathname === '/api/edit') {

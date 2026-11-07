@@ -19,7 +19,7 @@ export async function pagePreview(director: Director, v: Version, profile: Profi
   if (!render) return { ok: false, reason: 'render the version first' };
   // The bytes must be the ones recorded when the render finished; otherwise a render started after the wait is writing it.
   let png: Buffer;
-  try { png = fs.readFileSync(render.file); } catch { return { ok: false, reason: 'the render file is missing; render the version again' }; }
+  try { png = fs.readFileSync(director.renderFile(v.id, render.profile)); } catch { return { ok: false, reason: 'the render file is missing; render the version again' }; }
   if (sha256(png) !== render.sha256) return { ok: false, reason: 'the render is being updated; try again when it finishes' };
   const browser = await chromium.launch({ executablePath: exe, headless: true });
   try {
@@ -30,6 +30,6 @@ export async function pagePreview(director: Director, v: Version, profile: Profi
     catch (e: any) { return { ok: false, reason: `could not open ${config.pageUrl}: ${String(e.message).split('\n')[0]}` }; }
     const file = path.join(director.vdir(v.id), `page-${render.profile}.png`);
     const shot = await page.screenshot({ path: file, fullPage: false });
-    return { ok: true, matched, sha256: sha256(shot), image: `/runs/${v.id}/page-${render.profile}.png?${Date.now()}`, warning: matched ? null : `no request matched ${config.assetUrlPattern}; the screenshot shows the page without the candidate` };
+    return { ok: true, matched, sha256: sha256(shot), source: render.profile, warning: matched ? null : `no request matched ${config.assetUrlPattern}; the screenshot shows the page without the candidate` };
   } finally { await browser.close(); }
 }
