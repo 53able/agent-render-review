@@ -91,12 +91,19 @@ const PROFILES: Record<Profile, string> = { previs: 'std/previs', draft: 'std/dr
 const MAX_W = 1920, MAX_H = 1080;
 const SAFE_FILE_EXT = /\.(glb|png|jpe?g|hdr|exr|tiff?)$/i;
 const SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/;
+// Own keys only: a plain PROFILES[x] lookup would also accept inherited keys such as toString or constructor.
+const isProfile = (x: unknown): x is Profile => typeof x === 'string' && Object.hasOwn(PROFILES, x);
 const DEFAULT_CONFIG: Config = { assetDir: 'public/vork', pageUrl: null, assetUrlPattern: null };
 
 const argv = process.argv.slice(2);
 const arg = (name: string): string | undefined => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
 
 // ---------- pure helpers (no state; used by tests) ----------
+
+/** A client error whose message is safe to return as a 400 response. */
+class BadRequest extends Error {}
+const isPlainObject = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x);
+const isClaimedChange = (x: unknown): x is ClaimedChange => isPlainObject(x) && typeof x.node === 'string' && typeof x.what === 'string' && typeof x.why === 'string';
 
 const sha256 = (data: string | Buffer): string => crypto.createHash('sha256').update(data).digest('hex');
 
@@ -538,13 +545,13 @@ ${VORK_HELP}`;
     tickets.delete(id); return t as Extract<Ticket, { kind: K }>;
   };
 
-  function adoptionTargets(slug: string) {
+  function adoptionTargets(slug: unknown) {
     if (!PROJECT) throw new Error('adoption needs --project');
-    if (!SLUG.test(slug || '')) throw new Error('slug must match [a-z0-9][a-z0-9-]{0,63}');
+    if (typeof slug !== 'string' || !SLUG.test(slug)) throw new Error('slug must match [a-z0-9][a-z0-9-]{0,63}');
     const assetDir = String(readConfig().assetDir || DEFAULT_CONFIG.assetDir);
     const assetRel = path.posix.join(assetDir.replace(/\\/g, '/'), `${slug}.png`);
     const manifestRel = path.posix.join('.vork', 'adopted', `${slug}.json`);
-    return { assetRel, manifestRel, asset: resolveInside(PROJECT, assetRel), manifest: resolveInside(PROJECT, manifestRel) };
+    return { slug, assetRel, manifestRel, asset: resolveInside(PROJECT, assetRel), manifest: resolveInside(PROJECT, manifestRel) };
   }
 
   // ---------- page preview: real page, candidate substituted by request interception ----------
@@ -586,7 +593,16 @@ ${VORK_HELP}`;
     res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...headers });
     res.end(type === 'application/json' ? JSON.stringify(body) : body);
   };
-  const readBody = <T,>(req: http.IncomingMessage): Promise<T> => new Promise((ok, bad) => { let b = ''; req.on('data', (d) => { b += d; if (b.length > 4e6) req.destroy(); }); req.on('end', () => { try { ok(b ? JSON.parse(b) : {}); } catch (e) { bad(e); } }); });
+  // The type argument is not checked at run time; each endpoint still validates the fields it reads.
+  const readBody = <T,>(req: http.IncomingMessage): Promise<T> => new Promise((ok, bad) => {
+    let b = ''; req.on('data', (d) => { b += d; if (b.length > 4e6) req.destroy(); });
+    req.on('end', () => {
+      let parsed: unknown;
+      try { parsed = b ? JSON.parse(b) : {}; } catch { return bad(new BadRequest('request body is not valid JSON')); }
+      if (!isPlainObject(parsed)) return bad(new BadRequest('request body must be a JSON object'));
+      ok(parsed as T);
+    });
+  });
   const MIME: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.bin': 'application/octet-stream', '.json': 'application/json' };
   const SESSION_COOKIE = () => `vd_${PORT}`;
   const hasSession = (req: http.IncomingMessage) => { const c = cookie(req, SESSION_COOKIE()); return typeof c === 'string' && sessions.has(c); };
@@ -625,17 +641,18 @@ ${VORK_HELP}`;
       const baseId = b.base || state.head; const base = getV(baseId);
       if (!base || base.status === 'discarded') return send(res, 400, { error: 'base must be an existing, not discarded version' });
       if (typeof b.interpretation !== 'string' || !b.interpretation.trim() || !Array.isArray(b.claimed_changes)) return send(res, 400, { error: 'interpretation and claimed_changes are required' });
+      if (!b.claimed_changes.every(isClaimedChange)) return send(res, 400, { error: 'each claimed_changes item must be { node, what, why } with string values' });
       const job = newJob('agent-propose', baseId!);
       const check = await validateScene(job, b.scene);
       if (!check.ok) { audit('agent_proposal_rejected', { kind: check.kind, base: baseId }); return send(res, 422, { error: check.kind === 'blocked' ? 'policy' : 'vork rejected the scene', blockers: check.policy?.blockers || [], log: check.log || null, version: null }); }
-      const proposal: Proposal = { interpretation: b.interpretation, assumptions: Array.isArray(b.assumptions) ? b.assumptions.map(String) : [], claimed_changes: b.claimed_changes, policy: check.policy, context: b.responds_to ? [`responds to feedback #${b.responds_to}`] : [], via: 'mcp', respondsTo: b.responds_to ?? null };
+      const proposal: Proposal = { interpretation: b.interpretation, assumptions: Array.isArray(b.assumptions) ? b.assumptions.map(String) : [], claimed_changes: b.claimed_changes.map(({ node, what, why }) => ({ node, what, why })), policy: check.policy, context: b.responds_to ? [`responds to feedback #${b.responds_to}`] : [], via: 'mcp', respondsTo: b.responds_to ?? null };
       const { v, draft } = await createProposal(job, { baseId, scene: b.scene, instruction: b.interpretation, proposal });
       return send(res, 200, { version: v.id, status: v.status, head: state.head, render: draft.ok ? renderSummary(draft.info) : null, renderError: draft.ok ? null : draft.log, diff: diffScenes(sceneOf(baseId!), b.scene), flags: check.policy.flags });
     }
     if (url.pathname === '/api/agent/render' && req.method === 'GET') {
-      const v = getV(url.searchParams.get('version') || state.head); const profile = url.searchParams.get('profile') as Profile | null || 'draft';
+      const v = getV(url.searchParams.get('version') || state.head); const profile = url.searchParams.get('profile') || 'draft';
       if (!v) return send(res, 404, { error: 'no such version' });
-      if (!PROFILES[profile]) return send(res, 400, { error: 'profile must be previs, draft or final' });
+      if (!isProfile(profile)) return send(res, 400, { error: 'profile must be previs, draft or final' });
       if (!v.renders[profile]) {
         if (profile === 'final') return send(res, 403, { error: 'final renders need human approval in Director' });
         const r = await renderVersion(newJob('agent-render', v.id), v, profile);
@@ -656,13 +673,14 @@ ${VORK_HELP}`;
       return send(res, 200, { timeout: false, events: evs });
     }
     if (url.pathname === '/api/agent/adoption-request' && req.method === 'POST') {
-      const b = await readBody<{ version: string; slug: string; reason?: unknown }>(req); const v = getV(b.version);
+      const b = await readBody<{ version: string; slug: unknown; reason?: unknown }>(req); const v = getV(b.version);
       if (!PROJECT) return send(res, 409, { error: 'adoption needs Director started with --project' });
       if (!v || v.status === 'discarded') return send(res, 400, { error: 'version must exist and not be discarded' });
-      try { adoptionTargets(b.slug); } catch (e: any) { return send(res, 400, { error: e.message }); }
+      let slug: string;
+      try { ({ slug } = adoptionTargets(b.slug)); } catch (e: any) { return send(res, 400, { error: e.message }); }
       const reqId = `a${String(state.adoptionRequests.length + 1).padStart(3, '0')}`;
-      state.adoptionRequests.push({ id: reqId, version: v.id, slug: b.slug, reason: String(b.reason || ''), status: 'pending', t: new Date().toISOString() });
-      audit('adoption_requested', { request: reqId, version: v.id, slug: b.slug });
+      state.adoptionRequests.push({ id: reqId, version: v.id, slug, reason: String(b.reason || ''), status: 'pending', t: new Date().toISOString() });
+      audit('adoption_requested', { request: reqId, version: v.id, slug });
       return send(res, 200, { request: reqId, status: 'pending_human_approval', note: 'A human must approve this in Director. Call wait_for_feedback to learn the outcome.' });
     }
     return send(res, 404, { error: 'unknown agent endpoint' });
@@ -711,8 +729,8 @@ ${VORK_HELP}`;
       }
 
       if (req.method === 'POST' && url.pathname === '/api/render') {
-        const { versionId, profile, ticket } = await readBody<{ versionId: string; profile: Profile; ticket: string }>(req); const v = getV(versionId);
-        if (!v || !PROFILES[profile]) return send(res, 400, { error: 'bad version or profile' });
+        const { versionId, profile, ticket } = await readBody<{ versionId: string; profile: unknown; ticket: string }>(req); const v = getV(versionId);
+        if (!v || !isProfile(profile)) return send(res, 400, { error: 'bad version or profile' });
         if (profile === 'final') {
           const t = takeTicket(ticket, 'final');
           if (!t || t.versionId !== versionId) return send(res, 403, { error: 'final render needs a fresh approval for this exact scene' });
@@ -779,17 +797,17 @@ ${VORK_HELP}`;
       }
 
       if (req.method === 'POST' && url.pathname === '/api/adopt/plan') {
-        const { requestId, slug: slugOverride } = await readBody<{ requestId: string; slug?: string }>(req);
+        const { requestId, slug: slugOverride } = await readBody<{ requestId: string; slug?: unknown }>(req);
         const ar = state.adoptionRequests.find((a) => a.id === requestId && a.status === 'pending');
         if (!ar) return send(res, 400, { error: 'no pending adoption request with that id' });
         const v = getV(ar.version); if (!v || v.status === 'discarded') return send(res, 409, { error: 'version is gone or discarded' });
-        const slug = slugOverride || ar.slug; let t;
-        try { t = adoptionTargets(slug); } catch (e: any) { return send(res, 400, { error: e.message }); }
+        let t;
+        try { t = adoptionTargets(slugOverride || ar.slug); } catch (e: any) { return send(res, 400, { error: e.message }); }
         const pol = policyCheck(sceneOf(v.id)); if (pol.blockers.length) return send(res, 409, { error: pol.blockers.join('; ') });
         const sceneText = fs.readFileSync(path.join(vdir(v.id), 'scene.json'), 'utf8');
         const hash = sha256(sceneText).slice(0, 16);
         const overwrites = fs.existsSync(t.asset);
-        const reusable = finalMatches(v, hash);
+        const reusable = finalMatches(v, hash); const { slug } = t;
         const ticket = issueTicket({ kind: 'adopt', versionId: v.id, hash, requestId, slug, sceneText, assetRel: t.assetRel, overwrites });
         return send(res, 200, {
           ticket, requestId, versionId: v.id, versionStatus: v.status, hash, slug, reason: ar.reason,
@@ -849,10 +867,11 @@ ${VORK_HELP}`;
       }
 
       if (req.method === 'POST' && url.pathname === '/api/preview') {
-        const { versionId, profile } = await readBody<{ versionId: string; profile?: Profile }>(req); const v = getV(versionId);
+        const { versionId, profile = 'draft' } = await readBody<{ versionId: string; profile?: unknown }>(req); const v = getV(versionId);
         if (!v) return send(res, 400, { error: 'bad version' });
-        const r = await pagePreview(v, profile || 'draft');
-        if (r.ok) { v.pagePreviews = { ...(v.pagePreviews || {}), [profile || 'draft']: r }; save(); }
+        if (!isProfile(profile)) return send(res, 400, { error: 'profile must be previs, draft or final' });
+        const r = await pagePreview(v, profile);
+        if (r.ok) { v.pagePreviews = { ...(v.pagePreviews || {}), [profile]: r }; save(); }
         return send(res, 200, r);
       }
 
@@ -864,10 +883,11 @@ ${VORK_HELP}`;
         const allowed: Record<string, ['mat' | 'light', (x: unknown) => boolean] | undefined> = { base_color: ['mat', isRGB], emission_luminance: ['mat', num(0, 1000)], specular_roughness: ['mat', num(0, 1)], energy: ['light', num(0, 100000)], color: ['light', isRGB] };
         const baseV = getV(baseId);
         if (!baseV || baseV.status !== 'accepted') return send(res, 400, { error: 'direct edits start from an accepted version' });
-        if (!allowed[field] || !allowed[field][1](value)) return send(res, 400, { error: 'unsupported edit or value out of range' });
+        const spec = typeof field === 'string' && Object.hasOwn(allowed, field) ? allowed[field] : undefined;
+        if (!spec || !spec[1](value)) return send(res, 400, { error: 'unsupported edit or value out of range' });
         const scene = sceneOf(baseId); const n = scene.nodes.find((x) => x.name === node);
         if (!n) return send(res, 400, { error: 'no such node' });
-        if (allowed[field][0] === 'light') { if (n.type !== 'light') return send(res, 400, { error: 'not a light' }); n[field] = value; }
+        if (spec[0] === 'light') { if (n.type !== 'light') return send(res, 400, { error: 'not a light' }); n[field] = value; }
         else { if (n.type !== 'mesh') return send(res, 400, { error: 'not a mesh' }); n.materials ||= [{}]; n.materials[0] ||= {}; n.materials[0].inputs ||= {}; n.materials[0].inputs[field] = value; }
         const pol = policyCheck(scene); if (pol.blockers.length) return send(res, 409, { error: pol.blockers.join('; ') });
         const v = addVersion({ parent: baseId, scene, origin: 'human', instruction: `${node}.${field} = ${JSON.stringify(value)}`, status: 'accepted' });
@@ -887,17 +907,23 @@ ${VORK_HELP}`;
       // static
       if (url.pathname === '/' || url.pathname === '/index.html')
         return send(res, 200, fs.readFileSync(path.join(PUBLIC, 'index.html')), MIME['.html']);
-      let file;
+      // Each route serves only its own root: render files from RUNS (session checked above), the app from PUBLIC.
+      let root, rel;
       if (url.pathname.startsWith('/runs/')) {
         if (!/^\/runs\/v\d{3}\/(previs|draft|final|page-previs|page-draft|page-final)\.(png|ids\.bin)$/.test(url.pathname)) return send(res, 404, 'not found', 'text/plain');
-        file = path.join(RUNS, url.pathname.slice(6));
-      } else file = path.join(PUBLIC, decodeURIComponent(url.pathname));
-      const real = path.resolve(file);
-      if (!(real.startsWith(PUBLIC + path.sep) || real.startsWith(RUNS + path.sep)) || !fs.existsSync(real) || !fs.statSync(real).isFile())
+        root = RUNS; rel = url.pathname.slice(6);
+      } else {
+        try { rel = decodeURIComponent(url.pathname); } catch { return send(res, 400, 'bad path', 'text/plain'); }
+        root = PUBLIC;
+      }
+      if (rel.includes('\0') || rel.split(/[\\/]/).includes('..')) return send(res, 404, 'not found', 'text/plain');
+      const real = path.resolve(root, '.' + path.sep + rel);
+      if (!real.startsWith(root + path.sep) || !fs.existsSync(real) || !fs.statSync(real).isFile())
         return send(res, 404, 'not found', 'text/plain');
       return send(res, 200, fs.readFileSync(real), MIME[path.extname(real)] || 'application/octet-stream');
     } catch (e: any) {
-      console.error(e); return send(res, 500, { error: String(e.message || e) });
+      if (e instanceof BadRequest) return send(res, 400, { error: e.message });
+      console.error(e); return send(res, 500, { error: 'internal error' });
     }
   });
 

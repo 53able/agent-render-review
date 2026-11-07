@@ -230,6 +230,71 @@ await check('AC-08 bad slugs and a symlinked asset dir escaping the project are 
   fs.rmSync(path.join(PROJECT, 'public/vork')); fs.renameSync(path.join(PROJECT, 'public/vork-real'), path.join(PROJECT, 'public/vork'));
 });
 
+// raw requests: the body is sent as given, so tests can send JSON that is not an object
+const agentToken = (): string => JSON.parse(fs.readFileSync(path.join(PROJECT, '.vork', 'server.json'), 'utf8')).agentToken;
+const raw = async (route: string, body: string, { agent = false, method = 'POST' }: { agent?: boolean; method?: string } = {}): Promise<{ status: number; json: Json }> => {
+  const headers: Record<string, string> = { 'content-type': 'application/json', ...(agent ? { authorization: `Bearer ${agentToken()}` } : { cookie: uiCookie }) };
+  const r = await fetch(`${BASE}${route}`, { method, headers, body: method === 'GET' ? undefined : body });
+  return { status: r.status, json: await r.json().catch(() => ({})) };
+};
+
+await check('#3 a body that is not a JSON object gets 400 without internal error text', async () => {
+  for (const body of ['null', '1', '"x"', '[]', 'true', '{not json']) {
+    for (const [route, agent] of [['/api/edit', false], ['/api/render', false], ['/api/agent/adoption-request', true], ['/api/agent/propose', true]] as const) {
+      const r = await raw(route, body, { agent });
+      assert.equal(r.status, 400, `${route} ${body}`);
+      assert.doesNotMatch(r.json.error, /Cannot|undefined|null \(reading/, `${route} ${body}`);
+    }
+  }
+});
+
+await check('#4 adoption-request needs a string slug; propose needs { node, what, why } strings in claimed_changes', async () => {
+  const before = (await state()).adoptionRequests.length;
+  for (const slug of [['hero'], 1, { s: 'hero' }, null]) {
+    const r = await raw('/api/agent/adoption-request', JSON.stringify({ version: 'v001', slug, reason: 'x' }), { agent: true });
+    assert.equal(r.status, 400, JSON.stringify(slug)); assert.match(r.json.error, /slug/);
+  }
+  assert.equal((await state()).adoptionRequests.length, before);
+  const versions = (await state()).versions.length;
+  for (const claimed_changes of [[1, 'x'], [{ node: 'vase', what: 'x' }], [{ node: 'vase', what: 'x', why: 2 }], [null]]) {
+    const r = await raw('/api/agent/propose', JSON.stringify({ interpretation: 'x', claimed_changes, scene: base }), { agent: true });
+    assert.equal(r.status, 400, JSON.stringify(claimed_changes)); assert.match(r.json.error, /claimed_changes/);
+  }
+  assert.equal((await state()).versions.length, versions);
+  const pending = (await state()).adoptionRequests.find((a: Json) => a.status === 'pending');
+  assert.ok(pending, 'an earlier check leaves a pending adoption request');
+  const plan = await human('/api/adopt/plan', { requestId: pending.id, slug: ['hero'] });
+  assert.equal(plan.status, 400); assert.match(plan.json.error, /slug/);
+});
+
+await check('#2 inherited keys (toString, constructor, __proto__) are not valid profiles or edit fields', async () => {
+  const accepted = (await state()).versions.find((v: Json) => v.status === 'accepted').id;
+  for (const key of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+    assert.equal((await raw(`/api/agent/render?version=${accepted}&profile=${key}`, '', { agent: true, method: 'GET' })).status, 400, `agent render ${key}`);
+    assert.equal((await human('/api/render', { versionId: accepted, profile: key })).status, 400, `render ${key}`);
+    assert.equal((await human('/api/preview', { versionId: accepted, profile: key })).status, 400, `preview ${key}`);
+    const edit = await raw('/api/edit', `{"baseId":"${accepted}","node":"vase","field":"${key}","value":1}`);
+    assert.equal(edit.status, 400, `edit ${key}`); assert.match(edit.json.error, /unsupported edit/);
+  }
+});
+
+await check('#6 static serving cannot reach server.json or state.json outside public/', async () => {
+  const http = await import('node:http');
+  const get = (rawPath: string) => new Promise<{ status: number; body: string }>((ok, bad) => {
+    const u = new URL(BASE);
+    http.get({ host: u.hostname, port: u.port, path: rawPath, headers: { host: u.host } }, (r) => { let b = ''; r.on('data', (d) => { b += d; }); r.on('end', () => ok({ status: r.statusCode!, body: b })); }).on('error', bad);
+  });
+  const rel = path.relative(path.join(ROOT, 'public'), path.join(PROJECT, '.vork')).split(path.sep);
+  for (const file of ['server.json', 'state.json', 'config.json']) {
+    for (const sep of ['%2F', '%5C']) {
+      const r = await get(`/${[...rel, file].join(sep)}`);
+      assert.notEqual(r.status, 200, `${file} via ${sep}`); assert.doesNotMatch(r.body, /agentToken|versions/);
+    }
+  }
+  assert.equal((await get('/%E0%A4%A')).status, 400, 'malformed escape');
+  assert.equal((await get('/app.js')).status, 200, 'normal static files still served');
+});
+
 await check('AC-10 report: fixture gives exact numbers; live project counts match', async () => {
   const fixture = [
     { t: '2026-01-01T10:00:00.000Z', event: 'init' }, { t: '2026-01-01T10:02:00.000Z', event: 'proposed' },
