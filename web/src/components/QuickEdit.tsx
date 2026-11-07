@@ -1,9 +1,10 @@
-// Direct edit of one selected object without the agent (app.js:346-391).
+// Direct edit of one selected object without the agent.
 import { useEffect, useRef } from 'react';
+import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { hexToLin, isColor, linToHex } from '../lib/color.ts';
 import type { QuickRow } from '../lib/types.ts';
-import { directEdit, useStore, viewV } from '../store.ts';
+import { decide, directEdit, discarding, openVersion, useStore, viewV } from '../store.ts';
 
 const fmtColor = (lin: number[]) => lin.map((c) => c.toFixed(2)).join(',');
 
@@ -11,36 +12,51 @@ const fmtColor = (lin: number[]) => lin.map((c) => c.toFixed(2)).join(',');
  * One control row. These are native range/color inputs on purpose (the only raw inputs outside components/ui):
  * the browser fires `input` while dragging and `change` once on release. React's onChange fires on every native `input`,
  * which would create a version from the value at the start of a drag. So the display follows `input` and the edit is
- * sent on `change`, both through addEventListener on a ref. The duplicate-version guard is the store's synchronous
- * `editing` flag (directEdit).
+ * sent on `change`, both through addEventListener on a ref. The duplicate-version guard is directEdit's synchronous flag.
+ * When the edit fails, the control goes back to the value of the version shown.
  */
 function QuickRowControl({ node, row }: { node: string; row: QuickRow }) {
   const [field, label, kind, val, min, max, step] = row;
   const ref = useRef<HTMLInputElement>(null), out = useRef<HTMLOutputElement>(null);
+  // By value: a poll hands over a new array for the same colour, which must not re-attach the listeners.
+  const initial = kind === 'color' ? linToHex(val as number[]) : String(Number(val));
   useEffect(() => {
     const el = ref.current!, o = out.current!;
     const show = () => { o.textContent = kind === 'color' ? fmtColor(hexToLin(el.value)) : el.value; };
-    const commit = () => { void directEdit(node, field, kind === 'color' ? hexToLin(el.value) : Number(el.value)); };
-    o.textContent = kind === 'color' ? fmtColor(val as number[]) : String(Number(val));
+    const commit = () => {
+      void directEdit(node, field, kind === 'color' ? hexToLin(el.value) : Number(el.value)).then((ok) => {
+        if (!ok && el.isConnected) { el.value = initial; show(); }
+      });
+    };
+    el.value = initial; show();
     el.addEventListener('input', show); el.addEventListener('change', commit);
     return () => { el.removeEventListener('input', show); el.removeEventListener('change', commit); };
-  }, [node, field, kind, val]);
+  }, [node, field, kind, initial]);
   return (
     <Label className="row grid grid-cols-[110px_1fr_auto] gap-2 font-normal">
       <span className="text-muted-foreground">{label}</span>
       {kind === 'color'
-        ? <input ref={ref} type="color" defaultValue={linToHex(val as number[])} />
-        : <input ref={ref} type="range" className="w-full" min={min} max={max} step={step} defaultValue={String(Number(val))} />}
+        ? <input ref={ref} type="color" defaultValue={initial} />
+        : <input ref={ref} type="range" className="w-full" min={min} max={max} step={step} defaultValue={initial} />}
       <output ref={out} className="min-w-9 text-right font-mono text-[11px]" />
     </Label>
   );
 }
 
 export function QuickEdit() {
-  const v = useStore(viewV), selection = useStore((s) => s.selection);
+  const v = useStore(viewV), selection = useStore((s) => s.selection), head = useStore((s) => s.data.head);
+  const gone = useStore((s) => discarding(viewV(s).id, s));
   let body: React.ReactNode = null;
-  if (v.status !== 'accepted') body = <p className="hint">Direct edits start from an accepted version. Accept this proposal or open HEAD.</p>;
-  else if (selection.size !== 1) body = selection.size ? null : <p className="hint">Select one object to edit it directly, without the agent.</p>;
+  if (v.status !== 'accepted') {
+    // Say why, next to what lifts it (#59).
+    body = <>
+      <p className="hint">Direct edits start from an accepted version; {v.id} is {v.status}.</p>
+      <div className="btnrow">
+        {v.status === 'proposed' && !gone ? <Button type="button" variant="outline" size="sm" id="qAccept" onClick={() => void decide('accept', v.id)}>Accept this proposal</Button> : null}
+        <Button type="button" variant="outline" size="sm" id="qHead" onClick={() => openVersion(head)}>Open HEAD ({head})</Button>
+      </div>
+    </>;
+  } else if (selection.size !== 1) body = selection.size ? null : <p className="hint">Select one object to edit it directly, without the agent.</p>;
   else {
     const n = v.scene.nodes.find((x) => x.name === [...selection][0]);
     if (n) {

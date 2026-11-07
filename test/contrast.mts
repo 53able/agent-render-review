@@ -34,6 +34,9 @@ const PAIRS: [string, string, number][] = [
   ['primary-foreground', 'primary', 4.5],
   ['agent', 'card', 4.5], ['human', 'card', 4.5], ['warn', 'card', 4.5], ['ok', 'card', 4.5], ['destructive', 'card', 4.5],
   ['ring', 'background', 3.0], ['input', 'background', 3.0],
+  // state tokens (#60): the state chips and marks in the versions panel, failures on their tint (#53)
+  ['st-proposed', 'card', 4.5], ['st-accepted', 'card', 4.5], ['st-discarded', 'card', 4.5], ['st-head', 'card', 4.5], ['st-failed', 'card', 4.5],
+  ['foreground', 'bad-soft', 4.5], ['st-failed', 'bad-soft', 3.0],
 ];
 for (const [theme, sel] of [['light', ':root'], ['dark', '.dark']] as const) {
   const t = tokens(sel);

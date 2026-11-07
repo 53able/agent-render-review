@@ -1,5 +1,5 @@
-// The render, its object-id overlay and the compare wipe (app.js:193-299). Canvases are drawn imperatively through refs;
-// every colour inside the viewport comes from canvas-colors.ts so it does not follow the page theme.
+// The render, its object-id overlay and the compare wipe. Canvases are drawn imperatively through refs; every colour
+// inside the viewport comes from canvas-colors.ts so it does not follow the page theme.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent } from 'react';
 import { Slider } from '@/components/ui/slider';
@@ -7,15 +7,18 @@ import { api } from '../lib/api.ts';
 import { canvasColors as C } from '../lib/canvas-colors.ts';
 import { pick } from '../lib/ids.ts';
 import type { Ids, PagePreview } from '../lib/types.ts';
-import { NO_RENDER, V, alertMsg, cachePagePreview, clearSelection, get, say, set, toggleSel, useStore, viewV } from '../store.ts';
+import {
+  NO_RENDER, V, baseOf, cachePagePreview, clearFails, clearSelection, fail, get, say, set, setOnPage, toggleSel, useStore, viewV,
+} from '../store.ts';
 
 const loadImg = (src: string) => new Promise<HTMLImageElement>((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => bad(new Error(`cannot load ${src}`)); i.src = src; });
 
-type Gfx = { img: HTMLImageElement | null; imgB: HTMLImageElement | null; ids: Ids | null; hover: string | null; wipe: number; seq: number };
+/** What the canvas shows: the images, the object ids, and which versions the wipe labels name (those drawn, not those viewed). */
+type Gfx = { img: HTMLImageElement | null; imgB: HTMLImageElement | null; ids: Ids | null; hover: string | null; wipe: number; seq: number; labels: [string, string]; drawn: string };
 
 export function Viewport() {
   const cvRef = useRef<HTMLCanvasElement>(null), ovRef = useRef<HTMLCanvasElement>(null), vpRef = useRef<HTMLDivElement>(null);
-  const g = useRef<Gfx>({ img: null, imgB: null, ids: null, hover: null, wipe: 50, seq: 0 });
+  const g = useRef<Gfx>({ img: null, imgB: null, ids: null, hover: null, wipe: 50, seq: 0, labels: ['', ''], drawn: '' });
   const [wipeVal, setWipeVal] = useState(50);
   const [tip, setTip] = useState<{ x: number; y: number; text: string } | null>(null);
   const drawSeq = useStore((s) => s.drawSeq), viewId = useStore((s) => s.viewId), selection = useStore((s) => s.selection);
@@ -42,26 +45,30 @@ export function Viewport() {
   }, []);
 
   const paint = useCallback(() => {
-    const cv = cvRef.current, { img, imgB } = g.current; if (!cv || !img) return; const ctx = cv.getContext('2d')!;
+    const cv = cvRef.current, { img, imgB, labels } = g.current; if (!cv || !img) return; const ctx = cv.getContext('2d')!;
     ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0);
     if (imgB) {
-      const v = viewV(); const x = Math.round(cv.width * g.current.wipe / 100);
+      const x = Math.round(cv.width * g.current.wipe / 100);
       ctx.drawImage(imgB, 0, 0, x, cv.height, 0, 0, x, cv.height);
       ctx.fillStyle = C.wipeLine; ctx.fillRect(x - 1, 0, 2, cv.height);
       ctx.font = C.wipeFont; ctx.fillStyle = C.wipeLabel;
-      ctx.fillText(`◀ ${v.parent}`, 10, 22); ctx.fillText(`${v.id} ▶`, cv.width - 70, 22);
+      ctx.fillText(`◀ ${labels[0]}`, 10, 22); ctx.fillText(`${labels[1]} ▶`, cv.width - 70, 22);
     }
     paintOverlay();
   }, [paintOverlay]);
 
+  const size = (w: number, h: number) => {
+    for (const c of [cvRef.current!, ovRef.current!]) { c.width = w; c.height = h; }
+    const vp = vpRef.current!; vp.style.aspectRatio = `${w} / ${h}`; vp.style.setProperty('--ar', String(w / h));
+  };
+
   // The real page with the candidate substituted (server-side headless Chrome; project files untouched).
   const drawPage = useCallback(async (seq: number) => {
-    const cv = cvRef.current!, ov = ovRef.current!, vp = vpRef.current!;
+    const cv = cvRef.current!, ov = ovRef.current!;
     const stale = () => seq !== g.current.seq;
-    delete cv.dataset.ready;
+    delete cv.dataset.ready; g.current.drawn = '';
     const s = get(); const v = viewV(s); const prof = v.renders[s.profile] ? s.profile : 'draft'; const pageUrl = s.data.config.pageUrl;
-    set({ viewing: `${v.id} · on page · ${pageUrl || 'no pageUrl'}`, wipe: false });
-    ov.getContext('2d')!.clearRect(0, 0, ov.width, ov.height); g.current.ids = null; g.current.imgB = null;
+    ov.getContext('2d')!.clearRect(0, 0, ov.width, ov.height); g.current.ids = null; g.current.imgB = null; set({ wipe: false });
     let pv = v.pagePreviews?.[prof];
     if (!pv) {
       set({ empty: 'Opening the page with this candidate…' });
@@ -69,51 +76,53 @@ export function Viewport() {
       if (pv.ok) cachePagePreview(v.id, prof, pv);
       if (stale()) return;
     }
+    set({ empty: NO_RENDER });
     if (!pv.ok) {
-      // The reason stays on screen for 2.5 s, then the render comes back.
-      set({ empty: `Page preview unavailable: ${pv.reason}. Showing render only.`, onPage: false });
-      alertMsg(`Page preview unavailable: ${pv.reason}`);
-      setTimeout(() => set({ empty: NO_RENDER, drawSeq: get().drawSeq + 1 }), 2500);
+      // The render is shown instead; the reason stays above the viewport with a retry (#53).
+      fail('preview', `Page preview of ${v.id} unavailable: ${pv.reason}. Showing the render instead.`, { retry: () => setOnPage(true) });
+      setOnPage(false); // draws the render
       return;
     }
+    clearFails('preview');
     set({ empty: null });
     const img = await loadImg(pv.image); if (stale()) return;
-    for (const c of [cv, ov]) { c.width = img.width; c.height = img.height; }
-    vp.style.aspectRatio = `${img.width} / ${img.height}`;
+    size(img.width, img.height);
     const ctx = cv.getContext('2d')!; ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(img, 0, 0);
     set({ measure: { kind: 'page', pageUrl, pv } });
     if (pv.warning) say(pv.warning);
   }, []);
 
   const drawViewport = useCallback(async () => {
+    // The poll, a finished job and the human can each redraw; only the latest draw may write to the canvas (#54).
     const seq = ++g.current.seq; const stale = () => seq !== g.current.seq;
     if (get().onPage) return drawPage(seq);
-    const cv = cvRef.current!, ov = ovRef.current!, vp = vpRef.current!;
+    const cv = cvRef.current!, ov = ovRef.current!;
     const s = get(); const v = viewV(s); const r = v.renders[s.profile];
-    delete cv.dataset.ready; // clicks are ignored until this view's object ids are loaded
-    set({
-      viewing: `${v.id} · ${v.status}${v.status === 'accepted' && v.id !== s.data.head ? ' (not head)' : ''} · scene ${v.hash}`,
-      empty: r ? null : NO_RENDER, measure: r ? { kind: 'render', r } : null,
-    });
+    // Clicks are ignored until this view's object ids are loaded. Drawing the same render again (the poll reloads, the
+    // wipe is toggled) keeps its ids, so the view stays ready meanwhile.
+    const key = r ? `${v.id}:${s.profile}:${r.image}:${r.ids}` : '';
+    if (key !== g.current.drawn) { delete cv.dataset.ready; g.current.drawn = ''; }
+    set({ empty: r ? null : NO_RENDER, measure: r ? { kind: 'render', r } : null });
     if (!r) {
       cv.getContext('2d')!.clearRect(0, 0, cv.width, cv.height); ov.getContext('2d')!.clearRect(0, 0, ov.width, ov.height);
-      g.current.ids = null; set({ wipe: false }); return;
+      g.current.ids = null; g.current.imgB = null; set({ wipe: false }); return;
     }
+    const base = baseOf(v, s);
     const img = await loadImg(r.image); if (stale()) return;
-    const pr = V(v.parent, s)?.renders[s.profile];
+    const pr = V(base.id, s)?.renders[s.profile];
     const imgB = s.compare && pr ? await loadImg(pr.image) : null; if (stale()) return;
-    set({ wipe: !!imgB });
-    const buf = await (await fetch(r.ids)).arrayBuffer(); if (stale()) return;
-    g.current.img = img; g.current.imgB = imgB;
-    g.current.ids = { w: r.width, h: r.height, arr: new Uint16Array(buf), objects: Object.fromEntries(r.objects.map((o) => [o.pass_index, o.name])) };
-    for (const c of [cv, ov]) { c.width = r.width; c.height = r.height; }
-    vp.style.aspectRatio = `${r.width} / ${r.height}`;
+    // ids is null for a render recorded before object ids were hashed: Director does not serve that file (#43).
+    const buf = r.ids ? await (await fetch(r.ids)).arrayBuffer() : null; if (stale()) return;
+    g.current.img = img; g.current.imgB = imgB; g.current.labels = [base.id ?? '', v.id];
+    g.current.ids = buf && { w: r.width, h: r.height, arr: new Uint16Array(buf), objects: Object.fromEntries(r.objects.map((o) => [o.pass_index, o.name])) };
+    size(r.width, r.height);
     paint();
-    cv.dataset.ready = `${v.id}:${s.profile}`;
+    set({ wipe: !!imgB });
+    g.current.drawn = key; cv.dataset.ready = `${v.id}:${s.profile}`;
   }, [drawPage, paint]);
 
   useEffect(() => {
-    drawViewport().catch((e: Error) => alertMsg(`Cannot show the render: ${e.message}`));
+    drawViewport().catch((e: Error) => fail('view', `Cannot show the render: ${e.message}`));
   }, [drawSeq, viewId, drawViewport]);
   useEffect(() => { paintOverlay(); }, [selection, paintOverlay]);
 
@@ -139,7 +148,7 @@ export function Viewport() {
   // (thumb border), so they are overridden on its root.
   const wipeStyle = { '--muted': C.wipeTrack, '--primary': C.wipeThumb, '--ring': C.wipeThumb } as CSSProperties;
   return (
-    <div id="viewport" ref={vpRef} className="relative aspect-video w-full overflow-hidden rounded-lg border" style={{ background: C.viewportBg }}>
+    <div id="viewport" ref={vpRef} className="viewport" style={{ background: C.viewportBg }}>
       <canvas
         id="canvas" ref={cvRef} width={960} height={540} className="absolute inset-0 size-full cursor-crosshair"
         aria-label="Render. Hover to identify objects, click to select. Object list on the right offers the same selection by keyboard."
