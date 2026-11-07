@@ -33,9 +33,26 @@ async function check(name: string, fn: () => Promise<void>) {
   catch (e: Json) { failures++; console.log(`FAIL ${name}\n     ${e.stack?.split('\n').slice(0, 3).join('\n     ')}`); }
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// Test-only vork wrapper: while GATE exists, `vork render` waits before it runs, so a test can act in the middle of a
+// render. Each waiting render appends its pid to GATE.waiting.
+const BIN = path.join(tmp, 'bin'); fs.mkdirSync(BIN);
+const realVork = process.env.PATH!.split(path.delimiter).map((d) => path.join(d, 'vork')).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return true; } catch { return false; } });
+if (!realVork) throw new Error('vork not found on PATH');
+const GATE = path.join(tmp, 'gate');
+fs.writeFileSync(path.join(BIN, 'vork'), `#!/bin/sh\nif [ "$1" = render ] && [ -e '${GATE}' ]; then\n  echo $$ >> '${GATE}.waiting'\n  while [ -e '${GATE}' ]; do sleep 0.05; done\nfi\nexec '${realVork}' "$@"\n`, { mode: 0o755 });
+const holdRenders = () => { fs.rmSync(`${GATE}.waiting`, { force: true }); fs.writeFileSync(GATE, ''); };
+const releaseRenders = () => fs.rmSync(GATE, { force: true });
+/** Waits until a render is held at the gate; returns the pid of the waiting process. */
+const renderWaiting = async (): Promise<number> => {
+  for (let i = 0; i < 200; i++) { const t = fs.existsSync(`${GATE}.waiting`) ? fs.readFileSync(`${GATE}.waiting`, 'utf8').trim() : ''; if (t) return Number(t.split('\n')[0]); await sleep(50); }
+  throw new Error('no render reached the gate');
+};
+const PATH_WITH_GATE = `${BIN}${path.delimiter}${process.env.PATH}`;
+
 const PAIR = crypto.randomBytes(16).toString('hex'); // test-only: lets the simulated human pair without a real browser opener
 const client = new Client({ name: 'integration-test', version: '1.0.0' });
-await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(ROOT, 'mcp.mts'), '--project', PROJECT], stderr: 'pipe', env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR } }));
+await client.connect(new StdioClientTransport({ command: process.execPath, args: [path.join(ROOT, 'mcp.mts'), '--project', PROJECT], stderr: 'pipe', env: { ...process.env, PATH: PATH_WITH_GATE, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR } }));
 const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolResult> => client.callTool({ name, arguments: args }) as unknown as Promise<ToolResult>;
 const textOf = (r: ToolResult): Json => JSON.parse(r.content.find((c) => c.type === 'text')!.text);
 
@@ -362,22 +379,43 @@ await check('#9 propose and adoption-request reject mistyped optional fields wit
   assert.equal((await state()).adoptionRequests.length, requests);
 });
 
-await check('#9 standalone /api/propose rejects a non-string instruction with 400', async () => {
+// Standalone Director with a fake `claude` (no API call): it records the prompt, waits while CLAUDE_GATE exists,
+// and proposes the current scene unchanged. vork goes through the same gate wrapper as in ADE mode.
+const FAKE_BIN = path.join(tmp, 'fake-claude-bin'); fs.mkdirSync(FAKE_BIN);
+const PROMPT_FILE = path.join(tmp, 'claude-prompt.txt'), CLAUDE_GATE = path.join(tmp, 'claude-gate');
+fs.writeFileSync(path.join(FAKE_BIN, 'claude'), `#!${process.execPath}
+const fs = require('node:fs');
+let input = '';
+process.stdin.on('data', (d) => { input += d; });
+process.stdin.on('end', async () => {
+  fs.writeFileSync(${JSON.stringify(PROMPT_FILE)}, input);
+  while (fs.existsSync(${JSON.stringify(CLAUDE_GATE)})) await new Promise((r) => setTimeout(r, 50));
+  const scene = JSON.parse(input.match(/CURRENT SCENE \\(v\\d+\\):\\n(.*)\\n\\nDIRECTOR'S REQUEST/s)[1]);
+  process.stdout.write(JSON.stringify({ structured_output: { interpretation: 'fake', assumptions: [], clarifying_question: null, claimed_changes: [], scene }, total_cost_usd: 0 }));
+});
+`, { mode: 0o755 });
+const standalone = await (async () => {
   const { spawn } = await import('node:child_process');
   const net = await import('node:net');
   const port = await new Promise<number>((ok) => { const srv = net.createServer().listen(0, '127.0.0.1', () => { const p = (srv.address() as { port: number }).port; srv.close(() => ok(p)); }); });
   const runs = path.join(tmp, 'standalone-runs');
-  const p = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env: { ...process.env, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR, VORK_DIRECTOR_RUNS: runs }, stdio: 'ignore' });
-  try {
-    for (let i = 0; i < 100 && !fs.existsSync(path.join(runs, 'server.json')); i++) await new Promise((r) => setTimeout(r, 150));
-    const url = `http://127.0.0.1:${port}`;
-    const pr = await fetch(`${url}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: PAIR }) });
-    const cookie = pr.headers.get('set-cookie')!.split(';')[0];
-    for (const instruction of [1, { trim: 1 }, ['x'], null, '  ']) {
-      const r = await fetch(`${url}/api/propose`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ baseId: 'v001', instruction }) });
-      assert.equal(r.status, 400, JSON.stringify(instruction));
-    }
-  } finally { p.kill('SIGTERM'); }
+  const proc = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--port', String(port)], { env: { ...process.env, PATH: `${FAKE_BIN}${path.delimiter}${PATH_WITH_GATE}`, VORK_DIRECTOR_NO_OPEN: '1', VORK_DIRECTOR_PAIR_TOKEN: PAIR, VORK_DIRECTOR_RUNS: runs }, stdio: 'ignore' });
+  for (let i = 0; i < 100 && !fs.existsSync(path.join(runs, 'server.json')); i++) await sleep(150);
+  const url = `http://127.0.0.1:${port}`;
+  const pr = await fetch(`${url}/api/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: PAIR }) });
+  const cookie = pr.headers.get('set-cookie')!.split(';')[0];
+  const call = async (route: string, body?: unknown): Promise<{ status: number; json: Json }> => {
+    const r = await fetch(`${url}${route}`, { method: body ? 'POST' : 'GET', headers: { 'content-type': 'application/json', cookie }, body: body ? JSON.stringify(body) : undefined });
+    return { status: r.status, json: await r.json().catch(() => ({})) };
+  };
+  const waitJob = async (id: string) => { for (;;) { const j = (await call(`/api/jobs/${id}`)).json; if (j.status !== 'running') return j; await sleep(200); } };
+  return { proc, call, waitJob };
+})();
+
+await check('#9 standalone /api/propose rejects a non-string instruction with 400', async () => {
+  for (const instruction of [1, { trim: 1 }, ['x'], null, '  ']) {
+    assert.equal((await standalone.call('/api/propose', { baseId: 'v001', instruction })).status, 400, JSON.stringify(instruction));
+  }
 });
 
 await check('#12 a body over 4 MB gets 413, with or without content-length; the server keeps serving', async () => {
@@ -420,6 +458,56 @@ await check('AC-10 report: fixture gives exact numbers; live project counts matc
   assert.ok(live.minutesFirstProposalToAdoption >= 0);
 });
 
+// The checks below run after AC-10, so they do not change the counts it expects.
+const newProposal = async (): Promise<string> => {
+  const scene = structuredClone(base); scene.nodes.find((n: SceneNode) => n.name === 'vase').materials[0].inputs.base_color = [Math.random(), 0.2, 0.2];
+  const r = await raw('/api/agent/propose', JSON.stringify({ interpretation: 'x', claimed_changes: [], scene, base: 'v001' }), { agent: true });
+  assert.equal(r.status, 200, JSON.stringify(r.json)); return r.json.version;
+};
+const versionOf = async (id: string): Promise<Json> => (await state()).versions.find((v: Json) => v.id === id);
+
+await check('#15 a final ticket for a version discarded after planning is refused', async () => {
+  const id = await newProposal();
+  const plan = await human('/api/final/plan', { versionId: id }); assert.equal(plan.status, 200);
+  assert.equal((await human('/api/decide', { versionId: id, decision: 'discard' })).status, 200);
+  const r = await human('/api/render', { versionId: id, profile: 'final', ticket: plan.json.ticket });
+  assert.equal(r.status, 409, JSON.stringify(r.json)); assert.match(r.json.error, /discarded/);
+  assert.equal((await versionOf(id)).renders.final, undefined);
+});
+
+await check('#15 agent propose: a base discarded during the validation render gives 409 and no version', async () => {
+  const baseId = await newProposal(); const count = (await state()).versions.length;
+  const scene = structuredClone(base); scene.nodes.find((n: SceneNode) => n.name === 'vase').materials[0].inputs.base_color = [0.9, 0.9, 0.1];
+  holdRenders();
+  try {
+    const pending = raw('/api/agent/propose', JSON.stringify({ interpretation: 'x', claimed_changes: [], scene, base: baseId }), { agent: true });
+    await renderWaiting();
+    assert.equal((await human('/api/decide', { versionId: baseId, decision: 'discard' })).status, 200);
+    releaseRenders();
+    const r = await pending;
+    assert.equal(r.status, 409, JSON.stringify(r.json)); assert.match(r.json.error, /discarded/);
+  } finally { releaseRenders(); }
+  assert.equal((await state()).versions.length, count);
+});
+
+await check('#15 standalone propose: a discarded base gives 400; a base discarded while the agent works makes no proposal', async () => {
+  const first = (await standalone.waitJob((await standalone.call('/api/propose', { baseId: 'v001', instruction: 'same scene' })).json.id));
+  assert.equal(first.status, 'done', JSON.stringify(first)); const proposedId = first.result.versionId;
+  fs.writeFileSync(CLAUDE_GATE, ''); fs.rmSync(PROMPT_FILE, { force: true });
+  try {
+    const job = (await standalone.call('/api/propose', { baseId: proposedId, instruction: 'again' })).json;
+    for (let i = 0; i < 100 && !fs.existsSync(PROMPT_FILE); i++) await sleep(50);
+    assert.equal((await standalone.call('/api/decide', { versionId: proposedId, decision: 'discard' })).status, 200);
+    fs.rmSync(CLAUDE_GATE);
+    const done = await standalone.waitJob(job.id);
+    assert.equal(done.status, 'failed'); assert.equal(done.error, 'base_discarded');
+  } finally { fs.rmSync(CLAUDE_GATE, { force: true }); }
+  const versions = (await standalone.call('/api/state')).json.versions;
+  assert.deepEqual(versions.map((v: Json) => v.id), ['v001', proposedId]);
+  const r = await standalone.call('/api/propose', { baseId: proposedId, instruction: 'from discarded' });
+  assert.equal(r.status, 400); assert.match(r.json.error, /discarded/);
+});
+
 await check('AC-01 nothing new was written under vork-director/runs', async () => {
   const after = fs.existsSync(path.join(ROOT, 'runs')) ? JSON.stringify(fs.readdirSync(path.join(ROOT, 'runs'))) : '[]';
   assert.equal(after, runsBefore);
@@ -429,6 +517,7 @@ await check('AC-01 nothing new was written under vork-director/runs', async () =
 const pid = JSON.parse(fs.readFileSync(path.join(PROJECT, '.vork', 'server.json'), 'utf8')).pid;
 await client.close();
 try { process.kill(pid, 'SIGTERM'); } catch {}
+standalone.proc.kill('SIGTERM');
 await new Promise((r) => setTimeout(r, 300));
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${pass} passed, ${failures} failed`);

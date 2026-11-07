@@ -369,6 +369,9 @@ async function main() {
   const save = () => { fs.writeFileSync(STATE_FILE + '.tmp', JSON.stringify(state, null, 2)); fs.renameSync(STATE_FILE + '.tmp', STATE_FILE); };
   const audit = (event: string, data: Record<string, unknown> = {}) => { state.audit.push({ t: new Date().toISOString(), event, ...data }); save(); };
   const getV = (id: string | null | undefined): Version | undefined => state.versions.find((v) => v.id === id);
+  // A discarded version cannot be rendered at final quality, be the base of a proposal, or be adopted.
+  // Check it when a request arrives, when a ticket is used, and again after every await before state changes.
+  const liveV = (id: string | null | undefined): Version | undefined => { const v = getV(id); return v && v.status !== 'discarded' ? v : undefined; };
   const vdir = (id: string) => path.join(RUNS, id);
   const sceneOf = (id: string): Scene => JSON.parse(fs.readFileSync(path.join(vdir(id), 'scene.json'), 'utf8'));
   const hashScene = (id: string) => sha256(fs.readFileSync(path.join(vdir(id), 'scene.json'))).slice(0, 16);
@@ -564,6 +567,7 @@ ${VORK_HELP}`;
         job.steps.at(-1)!.detail = String(why).split('\n').slice(-6).join('\n'); job.steps.at(-1)!.status = 'failed';
         prompt += `\n\nYOUR PREVIOUS PROPOSAL WAS REJECTED:\n${String(why).slice(-1500)}\nFix it and return the full scene again.`; continue;
       }
+      if (!liveV(baseId)) { step(job, `${baseId} was discarded while the agent worked; no proposal was made`, 'failed'); return { kind: 'base_discarded', cost: totalCost }; }
       const { v, draft } = await createProposal(job, { baseId, scene: last.scene, instruction, proposal: { ...last, scene: undefined, policy: check.policy, cost: totalCost, context: ctx, via: 'built-in' } });
       if (draft.cancelled) return;
       step(job, 'Proposal ready for review', 'done');
@@ -693,8 +697,8 @@ ${VORK_HELP}`;
     }
     if (url.pathname === '/api/agent/propose' && req.method === 'POST') {
       const b = await readBody<{ base?: string; interpretation?: unknown; assumptions?: unknown; claimed_changes?: unknown; scene: Scene; responds_to?: unknown }>(req);
-      const baseId = b.base || state.head; const base = getV(baseId);
-      if (!base || base.status === 'discarded') return send(res, 400, { error: 'base must be an existing, not discarded version' });
+      const baseId = b.base || state.head;
+      if (!liveV(baseId)) return send(res, 400, { error: 'base must be an existing, not discarded version' });
       if (typeof b.interpretation !== 'string' || !b.interpretation.trim() || !Array.isArray(b.claimed_changes)) return send(res, 400, { error: 'interpretation and claimed_changes are required' });
       if (!b.claimed_changes.every(isClaimedChange)) return send(res, 400, { error: 'each claimed_changes item must be { node, what, why } with string values' });
       // Checked before validateScene so a bad field does not cost a vork render.
@@ -705,6 +709,8 @@ ${VORK_HELP}`;
       const job = newJob('agent-propose', baseId!);
       const check = await validateScene(job, b.scene);
       if (!check.ok) { audit('agent_proposal_rejected', { kind: check.kind, base: baseId }); return send(res, 422, { error: check.kind === 'blocked' ? 'policy' : 'vork rejected the scene', blockers: check.policy?.blockers || [], log: check.log || null, version: null }); }
+      // The human may have discarded the base during the validation render.
+      if (!liveV(baseId)) return send(res, 409, { error: `base ${baseId} was discarded while the scene was being validated; no version was created`, version: null });
       const proposal: Proposal = { interpretation: b.interpretation, assumptions, claimed_changes: b.claimed_changes.map(({ node, what, why }) => ({ node, what, why })), policy: check.policy, context: respondsTo != null ? [`responds to feedback #${respondsTo}`] : [], via: 'mcp', respondsTo };
       const { v, draft } = await createProposal(job, { baseId, scene: b.scene, instruction: b.interpretation, proposal });
       return send(res, 200, { version: v.id, status: v.status, head: state.head, render: draft.ok ? renderSummary(draft.info) : null, renderError: draft.ok ? null : draft.log, diff: diffScenes(sceneOf(baseId!), b.scene), flags: check.policy.flags });
@@ -733,9 +739,9 @@ ${VORK_HELP}`;
       return send(res, 200, { timeout: false, events: evs });
     }
     if (url.pathname === '/api/agent/adoption-request' && req.method === 'POST') {
-      const b = await readBody<{ version: string; slug: unknown; reason?: unknown }>(req); const v = getV(b.version);
+      const b = await readBody<{ version: string; slug: unknown; reason?: unknown }>(req); const v = liveV(b.version);
       if (!PROJECT) return send(res, 409, { error: 'adoption needs Director started with --project' });
-      if (!v || v.status === 'discarded') return send(res, 400, { error: 'version must exist and not be discarded' });
+      if (!v) return send(res, 400, { error: 'version must exist and not be discarded' });
       if (b.reason != null && typeof b.reason !== 'string') return send(res, 400, { error: 'reason must be a string' });
       let slug: string;
       try { ({ slug } = adoptionTargets(b.slug)); } catch (e: any) { return send(res, 400, { error: e.message }); }
@@ -795,6 +801,7 @@ ${VORK_HELP}`;
         if (profile === 'final') {
           const t = takeTicket(ticket, 'final');
           if (!t || t.versionId !== versionId) return send(res, 403, { error: 'final render needs a fresh approval for this exact scene' });
+          if (!liveV(versionId)) return send(res, 409, { error: 'discarded versions cannot be rendered at final quality' });
           audit('final_approved', { version: versionId, hash: t.hash });
         }
         const job = newJob('render', versionId); step(job, `vork render ${PROFILES[profile]}`);
@@ -810,7 +817,7 @@ ${VORK_HELP}`;
         const { versionId } = await readBody<{ versionId: string }>(req); const v = getV(versionId); if (!v) return send(res, 400, { error: 'bad version' });
         const scene = sceneOf(versionId); const pol = policyCheck(scene);
         if (pol.blockers.length) return send(res, 409, { error: `scene violates policy: ${pol.blockers.join('; ')}` });
-        if (v.status === 'discarded') return send(res, 409, { error: 'discarded versions cannot be rendered at final quality' });
+        if (!liveV(versionId)) return send(res, 409, { error: 'discarded versions cannot be rendered at final quality' });
         const hash = hashScene(versionId); const ticket = issueTicket({ kind: 'final', versionId, hash });
         const d = v.renders.draft;
         return send(res, 200, {
@@ -825,6 +832,7 @@ ${VORK_HELP}`;
         if (MODE === 'ade') return send(res, 409, { error: 'ADE mode: proposals come from your ADE agent via MCP. Send feedback instead.' });
         const body = await readBody<{ baseId: string; instruction?: unknown; selection?: unknown; context?: unknown }>(req);
         if (!getV(body.baseId) || typeof body.instruction !== 'string' || !body.instruction.trim()) return send(res, 400, { error: 'need baseId and instruction' });
+        if (!liveV(body.baseId)) return send(res, 400, { error: 'discarded versions cannot be the base of a proposal' });
         // Same rule as /api/feedback: keep only string selections. Context flags are read as booleans.
         const selection = (Array.isArray(body.selection) ? body.selection : []).filter((x): x is string => typeof x === 'string').slice(0, 50);
         const ctx = isPlainObject(body.context) ? body.context : {};
@@ -865,7 +873,7 @@ ${VORK_HELP}`;
         const { requestId, slug: slugOverride } = await readBody<{ requestId: string; slug?: unknown }>(req);
         const ar = state.adoptionRequests.find((a) => a.id === requestId && a.status === 'pending');
         if (!ar) return send(res, 400, { error: 'no pending adoption request with that id' });
-        const v = getV(ar.version); if (!v || v.status === 'discarded') return send(res, 409, { error: 'version is gone or discarded' });
+        const v = liveV(ar.version); if (!v) return send(res, 409, { error: 'version is gone or discarded' });
         let t;
         try { t = adoptionTargets(slugOverride || ar.slug); } catch (e: any) { return send(res, 400, { error: e.message }); }
         const pol = policyCheck(sceneOf(v.id)); if (pol.blockers.length) return send(res, 409, { error: pol.blockers.join('; ') });
