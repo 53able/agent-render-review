@@ -1,6 +1,7 @@
-// Page state and the actions that change it (ported from public/app.js). Components read it with useStore
-// (useSyncExternalStore); everything that talks to Director lives here so components stay declarative.
-import { useSyncExternalStore } from 'react';
+// Page state and the actions that change it (ported from public/app.js). Components read it with useStore (a zustand
+// store); everything that talks to Director lives here so components stay declarative.
+import { createStore, useStore as useZustandStore, type StateCreator } from 'zustand';
+import { devtools } from 'zustand/middleware';
 import { api } from './lib/api.ts';
 import { signature } from './lib/signature.ts';
 import { applyRules, versionOf, viewedVersion } from './lib/state-rules.ts';
@@ -54,35 +55,48 @@ export const NO_RENDER = 'No render at this quality yet.';
 const BASE_TITLE = document.title;
 const NO_FAILS: Record<Scope, Fail[]> = { view: [], preview: [], adopt: [], ask: [], review: [], final: [], edit: [] };
 
-let state: State = {
+const initial: State = {
   data: null as unknown as Data, viewId: '', profile: 'draft', selection: new Set(), compare: false, onPage: false, diffBase: {},
   jobs: new Map(), lastResult: null, sig: '', notice: null, drawSeq: 0,
   empty: null, wipe: false, measure: null,
   instruction: '', ctx: { selection: true, exposure: true, history: false },
   fails: NO_FAILS, connLost: null, pendingDiscard: null, finalPlan: null, adoptDlg: null, pane: 'inspector',
 };
-const listeners = new Set<() => void>();
+type Creator = StateCreator<State>;
+type DevtoolsFeature = 'pause' | 'lock' | 'persist' | 'export' | 'import' | 'jump' | 'skip' | 'reorder' | 'dispatch' | 'test';
+type DevtoolsOpts = { name: string; features: Record<DevtoolsFeature, boolean>; serialize: { options: { map: boolean; set: boolean } } };
+/** Devtools only show the state: the buttons that would write it are hidden (the guard below drops such writes anyway). */
+const DEVTOOLS_OPTS = {
+  name: 'render-director',
+  features: { pause: true, lock: false, persist: false, export: true, import: false, jump: false, skip: false, reorder: false, dispatch: false, test: false },
+  serialize: { options: { map: true, set: true } },
+} satisfies DevtoolsOpts;
+/** Redux devtools in development only; the production build drops this branch. */
+const withDevtools = (f: Creator): Creator => (import.meta.env.DEV ? (devtools(f, DEVTOOLS_OPTS) as unknown as Creator) : f);
+/** True only while set() writes: every other write (devtools time travel, reset, import) is dropped, so all state goes through the rules. */
+let writing = false;
+const guard = (f: Creator): Creator => (s, g, api) => f(((...a: Parameters<typeof s>) => { if (writing) s(...a); }) as typeof s, g, api);
+const store = createStore<State>()(guard(withDevtools(() => initial)));
 
-export const get = (): State => state;
-export const V = (id: string | null | undefined, s: State = state): Version | undefined => versionOf(id, s);
+export const get = (): State => store.getState();
+export const V = (id: string | null | undefined, s: State = get()): Version | undefined => versionOf(id, s);
 /** The version on screen. A view id that the loaded state does not know yet (a version just created) shows HEAD meanwhile. */
-export const viewV = (s: State = state): Version => viewedVersion(s);
-export const isADE = (s: State = state): boolean => s.data?.mode === 'ade';
-export const discarding = (id: string, s: State = state): boolean => s.pendingDiscard === id;
-export const runningJob = (versionId: string, kind?: string, s: State = state): Job | undefined =>
+export const viewV = (s: State = get()): Version => viewedVersion(s);
+export const isADE = (s: State = get()): boolean => s.data?.mode === 'ade';
+export const discarding = (id: string, s: State = get()): boolean => s.pendingDiscard === id;
+export const runningJob = (versionId: string, kind?: string, s: State = get()): Job | undefined =>
   [...s.jobs.values()].find((j) => j.status === 'running' && j.versionId === versionId && (!kind || j.kind === kind));
 
 export function set(patch: Partial<State>): void {
-  const prev = state;
-  state = applyRules(prev, { ...prev, ...patch }, patch);
-  for (const l of listeners) l();
+  const prev = get();
+  const was = writing;
+  writing = true;
+  try { store.setState(applyRules(prev, { ...prev, ...patch }, patch), true); } finally { writing = was; }
 }
-const subscribe = (l: () => void) => { listeners.add(l); return () => { listeners.delete(l); }; };
 // The tab title is marked while a proposal is announced.
-let titled = state.notice;
-subscribe(() => { if (state.notice !== titled) { titled = state.notice; document.title = titled ? `(1) ${BASE_TITLE}` : BASE_TITLE; } });
+store.subscribe((s, prev) => { if (s.notice !== prev.notice) document.title = s.notice ? `(1) ${BASE_TITLE}` : BASE_TITLE; });
 /** Select one field (or a value derived without allocating) from the state. */
-export const useStore = <T,>(sel: (s: State) => T): T => useSyncExternalStore(subscribe, () => sel(state));
+export const useStore = <T,>(sel: (s: State) => T): T => useZustandStore(store, sel);
 
 // ---------- announcements and failures ----------
 /** Polite announcement. Cleared first and written 30 ms later so the same sentence is read again. */
@@ -100,21 +114,21 @@ const backs = new Map<number, HTMLElement>();
  */
 export function fail(scope: Scope, msg: string, opts: { retry?: () => unknown; retryLabel?: string } = {}): void {
   const back = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
-  const list = state.fails[scope].filter((f) => f.msg !== msg);
-  for (const f of state.fails[scope]) if (f.msg === msg) backs.delete(f.key);
+  const list = get().fails[scope].filter((f) => f.msg !== msg);
+  for (const f of get().fails[scope]) if (f.msg === msg) backs.delete(f.key);
   const key = ++failKey;
   if (back) backs.set(key, back);
-  set({ fails: { ...state.fails, [scope]: [...list, { key, msg, ...opts }] } });
+  set({ fails: { ...get().fails, [scope]: [...list, { key, msg, ...opts }] } });
 }
 export function clearFails(scope: Scope): void {
-  if (!state.fails[scope].length) return;
-  for (const f of state.fails[scope]) backs.delete(f.key);
-  set({ fails: { ...state.fails, [scope]: [] } });
+  if (!get().fails[scope].length) return;
+  for (const f of get().fails[scope]) backs.delete(f.key);
+  set({ fails: { ...get().fails, [scope]: [] } });
 }
 /** Removes one failure; focus goes back to the control that failed when it is still on screen. */
 export function dismissFail(scope: Scope, key: number): void {
   const back = backs.get(key); backs.delete(key);
-  set({ fails: { ...state.fails, [scope]: state.fails[scope].filter((x) => x.key !== key) } });
+  set({ fails: { ...get().fails, [scope]: get().fails[scope].filter((x) => x.key !== key) } });
   if (back?.isConnected && !back.closest('[hidden]')) back.focus();
 }
 export const focusInstruction = (): void => document.getElementById('instruction')?.focus();
@@ -139,10 +153,10 @@ async function loadNow(seq: number, keepView: boolean): Promise<void> {
   const d = await api<Data>('/api/state'); if (seq !== loadSeq) return;
   // A new agent version is announced by whichever load sees it first, not only by the poll. Only an ADE agent proposes
   // from outside the page; in standalone mode a new version is the human's own request.
-  const known = state.data && new Set(state.data.versions.map((v) => v.id));
+  const known = get().data && new Set(get().data.versions.map((v) => v.id));
   const fresh = known && d.mode === 'ade' ? d.versions.filter((v) => !known.has(v.id) && v.origin === 'agent') : [];
-  const keep = keepView && d.versions.some((v) => v.id === state.viewId);
-  set({ data: d, viewId: keep ? state.viewId : d.head, sig: signature(d), drawSeq: state.drawSeq + 1 });
+  const keep = keepView && d.versions.some((v) => v.id === get().viewId);
+  set({ data: d, viewId: keep ? get().viewId : d.head, sig: signature(d), drawSeq: get().drawSeq + 1 });
   if (fresh.length) notify(fresh.at(-1)!.id);
 }
 
@@ -152,12 +166,12 @@ function notify(id: string): void {
   say(`New proposal ${id} from your agent. Press View to open it.`);
 }
 export const closeNotice = (): void => set({ notice: null });
-export const viewNotice = (): void => { const id = state.notice; if (!id) return; set({ notice: null }); openVersion(id); };
+export const viewNotice = (): void => { const id = get().notice; if (!id) return; set({ notice: null }); openVersion(id); };
 
 /** Shows, while polling fails, that Director does not answer: nothing on screen is current then (#53). */
 function connection(ok: boolean): void {
-  if (ok) { if (state.connLost) set({ connLost: null }); return; }
-  if (!state.connLost) set({ connLost: new Date().toLocaleTimeString() });
+  if (ok) { if (get().connLost) set({ connLost: null }); return; }
+  if (!get().connLost) set({ connLost: new Date().toLocaleTimeString() });
 }
 /**
  * Agents act from outside the page: poll for new proposals, requests and reads. Also while the tab is hidden (the "(1)"
@@ -166,11 +180,11 @@ function connection(ok: boolean): void {
  */
 export function startPolling(): () => void {
   const timer = setInterval(async () => {
-    if (!state.data) return;
+    if (!get().data) return;
     const d = await api<Data>('/api/state').catch(() => null);
     connection(!!d);
     // keeps the version you are viewing; never switches under your cursor
-    if (d && signature(d) !== state.sig) await load().catch(() => connection(false));
+    if (d && signature(d) !== get().sig) await load().catch(() => connection(false));
   }, 2500);
   return () => clearInterval(timer);
 }
@@ -178,7 +192,7 @@ export function startPolling(): () => void {
 /** On startup, a HEAD without a draft render gets one, then a previs render. */
 export async function renderMissingDraft(): Promise<void> {
   if (viewV().renders.draft) return;
-  const id = state.viewId;
+  const id = get().viewId;
   try {
     const job = await api<Job>('/api/render', { versionId: id, profile: 'draft' });
     trackJob(job, async () => {
@@ -190,38 +204,38 @@ export async function renderMissingDraft(): Promise<void> {
 
 // ---------- viewing ----------
 /** Shows a version: the list, the inspector and the viewport follow. */
-export function openVersion(id: string): void { set({ viewId: id, drawSeq: state.drawSeq + 1 }); }
+export function openVersion(id: string): void { set({ viewId: id, drawSeq: get().drawSeq + 1 }); }
 export function selectVersion(id: string): void {
   const v = V(id); if (!v) return;
   openVersion(id);
   say(`Viewing ${id}, ${v.status}`);
 }
-export const setProfile = (profile: string): void => set({ profile, drawSeq: state.drawSeq + 1 });
-export const setCompare = (compare: boolean): void => set({ compare, drawSeq: state.drawSeq + 1 });
-export const setOnPage = (onPage: boolean): void => set({ onPage, drawSeq: state.drawSeq + 1 });
+export const setProfile = (profile: string): void => set({ profile, drawSeq: get().drawSeq + 1 });
+export const setCompare = (compare: boolean): void => set({ compare, drawSeq: get().drawSeq + 1 });
+export const setOnPage = (onPage: boolean): void => set({ onPage, drawSeq: get().drawSeq + 1 });
 export const setPane = (pane: State['pane']): void => set({ pane });
 /** Caches a successful page preview on its version without mutating the polled data. */
 export function cachePagePreview(versionId: string, profile: string, pv: PagePreview): void {
-  const versions = state.data.versions.map((v) => (v.id === versionId ? { ...v, pagePreviews: { ...v.pagePreviews, [profile]: pv } } : v));
-  set({ data: { ...state.data, versions } });
+  const versions = get().data.versions.map((v) => (v.id === versionId ? { ...v, pagePreviews: { ...v.pagePreviews, [profile]: pv } } : v));
+  set({ data: { ...get().data, versions } });
 }
 
 /**
  * What a version is compared with, in the diff and in the wipe (#52). When its parent is not HEAD, the human chooses
  * between HEAD (what accepting it changes; the default for a proposal) and the parent (what this step changed).
  */
-export function baseOf(v: Version, s: State = state): { id: string | null; kind: DiffBase; choice: boolean } {
+export function baseOf(v: Version, s: State = get()): { id: string | null; kind: DiffBase; choice: boolean } {
   const choice = !!v.headDiff;
   const kind: DiffBase = choice ? (s.diffBase[v.id] || (v.status === 'proposed' ? 'head' : 'parent')) : 'parent';
   return { id: kind === 'head' ? s.data.head : v.parent || null, kind, choice };
 }
 export function setBase(id: string, kind: DiffBase): void {
-  set({ diffBase: { ...state.diffBase, [id]: kind }, drawSeq: state.drawSeq + 1 });
+  set({ diffBase: { ...get().diffBase, [id]: kind }, drawSeq: get().drawSeq + 1 });
   say(`Changes against ${kind === 'head' ? 'HEAD' : 'the parent'}`);
 }
 
 export function toggleSel(name: string, additive: boolean): void {
-  const sel = new Set(state.selection);
+  const sel = new Set(get().selection);
   if (additive) { if (sel.has(name)) sel.delete(name); else sel.add(name); }
   else { const only = sel.size === 1 && sel.has(name); sel.clear(); if (!only) sel.add(name); }
   set({ selection: sel });
@@ -230,7 +244,7 @@ export function toggleSel(name: string, additive: boolean): void {
 export function clearSelection(): void { set({ selection: new Set() }); say('Selection cleared'); }
 
 /** Where the text in the box goes: the version on screen, shown above the box and following every switch (#59). */
-export function askTarget(s: State = state): string {
+export function askTarget(s: State = get()): string {
   const v = viewV(s);
   return !isADE(s) && (v.status === 'discarded' || discarding(v.id, s)) ? s.data.head : v.id;
 }
@@ -239,14 +253,14 @@ export function askTarget(s: State = state): string {
 // Jobs run in the background, each tied to a version (#54): the page keeps polling, other versions can be viewed and
 // compared, and only a second job of the same kind on the same version is refused. Finished jobs that failed or were
 // cancelled stay listed until dismissed.
-const putJob = (j: Job): void => set({ jobs: new Map(state.jobs).set(j.id, j) });
-export function dropJob(id: string): void { const jobs = new Map(state.jobs); if (jobs.delete(id)) set({ jobs }); }
+const putJob = (j: Job): void => set({ jobs: new Map(get().jobs).set(j.id, j) });
+export function dropJob(id: string): void { const jobs = new Map(get().jobs); if (jobs.delete(id)) set({ jobs }); }
 
 export function trackJob(job: Job, onEnd?: (j: Job) => unknown): void {
   putJob(job);
   let lastCount = 0, misses = 0;
   const tick = async () => {
-    if (!state.jobs.has(job.id)) return; // dismissed
+    if (!get().jobs.has(job.id)) return; // dismissed
     let j: Job;
     try { j = await api<Job>(`/api/jobs/${job.id}`); misses = 0; }
     catch (e) {
@@ -282,7 +296,7 @@ let editing = false;
 export async function directEdit(node: string, field: string, value: unknown): Promise<boolean> {
   if (editing) return true; // the edit in flight creates the version
   editing = true;
-  const base = state.viewId;
+  const base = get().viewId;
   let r: { version: string; job: Job };
   try { r = await api<{ version: string; job: Job }>('/api/edit', { baseId: base, node, field, value }); }
   catch (e) { editing = false; fail('edit', `Edit of ${node}.${field} failed: ${why(e)}`); return false; }
@@ -293,7 +307,7 @@ export async function directEdit(node: string, field: string, value: unknown): P
   let loaded = false;
   try { await load(); loaded = true; } catch (e) { fail('view', `Created ${r.version}, but could not load it: ${why(e)}`); }
   finally { editing = false; }
-  if (loaded && state.viewId === base && V(r.version)) openVersion(r.version);
+  if (loaded && get().viewId === base && V(r.version)) openVersion(r.version);
   say(`Created ${r.version}`);
   trackJob(r.job, () => load());
   return true;
@@ -301,11 +315,11 @@ export async function directEdit(node: string, field: string, value: unknown): P
 
 // ---------- ask the agent ----------
 export async function submitAsk(): Promise<void> {
-  const instruction = state.instruction.trim(); if (!instruction) return focusInstruction();
+  const instruction = get().instruction.trim(); if (!instruction) return focusInstruction();
   const target = askTarget();
   if (isADE()) {
     if (discarding(target)) return fail('ask', `${target} is about to be discarded; undo the discard or open another version. Your text is kept.`);
-    try { await api('/api/feedback', { versionId: target, selection: [...state.selection], comment: instruction }); }
+    try { await api('/api/feedback', { versionId: target, selection: [...get().selection], comment: instruction }); }
     catch (e) { return fail('ask', `Could not send: ${why(e)}. Your text is kept.`); }
     set({ instruction: '' }); clearFails('ask'); say('Sent to your agent');
     await load().catch((e) => fail('view', `Sent, but could not reload: ${why(e)}`));
@@ -313,7 +327,7 @@ export async function submitAsk(): Promise<void> {
   }
   if (runningJob(target, 'propose')) return fail('ask', `A proposal from ${target} is already being made. Wait for it or cancel it, then propose again.`);
   try {
-    const job = await api<Job>('/api/propose', { baseId: target, instruction, selection: [...state.selection], context: state.ctx });
+    const job = await api<Job>('/api/propose', { baseId: target, instruction, selection: [...get().selection], context: get().ctx });
     clearFails('ask'); say(`Proposal requested from ${target}`);
     trackJob(job, async (j) => {
       set({ lastResult: j });
@@ -324,7 +338,7 @@ export async function submitAsk(): Promise<void> {
 }
 
 // ---------- decisions ----------
-export async function decide(decision: 'accept' | 'discard', id: string = state.viewId): Promise<void> {
+export async function decide(decision: 'accept' | 'discard', id: string = get().viewId): Promise<void> {
   if (decision === 'discard') return discardLater(id);
   try { await api('/api/decide', { versionId: id, decision }); }
   catch (e) { return fail('review', `Cannot ${decision} ${id}: ${why(e)}`); }
@@ -351,23 +365,23 @@ export async function checkout(id: string): Promise<void> {
 export const UNDO_MS = 6000;
 let discardTimer = 0;
 function discardLater(id: string): void {
-  if (state.pendingDiscard) void commitDiscard(); // one at a time: the earlier one is decided now
+  if (get().pendingDiscard) void commitDiscard(); // one at a time: the earlier one is decided now
   discardTimer = window.setTimeout(() => void commitDiscard(), UNDO_MS);
   set({ pendingDiscard: id });
   say(`${id} will be discarded in ${UNDO_MS / 1000} seconds. Press Undo to keep it.`);
 }
 export function undoDiscard(): void {
-  const id = state.pendingDiscard; if (!id) return;
+  const id = get().pendingDiscard; if (!id) return;
   clearTimeout(discardTimer); set({ pendingDiscard: null }); say(`${id} kept`);
-  if (state.viewId === id) focusSoon('acceptBtn');
+  if (get().viewId === id) focusSoon('acceptBtn');
 }
 async function commitDiscard(): Promise<void> {
-  const id = state.pendingDiscard; if (!id) return;
+  const id = get().pendingDiscard; if (!id) return;
   clearTimeout(discardTimer); set({ pendingDiscard: null });
   try { await api('/api/decide', { versionId: id, decision: 'discard' }); }
   catch (e) { return fail('review', `Cannot discard ${id}: ${why(e)}`); }
   clearFails('review');
-  if (state.viewId === id) set({ viewId: V(id)?.parent ?? state.data.head });
+  if (get().viewId === id) set({ viewId: V(id)?.parent ?? get().data.head });
   try { await load(); } catch (e) { return fail('view', `${id} discarded, but could not reload: ${why(e)}`); }
   say(`${id} discarded`);
 }
@@ -388,11 +402,11 @@ export async function planFinal(): Promise<void> {
   say(`Final render plan for ${plan.versionId}. Approve and render, or cancel.`);
 }
 export function closeFinalPlan(refocus = false): void {
-  if (state.finalPlan) set({ finalPlan: null });
+  if (get().finalPlan) set({ finalPlan: null });
   if (refocus) document.getElementById('finalBtn')?.focus();
 }
 export async function approveFinal(): Promise<void> {
-  const fp = state.finalPlan;
+  const fp = get().finalPlan;
   // The plan is for the version on screen only; the inspector closes it when the view changes.
   closeFinalPlan(true);
   if (!fp || fp.plan.versionId !== viewV().id) return;
@@ -407,7 +421,7 @@ export async function approveFinal(): Promise<void> {
 
 // ---------- adoption ----------
 export async function reviewAdoption(requestId: string): Promise<void> {
-  const req = state.data.adoptionRequests.find((a) => a.id === requestId);
+  const req = get().data.adoptionRequests.find((a) => a.id === requestId);
   if (req && discarding(req.version)) return fail('adopt', `${req.version} is about to be discarded; undo the discard to review ${requestId}.`);
   let plan: AdoptPlan;
   try { plan = await api<AdoptPlan>('/api/adopt/plan', { requestId }); }
@@ -417,7 +431,7 @@ export async function reviewAdoption(requestId: string): Promise<void> {
   set({ adoptDlg: { plan, open: true, requestId } });
 }
 export async function closeAdoption(decision: 'approve' | 'reject' | 'cancel'): Promise<void> {
-  const d = state.adoptDlg; if (!d?.open) return;
+  const d = get().adoptDlg; if (!d?.open) return;
   const { requestId } = d;
   set({ adoptDlg: { ...d, open: false } });
   if (decision === 'reject') {
