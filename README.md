@@ -134,6 +134,7 @@ npm run dev                             # Vite の開発サーバー。/api と 
 - ペアリングは、Director が表示したリンクの `#pair=...` を、Vite の URL（例: `http://127.0.0.1:5173/#pair=...`）に付けて開きます。
 - `web/` を編集したあとに `RENDER_DIRECTOR_DEV` なしで起動するには、先に `npm run build` が必要です。ビルドが古いと Director は起動しません。
 - ビルドが古いかどうかは、`web/` の下のすべてのファイル（ドットで始まる名前を除く）と、`vite.config.mts`、`tsconfig.web.json`、`components.json`、`scripts/build.mts`、`src/build-id.mts`、`package-lock.json` から計算した値で判定します。`package-lock.json` が入っているため、画面が使わない依存を変えただけでもビルドは古いとみなされます。`npm install` はビルドも行うので、ふつうは気にする必要はありません（`--ignore-scripts` で入れたときは `npm run build` を実行します）。
+- 開発サーバーでは、状態を Redux DevTools 拡張機能で閲覧できます（本番のビルドには入りません）。拡張機能からの書き込み（JUMP、IMPORT、RESET など）は捨てるので、JUMP や IMPORT をした後は、次に状態が変わるまで拡張機能の表示が実際の状態とずれます。
 - 開発サーバーを `npm run dev -- --host` などで 127.0.0.1 以外に公開しないでください。開発サーバーは `/api` と `/runs` を、Director が検査する Host と Origin を書き換えて転送するため、Director の「127.0.0.1 からの要求だけを受け付ける」検査が働かなくなります。また、`web/` と `node_modules/` のファイルが同じネットワークのほかの機械から読めます。
 
 ## 試験と計測
