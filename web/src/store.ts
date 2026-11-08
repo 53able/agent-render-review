@@ -3,12 +3,13 @@
 import { useSyncExternalStore } from 'react';
 import { api } from './lib/api.ts';
 import { signature } from './lib/signature.ts';
+import { applyRules, versionOf, viewedVersion } from './lib/state-rules.ts';
 import type { AdoptPlan, Data, FinalPlan, Job, PagePreview, Render, Version } from './lib/types.ts';
 
 export type MeasureView = { kind: 'render'; r: Render } | { kind: 'page'; pageUrl?: string; pv: PagePreview } | null;
 /** The .errs containers next to what can fail: #err-<scope>. */
 export type Scope = 'view' | 'preview' | 'adopt' | 'ask' | 'review' | 'final' | 'edit';
-export type Fail = { key: number; msg: string; retry?: () => unknown; retryLabel?: string; back: HTMLElement | null };
+export type Fail = { key: number; msg: string; retry?: () => unknown; retryLabel?: string };
 export type DiffBase = 'head' | 'parent';
 
 export type State = {
@@ -63,9 +64,9 @@ let state: State = {
 const listeners = new Set<() => void>();
 
 export const get = (): State => state;
-export const V = (id: string | null | undefined, s: State = state): Version | undefined => (id ? s.data.versions.find((v) => v.id === id) : undefined);
+export const V = (id: string | null | undefined, s: State = state): Version | undefined => versionOf(id, s);
 /** The version on screen. A view id that the loaded state does not know yet (a version just created) shows HEAD meanwhile. */
-export const viewV = (s: State = state): Version => (V(s.viewId, s) ?? V(s.data.head, s)) as Version;
+export const viewV = (s: State = state): Version => viewedVersion(s);
 export const isADE = (s: State = state): boolean => s.data?.mode === 'ade';
 export const discarding = (id: string, s: State = state): boolean => s.pendingDiscard === id;
 export const runningJob = (versionId: string, kind?: string, s: State = state): Job | undefined =>
@@ -73,24 +74,13 @@ export const runningJob = (versionId: string, kind?: string, s: State = state): 
 
 export function set(patch: Partial<State>): void {
   const prev = state;
-  let next: State = { ...prev, ...patch };
-  // Only against the version the view id names: while it is not loaded yet, viewV shows HEAD in its place, and HEAD's
-  // scene must not prune a selection made in another version.
-  const viewed = next.data && (next.data !== prev.data || next.viewId !== prev.viewId) ? V(next.viewId, next) : undefined;
-  if (viewed) {
-    // Objects that are not in the viewed scene cannot stay selected (app.js renderObjects).
-    const names = new Set(viewed.scene.nodes.map((n) => n.name));
-    if ([...next.selection].some((s) => !names.has(s))) next = { ...next, selection: new Set([...next.selection].filter((s) => names.has(s))) };
-    // The final render plan is for the version on screen only; switching versions closes it (#57).
-    if (next.finalPlan && next.finalPlan.plan.versionId !== viewed.id) next = { ...next, finalPlan: null };
-  }
-  // The notice is done once its proposal is on screen or no longer a proposal.
-  if (!('notice' in patch) && next.notice && next.data && (next.notice === viewV(next)?.id || V(next.notice, next)?.status !== 'proposed')) next = { ...next, notice: null };
-  if (next.notice !== prev.notice) document.title = next.notice ? `(1) ${BASE_TITLE}` : BASE_TITLE;
-  state = next;
+  state = applyRules(prev, { ...prev, ...patch }, patch);
   for (const l of listeners) l();
 }
 const subscribe = (l: () => void) => { listeners.add(l); return () => { listeners.delete(l); }; };
+// The tab title is marked while a proposal is announced.
+let titled = state.notice;
+subscribe(() => { if (state.notice !== titled) { titled = state.notice; document.title = titled ? `(1) ${BASE_TITLE}` : BASE_TITLE; } });
 /** Select one field (or a value derived without allocating) from the state. */
 export const useStore = <T,>(sel: (s: State) => T): T => useSyncExternalStore(subscribe, () => sel(state));
 
@@ -102,6 +92,8 @@ export const say = (msg: string): void => {
 };
 const why = (e: unknown): string => (e as Error).message;
 let failKey = 0;
+/** Per failure key, the control that was focused when it failed (kept out of the state: it is a DOM element). */
+const backs = new Map<number, HTMLElement>();
 /**
  * A failure stays on screen next to what failed until it is dismissed or the same action succeeds (#53). Each one is
  * role=alert, so screen readers announce it too. Dismissing it returns focus to the control that was focused when it failed.
@@ -109,14 +101,21 @@ let failKey = 0;
 export function fail(scope: Scope, msg: string, opts: { retry?: () => unknown; retryLabel?: string } = {}): void {
   const back = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
   const list = state.fails[scope].filter((f) => f.msg !== msg);
-  set({ fails: { ...state.fails, [scope]: [...list, { key: ++failKey, msg, back, ...opts }] } });
+  for (const f of state.fails[scope]) if (f.msg === msg) backs.delete(f.key);
+  const key = ++failKey;
+  if (back) backs.set(key, back);
+  set({ fails: { ...state.fails, [scope]: [...list, { key, msg, ...opts }] } });
 }
-export function clearFails(scope: Scope): void { if (state.fails[scope].length) set({ fails: { ...state.fails, [scope]: [] } }); }
+export function clearFails(scope: Scope): void {
+  if (!state.fails[scope].length) return;
+  for (const f of state.fails[scope]) backs.delete(f.key);
+  set({ fails: { ...state.fails, [scope]: [] } });
+}
 /** Removes one failure; focus goes back to the control that failed when it is still on screen. */
 export function dismissFail(scope: Scope, key: number): void {
-  const f = state.fails[scope].find((x) => x.key === key);
+  const back = backs.get(key); backs.delete(key);
   set({ fails: { ...state.fails, [scope]: state.fails[scope].filter((x) => x.key !== key) } });
-  if (f?.back?.isConnected && !f.back.closest('[hidden]')) f.back.focus();
+  if (back?.isConnected && !back.closest('[hidden]')) back.focus();
 }
 export const focusInstruction = (): void => document.getElementById('instruction')?.focus();
 /** Focuses an element once React has drawn it (after a state change that adds it). */
