@@ -10,9 +10,10 @@ import { createDirector } from './src/director.mts';
 import { createClaudeProposer } from './src/proposer.mts';
 import { createHttp } from './src/http.mts';
 import { setupLogging, shutdownLogging, log, errFields } from './src/log.mts';
+import { distProblem } from './src/build-id.mts';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const PUBLIC = path.join(ROOT, 'public');
+const PUBLIC = path.join(ROOT, 'dist');
 
 export async function main(argv: string[]) {
   const arg = (name: string): string | undefined => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
@@ -20,13 +21,42 @@ export async function main(argv: string[]) {
   const MODE = PROJECT ? 'ade' : 'standalone';
   const RUNS = PROJECT ? path.join(PROJECT, '.vork') : path.resolve(process.env.RENDER_DIRECTOR_RUNS || path.join(ROOT, 'runs'));
   const MODEL = process.env.DIRECTOR_MODEL || 'sonnet';
-  // Files under PUBLIC are served without a session, so RUNS (server.json, state.json) must not live there.
+  // Files under PUBLIC are served without a session, so RUNS (server.json, state.json) must not live there, nor where a
+  // build replaces it (see SERVED).
   // Checked before mkdir, on the real path of the nearest existing ancestor.
   // realpathSync.native returns the on-disk letter case, so PUBLIC/x is caught on case-insensitive file systems.
   const realish = (p: string): string => { let probe = p; while (!fs.existsSync(probe)) probe = path.dirname(probe); return path.join(fs.realpathSync.native(probe), path.relative(probe, p)); };
-  const runsReal = realish(RUNS), publicReal = fs.realpathSync.native(PUBLIC);
-  if (runsReal === publicReal || runsReal.startsWith(publicReal + path.sep)) { console.error(`refusing to start: the runs folder ${RUNS} is inside ${PUBLIC}, which is served without a session`); process.exit(2); }
+  // A missing or stale build would serve no UI or an old one. RENDER_DIRECTOR_DEV=1 (vite dev serves the UI) skips this.
+  if (process.env.RENDER_DIRECTOR_DEV === '1') {
+    console.error('build check skipped (RENDER_DIRECTOR_DEV)');
+    if (!fs.existsSync(path.join(PUBLIC, 'index.html'))) console.error(`${PUBLIC}/index.html is missing: the UI is served by vite dev (\`npm run dev\`)`);
+  } else {
+    const problem = distProblem(ROOT);
+    if (problem) { console.error(`refusing to start: ${problem}`); process.exit(2); }
+  }
+  // realish, not realpathSync: PUBLIC may not exist (DEV, or between the two renames of a rebuild).
+  // The part of a path realish cannot resolve keeps the letter case it was given, so on the usually case-insensitive
+  // file systems of macOS and Windows the comparison ignores case. After mkdir RUNS exists and is checked again on its
+  // real path, which also catches a folder swapped for a symlink in between.
+  const fold = (p: string) => (process.platform === 'darwin' || process.platform === 'win32' ? p.toLowerCase() : p);
+  // Folders RUNS must not be inside, each with why. dist.tmp becomes dist at the next build, and dist.old is dist
+  // between the two renames (scripts/swap-dist.mts). Under RENDER_DIRECTOR_DEV, vite dev serves web/ and node_modules/.
+  const SERVED: [string, string][] = [
+    [PUBLIC, 'which is served without a session'],
+    [path.join(ROOT, 'dist.tmp'), 'which the next build empties and then serves as dist without a session'],
+    [path.join(ROOT, 'dist.old'), 'which the next build deletes'],
+    ...(process.env.RENDER_DIRECTOR_DEV === '1'
+      ? [[path.join(ROOT, 'web'), 'which vite dev serves without a session'], [path.join(ROOT, 'node_modules'), 'which vite dev serves without a session']] as [string, string][]
+      : []),
+  ];
+  const servedBy = (runsReal: string) => SERVED.find(([d]) => { const r = fold(runsReal), pub = fold(realish(d)); return r === pub || r.startsWith(pub + path.sep); });
+  const checkRuns = (runsReal: string) => {
+    const hit = servedBy(runsReal); if (!hit) return;
+    console.error(`refusing to start: the runs folder ${RUNS} is inside ${hit[0]}, ${hit[1]}`); process.exit(2);
+  };
+  checkRuns(realish(RUNS));
   fs.mkdirSync(RUNS, { recursive: true });
+  checkRuns(fs.realpathSync.native(RUNS));
   const LOCK = path.join(RUNS, 'lock');
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (e: any) { return e.code === 'EPERM'; } };
   for (;;) {

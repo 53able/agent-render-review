@@ -28,6 +28,16 @@ vork 本体は同梱していません。別途インストールし、[vork の
 npm install
 ```
 
+`npm install` のときに、画面（`web/`）が `prepare` で `dist/` へビルドされます。ビルドに使う React、Vite、Tailwind CSS などは devDependencies に入っているので、`npm install --omit=dev` には対応しません。scripts を無効にしている（`--ignore-scripts` など）場合は、続けて `npm run build` を実行してください。`dist/` が無いか、ソースと合わない古いビルドのときは、Director は起動せずに `npm install` を案内します（MCP 経由ならエージェントにその案内が返ります）。
+
+### 更新
+
+```sh
+git pull && npm install
+```
+
+更新したら、動いている Director を再起動してください。Director のプロセスを `kill` するか、エージェントのセッションを開き直すと、次にツールを呼んだときに新しい Director が起動します。
+
 ## ADEモード
 
 ### 1. MCP を登録する
@@ -111,12 +121,27 @@ Director は起動時に、ブラウザでレビュー用のタブを開きま�
 node server.mts             # http://127.0.0.1:4747 、状態は runs/
 ```
 
+## 画面の開発
+
+画面のソースは `web/`（React、Vite、Tailwind CSS、shadcn/ui）にあり、Director は `npm run build` の出力 `dist/` を配信します。開発中は Vite の開発サーバーと Director を別々に起動します。
+
+```sh
+RENDER_DIRECTOR_DEV=1 node server.mts   # ビルドの照合を省いて起動する（起動時に build check skipped と表示される）
+npm run dev                             # Vite の開発サーバー。/api と /runs を Director（127.0.0.1:4747）へ転送する
+```
+
+- Director のポートを変えたときは、両方に同じ `PORT` を渡します（例: `PORT=4800 RENDER_DIRECTOR_DEV=1 node server.mts` と `PORT=4800 npm run dev`）。
+- ペアリングは、Director が表示したリンクの `#pair=...` を、Vite の URL（例: `http://127.0.0.1:5173/#pair=...`）に付けて開きます。
+- `web/` を編集したあとに `RENDER_DIRECTOR_DEV` なしで起動するには、先に `npm run build` が必要です。ビルドが古いと Director は起動しません。
+- ビルドが古いかどうかは、`web/` の下のすべてのファイル（ドットで始まる名前を除く）と、`vite.config.mts`、`tsconfig.web.json`、`components.json`、`scripts/build.mts`、`src/build-id.mts`、`package-lock.json` から計算した値で判定します。`package-lock.json` が入っているため、画面が使わない依存を変えただけでもビルドは古いとみなされます。`npm install` はビルドも行うので、ふつうは気にする必要はありません（`--ignore-scripts` で入れたときは `npm run build` を実行します）。
+- 開発サーバーを `npm run dev -- --host` などで 127.0.0.1 以外に公開しないでください。開発サーバーは `/api` と `/runs` を、Director が検査する Host と Origin を書き換えて転送するため、Director の「127.0.0.1 からの要求だけを受け付ける」検査が働かなくなります。また、`web/` と `node_modules/` のファイルが同じネットワークのほかの機械から読めます。
+
 ## 試験と計測
 
 ```sh
-npm run typecheck           # TypeScript 7 で型検査（サーバー側 .mts と public/app.js の JSDoc）
-npm test                    # test:unit + 統合試験（実MCPクライアント、vork が必要）
-npm run test:unit           # 自己テスト（ポリシー、差分、書き込み先の検査）、Director の use case、レビュー画面の照合（public/review-model.js）。vork も Chrome も不要
+npm run typecheck           # TypeScript 7 で型検査（サーバー側 .mts と vite.config.mts、web/ の TypeScript）
+npm test                    # 先にビルドしてから、test:unit + ビルドの照合の試験 + 統合試験（実MCPクライアント、vork が必要）
+npm run test:unit           # 自己テスト（ポリシー、差分、書き込み先、ビルドID、画面の純粋なロジック、コントラスト）、Director の use case、レビュー画面の照合（web/src/lib/review-model.ts）、構造化ログ、HTTP。vork も Chrome も不要
 npm run test:e2e            # ブラウザE2E（Chrome）。E2E_AGENT=1 で内蔵エージェントも試す。E2E_REQUIRED=1 なら Chrome が無いと失敗にする。README の画像（docs/screenshot-*.png）は E2E_UPDATE_SCREENSHOTS=1 のときだけ書き換える
 npm run report -- <project> # 最初の提案から採用までの時間、フィードバック回数など
 ```

@@ -4,5 +4,6 @@ runs/
 .vork/
 !examples/landing/public/vork/.gitkeep
 .DS_Store
-# left behind only if the integration test is killed mid-check
-public/int-*
+dist/
+dist.tmp/
+dist.old/

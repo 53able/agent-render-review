@@ -1,0 +1,19 @@
+// Data shapes of Director's HTTP API (ported from the JSDoc typedefs of public/app.js). No DOM types here; State lives in web/src/store.ts.
+export type RenderObject = { pass_index: number; name: string };
+export type Render = { image: string; ids: string | null; width: number; height: number; objects: RenderObject[]; profile: string; seconds: number; settings: { integrator: string; samples: number }; exposure: { mean: number; clipped: number; near_black: number }; warnings: string[] };
+export type PagePreview = { ok: boolean; reason?: string; image: string; matched: number; warning?: string };
+export type SceneNode = { name: string; type: string; shape?: string; energy?: number; color?: number[]; materials?: { inputs: Record<string, any> }[] };
+export type Scene = { nodes: SceneNode[] };
+export type Diff = { node: string; path: string; before?: unknown; after?: unknown };
+export type Proposal = { claimed_changes: { node: string; what: string; why: string }[]; interpretation: string; assumptions: string[]; policy: { flags: { level: string; msg: string }[] }; context: string[]; via?: string; cost?: number };
+export type Version = { id: string; parent?: string | null; status: string; origin: string; instruction?: string; hash: string; renders: Record<string, Render | undefined>; pagePreviews?: Record<string, PagePreview>; scene: Scene; proposal: Proposal; diff: Diff[]; headDiff?: Diff[] | null };
+export type AgentEvent = { seq: number; type: string; comment: string; selection: string[]; decision: string; version: string; asset: string; node: string; field: string; request: string };
+export type AdoptionRequest = { id: string; status: string; slug: string; version: string; reason: string; job?: string };
+export type AuditEntry = { t: string; event: string; version?: string; instruction?: string };
+export type Data = { head: string; versions: Version[]; vork: string; mode?: string; project?: string; model?: string; adoptionRequests: AdoptionRequest[]; events: AgentEvent[]; agentCursor: number; audit: AuditEntry[]; config: { pageUrl?: string } };
+export type JobResult = { kind: string; versionId: string; asset: string; proposal?: { clarifying_question?: string }; policy: { blockers: string[] }; log?: string };
+export type Job = { id: string; kind: string; status: string; versionId: string; steps: { status: string; label: string; t: number; detail?: string }[]; elapsed: number; error?: string; result: JobResult };
+export type AdoptPlan = { versionId: string; versionStatus: string; acceptsProposal?: boolean; hash: string; reason: string; writes: string[]; overwrites?: boolean; existing: { bytes: number | null; modified: string | null; image: string | null } | null; needsFinalRender?: boolean; shows: string | null; image: string | null; expiresInSec: number; ticket: string };
+export type FinalPlan = { versionId: string; hash: string; profile: string; resolution: number[]; output: string; overwrites?: boolean; reference: string; timeoutSec: number; expiresInSec: number; flags: { msg: string }[]; ticket: string };
+export type Ids = { w: number; h: number; arr: Uint16Array; objects: Record<string, string> };
+export type QuickRow = [string, string, string, any, ...number[]];

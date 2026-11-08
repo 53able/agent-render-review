@@ -1,0 +1,261 @@
+@import "tailwindcss" source("..");
+@import "tw-animate-css";
+
+/*
+ * Variants the generated components in components/ui/ rely on. Copied from
+ * shadcn's `shadcn/tailwind.css` instead of importing it, so the shadcn CLI
+ * (and its dependency tree) is not needed at build time.
+ */
+@custom-variant dark (&:is(.dark *));
+
+@custom-variant data-open {
+  &:where([data-state="open"]),
+  &:where([data-open]:not([data-open="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-closed {
+  &:where([data-state="closed"]),
+  &:where([data-closed]:not([data-closed="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-checked {
+  &:where([data-state="checked"]),
+  &:where([data-checked]:not([data-checked="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-unchecked {
+  &:where([data-state="unchecked"]),
+  &:where([data-unchecked]:not([data-unchecked="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-selected {
+  &:where([data-selected="true"]) {
+    @slot;
+  }
+}
+
+@custom-variant data-disabled {
+  &:where([data-disabled="true"]),
+  &:where([data-disabled]:not([data-disabled="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-active {
+  &:where([data-state="active"]),
+  &:where([data-active]:not([data-active="false"])) {
+    @slot;
+  }
+}
+
+@custom-variant data-horizontal {
+  &:where([data-orientation="horizontal"]) {
+    @slot;
+  }
+}
+
+@custom-variant data-vertical {
+  &:where([data-orientation="vertical"]) {
+    @slot;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-agent: var(--agent);
+  --color-human: var(--human);
+  --color-warn: var(--warn);
+  --color-ok: var(--ok);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+/*
+ * Theme tokens, in hex so test/contrast.mts can check them. .dark carries the original dark palette
+ * (public/style.css:1-6); :root (light) is chosen to pass the contrast table of the plan (AC-10).
+ * The viewport (#000 background, #tip, #empty, #wipe, canvas) does not use these; see lib/canvas-colors.ts.
+ */
+:root {
+  --radius: 0.5rem;
+  --background: #ffffff;
+  --foreground: #14171c;
+  --card: #f6f7f9;
+  --card-foreground: #14171c;
+  --popover: #ffffff;
+  --popover-foreground: #14171c;
+  --primary: #0b6b78;
+  --primary-foreground: #ffffff;
+  --secondary: #eceef1;
+  --secondary-foreground: #14171c;
+  --muted: #eceef1;
+  --muted-foreground: #59616d;
+  --accent: #eceef1;
+  --accent-foreground: #14171c;
+  --destructive: #c4262e;
+  --border: #dde1e6;
+  --input: #868e99;
+  --ring: #0b7f8c;
+  --agent: #6a46d1;
+  --human: #1f62a8;
+  --warn: #8a5800;
+  --ok: #1c7a43;
+  /* states by meaning (#60): every state also has a text or shape, so colour is never the only cue */
+  --st-proposed: #8a5800;
+  --st-accepted: #1c7a43;
+  --st-discarded: #59616d;
+  --st-head: #0b6b78;
+  --st-failed: #c4262e;
+  --bad-soft: #fdecec;
+  color-scheme: light;
+}
+
+.dark {
+  --background: #0d0f12;
+  --foreground: #e6e8eb;
+  --card: #14171c;
+  --card-foreground: #e6e8eb;
+  --popover: #14171c;
+  --popover-foreground: #e6e8eb;
+  --primary: #3ee6f0;
+  --primary-foreground: #04272a;
+  --secondary: #1f252d;
+  --secondary-foreground: #e6e8eb;
+  --muted: #1b1f26;
+  --muted-foreground: #8b939e;
+  --accent: #1f252d;
+  --accent-foreground: #e6e8eb;
+  --destructive: #ff6b6b;
+  --border: #262b33;
+  --input: #5d6672;
+  --ring: #3ee6f0;
+  --agent: #b39bff;
+  --human: #7cc4ff;
+  --warn: #f2b84b;
+  --ok: #5fd38d;
+  --st-proposed: #f2b84b;
+  --st-accepted: #5fd38d;
+  --st-discarded: #8b939e;
+  --st-head: #3ee6f0;
+  --st-failed: #ff6b6b;
+  --bad-soft: #2a1416;
+  color-scheme: dark;
+}
+
+/* System fonts only (Tailwind's default font-sans stack); no web fonts. */
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  /* Section headings as in public/style.css:10 */
+  h2 {
+    margin: 0 0 8px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+}
+
+@layer components {
+  .hint {
+    margin: 6px 0;
+    font-size: 11.5px;
+    color: var(--muted-foreground);
+  }
+  .btnrow { display: flex; flex-wrap: wrap; gap: 8px; }
+  /* An empty row (#decide for a HEAD) would still add a gap before the next button. */
+  .btnrow:empty { display: none; }
+
+  /* Layout (#56): versions | render | inspector of the version on screen */
+  .layout { display: grid; grid-template-columns: 240px minmax(0, 1fr) 360px; height: calc(100vh - 43px); }
+  /* position: relative makes the panel the containing block of what is absolutely positioned inside it (the hidden
+     native inputs Radix puts next to a checkbox in a form): otherwise they are placed against the page and make it
+     scroll past the screen whenever the panel's content is taller than the screen. */
+  .panel { position: relative; background: var(--card); padding: 14px; overflow: auto; }
+  .versions { display: flex; flex-direction: column; gap: 10px; border-right: 1px solid var(--border); }
+  .inspector { display: flex; flex-direction: column; gap: 18px; border-left: 1px solid var(--border); }
+  .stage { display: flex; flex-direction: column; min-width: 0; padding: 14px; overflow: auto; }
+  .viewport { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; }
+  .vhead { display: grid; gap: 8px; }
+  .insp-title { margin: 0; font-size: 14px; letter-spacing: 0; text-transform: none; color: var(--foreground); }
+  .panetabs { display: none; }
+  @media (max-width: 1100px) {
+    .layout { grid-template-columns: 1fr; height: auto; }
+    .versions, .inspector { overflow: visible; border: 0; border-top: 1px solid var(--border); }
+    /* the render stays in view while scrolling the panel below it (#60) */
+    .stage { position: sticky; top: 0; z-index: 5; overflow: visible; padding-bottom: 8px; border-bottom: 1px solid var(--border); background: var(--background); }
+    .viewport { width: min(100%, calc(42vh * var(--ar, 1.7778))); margin: 0 auto; }
+    .stage > .hint, .measure { display: none; }
+    .panetabs { display: flex; gap: 4px; padding: 8px 12px 0; border-top: 1px solid var(--border); background: var(--card); }
+    .panetabs [role="tab"] { border: 1px solid var(--border); border-bottom: 0; border-radius: 6px 6px 0 0; color: var(--muted-foreground); }
+    .panetabs [role="tab"][aria-selected="true"] { color: var(--foreground); background: var(--muted); box-shadow: inset 0 2px 0 var(--st-head); }
+    .layout[data-pane="inspector"] .versions, .layout[data-pane="versions"] .inspector { display: none; }
+    .stage { order: 0; }
+    .panetabs { order: 1; }
+    .versions, .inspector { order: 2; }
+  }
+
+  /* Versions: state as a symbol and a word (#60), HEAD, a running job (#54) */
+  .stchip { grid-column: 1 / -1; justify-self: start; font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .st-proposed .stchip { color: var(--st-proposed); }
+  .st-accepted .stchip { color: var(--st-accepted); }
+  .st-discarded .stchip { color: var(--st-discarded); }
+  .st-discarded { opacity: 0.55; }
+  .st-discarded .vtitle { text-decoration: line-through; }
+  .headmark { font-size: 10px; color: var(--st-head); }
+  .vlist .busy .vid::after { content: " · working…"; color: var(--st-head); }
+
+  .alist { display: grid; gap: 6px; }
+  .alist li { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 8px; }
+  .alist .why { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted-foreground); }
+  .planbox { border: 1px solid var(--st-head); border-radius: 8px; padding: 10px; }
+  .plan { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 8px 0 10px; font-size: 12px; }
+  .plan dt { color: var(--muted-foreground); }
+  .plan dd { margin: 0; font-family: var(--font-mono); }
+  .adoptimgs { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+  .adoptimgs figure { display: grid; align-content: start; gap: 6px; margin: 0; }
+  .adoptimgs figcaption { font-size: 12px; color: var(--muted-foreground); overflow-wrap: anywhere; }
+  .adoptimgs img { width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; background: #000; }
+
+  /* Failures stay next to what failed (#53) */
+  .errs { display: grid; gap: 6px; }
+  .errs:empty { display: none; }
+  #err-view, #err-preview { margin-bottom: 8px; }
+  .err { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border: 1px solid var(--st-failed); border-radius: 6px; background: var(--bad-soft); color: var(--foreground); }
+  .err .msg { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .conn { padding: 6px 16px; border-bottom: 1px solid var(--st-failed); background: var(--bad-soft); }
+  .undo { position: fixed; left: 16px; bottom: 16px; z-index: 10; display: flex; align-items: center; gap: 10px; padding: 6px 10px; border: 1px solid var(--st-proposed); border-radius: 6px; background: var(--card); box-shadow: 0 6px 24px rgb(0 0 0 / 0.5); }
+}

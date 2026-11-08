@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RenderSummary } from './src/contract.mts';
 import { resolveInside } from './src/policy.mts';
+import { distProblem } from './src/build-id.mts';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -33,17 +34,64 @@ async function director() {
   if (conn && (await ping(conn))) return conn;
   const existing = readServerFile();
   if (existing && existing.project === PROJECT && (await ping(existing))) return (conn = existing);
+  // The same build check as main.mts, before spawning, so the agent gets the instructions at once.
+  if (process.env.RENDER_DIRECTOR_DEV !== '1') { const problem = distProblem(ROOT); if (problem) throw new Error(`Director cannot start: ${problem}`); }
   log('starting Director for', PROJECT);
   fs.mkdirSync(path.dirname(SERVER_FILE), { recursive: true });
-  const out = fs.openSync(path.join(PROJECT, '.vork', 'server.log'), 'a');
+  const LOG = path.join(PROJECT, '.vork', 'server.log');
+  // server.log must be a plain file with one link: a symlink or a hard link put in its place would send the child's
+  // output to (and logTail would read back) another file, and a FIFO would make open fail or block. Our own name of it
+  // is removed (an empty folder too), which leaves the other file as it was; the next call starts a new log.
+  // Checked with lstat before open, as src/log.mts does, and again on the open file in case the name was swapped.
+  const replaced = () => {
+    try { fs.unlinkSync(LOG); } catch { try { fs.rmdirSync(LOG); } catch {} }
+    let gone = false; try { fs.lstatSync(LOG); } catch (e) { gone = (e as NodeJS.ErrnoException).code === 'ENOENT'; }
+    return !gone
+      ? new Error(`Director was not started: ${LOG} is not a plain file with one link and could not be removed. Remove it, then call the tool again.`)
+      : new Error(`Director was not started: ${LOG} was not a plain file with one link, so it was removed. Call the tool again.`);
+  };
+  let pre: fs.Stats | null = null;
+  try { pre = fs.lstatSync(LOG); } catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
+  if (pre && (!pre.isFile() || pre.nlink !== 1)) throw replaced();
+  // O_NOFOLLOW: not through a symlink. O_NONBLOCK: a FIFO put there after lstat would otherwise block open, and with
+  // it this process. Those (ELOOP, ENXIO) and a folder (EISDIR) are handled like what lstat catches.
+  let out: number;
+  try { out = fs.openSync(LOG, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK, 0o600); }
+  catch (e) { if (['ELOOP', 'ENXIO', 'EISDIR'].includes((e as NodeJS.ErrnoException).code ?? '')) throw replaced(); throw e; }
+  const st = fs.fstatSync(out);
+  if (!st.isFile() || st.nlink !== 1) { fs.closeSync(out); throw replaced(); }
   const child = spawn(process.execPath, [path.join(ROOT, 'server.mts'), '--project', PROJECT], { detached: true, stdio: ['ignore', out, out] });
+  fs.closeSync(out);
+  const ended: { code: number | null; signal: NodeJS.Signals | null }[] = [];
+  child.on('exit', (code, signal) => { ended.push({ code, signal }); });
   child.unref();
   for (let t = 0; t < 60; t++) {
     await new Promise((r) => setTimeout(r, 250));
+    // 3: another session's Director holds the lock, which is normal: keep waiting for its server.json. Any other end
+    // (2: missing or stale build, runs folder inside dist; 1: vork missing or a crash) means no Director is coming.
+    const end = ended[0];
+    if (end && end.code !== 3) throw new Error(`Director exited at startup (${end.code !== null ? `exit ${end.code}` : end.signal}). ${LOG} ends with:\n${logTail(LOG)}`);
     const s = readServerFile(); // our child, or another session's Director that won the lock
     if (s && s.project === PROJECT && (await ping(s))) return (conn = s);
   }
-  throw new Error(`Director did not start; see ${path.join(PROJECT, '.vork', 'server.log')}`);
+  throw new Error(`Director did not start; see ${LOG}. It ends with:\n${logTail(LOG)}`);
+}
+
+/**
+ * The last 20 lines of the last 8 KB of server.log, for an error message. The file is opened without following a
+ * symlink and read only when it is a plain file with one link, so a link put in place of the log cannot make this
+ * process read (and hand the agent) another file.
+ */
+function logTail(file: string): string {
+  let fd: number;
+  try { fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); } catch { return ''; }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.nlink !== 1) return '';
+    const len = Math.min(st.size, 8192); const buf = Buffer.alloc(len);
+    const n = fs.readSync(fd, buf, 0, len, st.size - len);
+    return buf.subarray(0, n).toString('utf8').trimEnd().split('\n').slice(-20).join('\n');
+  } catch { return ''; } finally { fs.closeSync(fd); }
 }
 
 async function call(method: string, route: string, body?: unknown) {

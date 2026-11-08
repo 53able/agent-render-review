@@ -1,7 +1,7 @@
-// Unit tests of the review panel's checks (public/review-model.js): claimed changes against the diff, the grouping of
+// Unit tests of the review panel's checks (web/src/lib/review-model.ts): claimed changes against the diff, the grouping of
 // large diffs, the object list. No browser needed (#48).
 import assert from 'node:assert/strict';
-import { isWildcard, keyOf, checkClaims, groupDiff, nameStem, nameRuns, describeNames, visibleObjects } from '../public/review-model.js';
+import { isWildcard, keyOf, checkClaims, groupDiff, nameStem, nameRuns, describeNames, visibleObjects } from '../web/src/lib/review-model.ts';
 
 let pass = 0, failures = 0;
 async function check(name: string, fn: () => unknown) {
