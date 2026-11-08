@@ -108,6 +108,12 @@ const why = (e: unknown): string => (e as Error).message;
 let failKey = 0;
 /** Per failure key, the control that was focused when it failed (kept out of the state: it is a DOM element). */
 const backs = new Map<number, HTMLElement>();
+// However a failure leaves the state (dismissed, cleared, replaced, or filtered by a component), its control goes too.
+store.subscribe((s, prev) => {
+  if (s.fails === prev.fails) return;
+  const live = new Set(Object.values(s.fails).flatMap((list) => list.map((f) => f.key)));
+  for (const key of backs.keys()) if (!live.has(key)) backs.delete(key);
+});
 /**
  * A failure stays on screen next to what failed until it is dismissed or the same action succeeds (#53). Each one is
  * role=alert, so screen readers announce it too. Dismissing it returns focus to the control that was focused when it failed.
@@ -115,19 +121,15 @@ const backs = new Map<number, HTMLElement>();
 export function fail(scope: Scope, msg: string, opts: { retry?: () => unknown; retryLabel?: string } = {}): void {
   const back = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
   const list = get().fails[scope].filter((f) => f.msg !== msg);
-  for (const f of get().fails[scope]) if (f.msg === msg) backs.delete(f.key);
   const key = ++failKey;
   if (back) backs.set(key, back);
   set({ fails: { ...get().fails, [scope]: [...list, { key, msg, ...opts }] } });
 }
-export function clearFails(scope: Scope): void {
-  if (!get().fails[scope].length) return;
-  for (const f of get().fails[scope]) backs.delete(f.key);
-  set({ fails: { ...get().fails, [scope]: [] } });
-}
+export function clearFails(scope: Scope): void { if (get().fails[scope].length) set({ fails: { ...get().fails, [scope]: [] } }); }
 /** Removes one failure; focus goes back to the control that failed when it is still on screen. */
 export function dismissFail(scope: Scope, key: number): void {
-  const back = backs.get(key); backs.delete(key);
+  if (!get().fails[scope].some((x) => x.key === key)) return;
+  const back = backs.get(key);
   set({ fails: { ...get().fails, [scope]: get().fails[scope].filter((x) => x.key !== key) } });
   if (back?.isConnected && !back.closest('[hidden]')) back.focus();
 }

@@ -3,7 +3,7 @@
 // Google Chrome. DEV_SMOKE_PER_MESSAGE=1 reloads the page before each devtools message (the positive control, run with the
 // write guard in store.ts taken out by hand: every message must then FAIL).
 import { chromium } from 'playwright-core';
-import type { Page } from 'playwright-core';
+import type { Browser } from 'playwright-core';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
@@ -33,7 +33,13 @@ async function check(name: string, fn: () => unknown) {
   try { await fn(); pass++; console.log(`PASS ${name}`); }
   catch (e: any) { failures++; console.log(`FAIL ${name}\n     ${String(e.message).split('\n').slice(0, 4).join('\n     ')}`); }
 }
-const freePort = () => new Promise<number>((resolve) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address() as net.AddressInfo; s.close(() => resolve(port)); }); });
+/** n distinct free ports: all servers are open at once before any is closed, so the same port cannot come back twice. */
+async function freePorts(n: number): Promise<number[]> {
+  const servers = await Promise.all(Array.from({ length: n }, () => new Promise<net.Server>((resolve) => { const s = net.createServer().listen(0, '127.0.0.1', () => resolve(s)); })));
+  const ports = servers.map((s) => (s.address() as net.AddressInfo).port);
+  await Promise.all(servers.map((s) => new Promise((r) => s.close(r))));
+  return ports;
+}
 /** Starts a process and waits for a line of its output to match. */
 async function start(args: string[], env: Record<string, string>, ready: RegExp): Promise<RegExpMatchArray> {
   const p = spawn(process.execPath, args, { cwd: ROOT, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -43,16 +49,21 @@ async function start(args: string[], env: Record<string, string>, ready: RegExp)
   for (let i = 0; i < 200; i++) { const m = out.match(ready); if (m) return m; await new Promise((r) => setTimeout(r, 150)); }
   throw new Error(`${args.join(' ')} did not start:\n${out}`);
 }
-const cleanup = () => { for (const p of procs) p.kill('SIGTERM'); fs.rmSync(tmp, { recursive: true, force: true }); };
+/** Stops both servers and waits for them to exit before removing their temporary folder. */
+async function cleanup(): Promise<void> {
+  await Promise.all(procs.map((p) => (p.exitCode !== null || p.signalCode !== null ? undefined : new Promise((r) => { p.once('exit', r); p.kill('SIGTERM'); }))));
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+let browser: Browser | undefined;
 
 try {
-  const dPort = await freePort(), vPort = await freePort();
+  const [dPort, vPort] = await freePorts(2);
   await start([path.join(ROOT, 'server.mts'), '--port', String(dPort)], {
     RENDER_DIRECTOR_RUNS: path.join(tmp, 'runs'), RENDER_DIRECTOR_DEV: '1', RENDER_DIRECTOR_NO_OPEN: '1', RENDER_DIRECTOR_PAIR_TOKEN: TOKEN,
   }, /Render Director on (http:\/\/\S+)/);
   const [, viteUrl] = await start([path.join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js'), '--config', 'vite.config.mts', '--port', String(vPort)], { PORT: String(dPort) }, /Local:\s+(http:\/\/\S+?)\/?\s/);
 
-  const browser = await chromium.launch({ executablePath: CHROME, headless: true });
+  browser = await chromium.launch({ executablePath: CHROME, headless: true });
   const page = await browser.newPage({ viewport: { width: 1500, height: 1000 } });
   const errors: string[] = [], dtErrors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
@@ -118,11 +129,11 @@ try {
         `#instruction=${JSON.stringify(value)}, pageerror=${JSON.stringify(pageErrors)}, [zustand devtools middleware] errors=${JSON.stringify(shapeErrors)}`);
     });
   }
-  await browser.close();
 } catch (e) {
   failures++; console.log(`FAIL dev-smoke: ${(e as Error).message}`);
 } finally {
-  cleanup();
+  await browser?.close();
+  await cleanup();
 }
 console.log(`\n${pass} passed, ${failures} failed${PER_MESSAGE ? ' (per message)' : ''}`);
 process.exit(failures ? 1 : 0);

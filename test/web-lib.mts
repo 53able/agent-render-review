@@ -266,6 +266,12 @@ await check('state-rules: viewing the announced proposal ends the notice', () =>
 await check('state-rules: the announced version no longer being a proposal ends the notice', () => {
   assert.equal(rule(noticed(), { data: ruleData(ver('v1'), ver('p1', { parent: 'v1', status: 'accepted' })) }).notice, null);
 });
+await check('state-rules: an unrelated patch keeps the notice while another version is on screen and it is still a proposal', () => {
+  assert.equal(rule(noticed(), { selection: new Set(['a']) }).notice, 'p1');
+});
+await check('state-rules: new data with the announced version still proposed keeps the notice', () => {
+  assert.equal(rule(noticed(), { data: ruleData(ver('v1'), ver('p1', { parent: 'v1', status: 'proposed' })) }).notice, 'p1');
+});
 await check('state-rules: a patch that sets notice keeps it', () => {
   assert.equal(rule(rs({ data: ruleData(ver('v1'), ver('p1', { parent: 'v1', status: 'proposed' })), viewId: 'p1' }), { notice: 'p1' }).notice, 'p1');
 });
