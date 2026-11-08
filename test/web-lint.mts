@@ -48,5 +48,24 @@ check('AC-8: vite is locked at 6.0.9 or later (server.cors and allowedHosts defa
   assert.ok(a > 6 || (a === 6 && (b > 0 || c >= 9)), `vite ${v} >= 6.0.9`);
 });
 
+// zustand plan (#73): the store is zustand, pinned, and set() is its only way in.
+const STORE = read(path.join(SRC, 'store.ts'));
+const count = (re: RegExp) => STORE.match(new RegExp(re.source, 'g'))?.length ?? 0;
+check('zustand AC-1: zustand is pinned to 5.0.16 and the lock entry matches it', () => {
+  assert.equal(JSON.parse(read(path.join(ROOT, 'package.json'))).devDependencies?.zustand, '5.0.16');
+  const z = JSON.parse(read(path.join(ROOT, 'package-lock.json'))).packages?.['node_modules/zustand'];
+  assert.equal(z?.version, '5.0.16');
+  assert.equal(z?.resolved, 'https://registry.npmjs.org/zustand/-/zustand-5.0.16.tgz');
+  assert.equal(z?.integrity, 'sha512-Uv7e327ihlCfayfja3hDc0M64Upev1LWBKpRobdK4NyovDDPeeX4imWXc/wzC1yc6fkYPoAY/ncKVPAs2jrtQw==');
+});
+check('zustand AC-2: store.ts keeps no hand-made subscription (useSyncExternalStore, listeners, a state variable)', () => {
+  for (const re of [/useSyncExternalStore/, /\blisteners\b/, /(let|const|var)\s+state\b/, /\bstate\s*=(?!=)/]) assert.equal(count(re), 0, String(re));
+});
+check('zustand AC-9: the store is not exported, and set() is the one writer (store.setState and writing = true once each)', () => {
+  assert.equal(count(/export\s+(default\b|const\s+store\b|\{[^}]*\bstore\b)/), 0, 'store is exported');
+  assert.equal(count(/\bstore\.setState\b/), 1, 'store.setState');
+  assert.equal(count(/\bwriting\s*=\s*true\b/), 1, 'writing = true');
+});
+
 console.log(`\n${pass} passed, ${failures} failed`);
 process.exit(failures ? 1 : 0);

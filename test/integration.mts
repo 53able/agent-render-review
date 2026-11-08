@@ -469,6 +469,12 @@ await check('dist/ holds only index.html and assets/*.js, assets/*.css', async (
   assert.ok(files.some((f) => /^assets\/[^/]+\.js$/.test(f)) && files.some((f) => /^assets\/[^/]+\.css$/.test(f)), JSON.stringify(files));
   for (const f of files) assert.match(f, /^(index\.html|assets\/[^/]+\.(js|css))$/, f);
 });
+await check('zustand AC-6: the production bundle carries no Redux devtools hook', async () => {
+  const dir = path.join(ROOT, 'dist', 'assets');
+  const js = fs.readdirSync(dir).filter((f) => f.endsWith('.js'));
+  assert.ok(js.length, 'dist/assets has JS');
+  for (const f of js) assert.equal(fs.readFileSync(path.join(dir, f), 'utf8').split('__REDUX_DEVTOOLS_EXTENSION').length - 1, 0, f);
+});
 
 await check('#8 propose refuses unnamed and "#"-named nodes before rendering; edit needs a string node', async () => {
   const versions = (await state()).versions.length;

@@ -7,6 +7,7 @@ import { signature } from '../web/src/lib/signature.ts';
 import { isWildcard, groupDiff, keyOf, checkClaims as checkClaimsOf } from '../web/src/lib/review-model.ts';
 import { depth } from '../web/src/lib/depth.ts';
 import { canvasColors } from '../web/src/lib/canvas-colors.ts';
+import { applyRules, type RuleState } from '../web/src/lib/state-rules.ts';
 import type { Data, Version, Diff, Ids, SceneNode } from '../web/src/lib/types.ts';
 
 let pass = 0, failures = 0;
@@ -220,6 +221,59 @@ await check('depth: discarded siblings do not branch; missing parent and no vers
   assert.equal(depth(vs[1], vs), 0);
   assert.equal(depth(ver('orphan', { parent: 'gone' }), []), 0);
   assert.equal(depth(ver('x'), []), 0);
+});
+
+// ---------- state-rules (what store.ts set() does to every change) ----------
+const scene = (...names: string[]) => ({ nodes: names.map((n) => node(n, 'mesh')) });
+const ruleData = (...vs: Version[]): Data => data({ head: 'v1', versions: vs });
+const rs = (over: Partial<RuleState> = {}): RuleState => ({ data: ruleData(ver('v1', { scene: scene('a', 'b') }), ver('v2', { parent: 'v1', scene: scene('a') })), viewId: 'v1', selection: new Set(), finalPlan: null, notice: null, ...over });
+const plan = (versionId: string) => ({ plan: { versionId } });
+/** set(patch) as store.ts does it. */
+const rule = (prev: RuleState, patch: Partial<RuleState>) => applyRules(prev, { ...prev, ...patch }, patch);
+await check('state-rules: switching to another loaded version drops selected objects it does not have', () => {
+  const next = rule(rs({ selection: new Set(['a', 'b']) }), { viewId: 'v2' });
+  assert.deepEqual([...next.selection], ['a']);
+});
+await check('state-rules: new data under the same view drops selected objects that are gone', () => {
+  const prev = rs({ selection: new Set(['a', 'b']) });
+  const next = rule(prev, { data: ruleData(ver('v1', { scene: scene('a') })) });
+  assert.deepEqual([...next.selection], ['a']);
+});
+/** Viewing v2, whose scene has an object HEAD (v1) lacks, with that object selected and v2's final plan open. */
+const onV2 = () => rs({ data: ruleData(ver('v1', { scene: scene('a') }), ver('v2', { parent: 'v1', scene: scene('a', 'b') })), viewId: 'v2', selection: new Set(['a', 'b']), finalPlan: plan('v2') });
+await check('state-rules: a view id not loaded yet keeps the selection (HEAD shown meanwhile does not prune it)', () => {
+  assert.deepEqual([...rule(onV2(), { viewId: 'v9' }).selection], ['a', 'b']);
+});
+await check('state-rules: a patch that changes neither data nor view id does not prune the selection', () => {
+  const next = rule(rs({ viewId: 'v2' }), { selection: new Set(['a', 'b']) });
+  assert.deepEqual([...next.selection], ['a', 'b']);
+});
+await check('state-rules: switching to another loaded version closes the final plan', () => {
+  assert.equal(rule(rs({ finalPlan: plan('v1') }), { viewId: 'v2' }).finalPlan, null);
+});
+await check('state-rules: staying on the same version keeps the final plan', () => {
+  const fp = plan('v1');
+  assert.equal(rule(rs({ finalPlan: fp }), { data: ruleData(ver('v1', { scene: scene('a', 'b') })) }).finalPlan, fp);
+});
+await check('state-rules: switching to a version not loaded yet keeps the final plan', () => {
+  const prev = onV2();
+  assert.equal(rule(prev, { viewId: 'v9' }).finalPlan, prev.finalPlan);
+});
+const noticed = () => rs({ data: ruleData(ver('v1'), ver('p1', { parent: 'v1', status: 'proposed' })), notice: 'p1' });
+await check('state-rules: viewing the announced proposal ends the notice', () => {
+  assert.equal(rule(noticed(), { viewId: 'p1' }).notice, null);
+});
+await check('state-rules: the announced version no longer being a proposal ends the notice', () => {
+  assert.equal(rule(noticed(), { data: ruleData(ver('v1'), ver('p1', { parent: 'v1', status: 'accepted' })) }).notice, null);
+});
+await check('state-rules: an unrelated patch keeps the notice while another version is on screen and it is still a proposal', () => {
+  assert.equal(rule(noticed(), { selection: new Set(['a']) }).notice, 'p1');
+});
+await check('state-rules: new data with the announced version still proposed keeps the notice', () => {
+  assert.equal(rule(noticed(), { data: ruleData(ver('v1'), ver('p1', { parent: 'v1', status: 'proposed' })) }).notice, 'p1');
+});
+await check('state-rules: a patch that sets notice keeps it', () => {
+  assert.equal(rule(rs({ data: ruleData(ver('v1'), ver('p1', { parent: 'v1', status: 'proposed' })), viewId: 'p1' }), { notice: 'p1' }).notice, 'p1');
 });
 
 // ---------- canvas-colors ----------
